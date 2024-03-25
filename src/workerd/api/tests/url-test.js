@@ -9780,5 +9780,7 @@ export const urlParseStatic = {
     strictEqual(url2.protocol, 'http:');
     strictEqual(url2.host, 'example.org');
     strictEqual(url2.pathname, '/foo');
+
+    strictEqual(URL.parse('not valid'), null);
   }
 };
