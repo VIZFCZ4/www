@@ -12,6 +12,7 @@ import {
   maybeSetupSnapshotUpload,
   restoreSnapshot,
 } from "pyodide-internal:snapshot";
+import { default as randomPatchBuffer } from "pyodide-internal:patches/random.py";
 
 /**
  * This file is a simplified version of the Pyodide loader:
@@ -206,5 +207,19 @@ export async function loadPyodide(lockfile, indexURL) {
   await enterJaegerSpan("finalize_bootstrap", Module.API.finalizeBootstrap);
   const pyodide = Module.API.public_api;
   finishSnapshotSetup(pyodide);
+  pyodide.runPython(`
+    def _tmp(modStr):
+      from types import ModuleType
+      module = ModuleType("random")
+      exec(modStr, module.__dict__)
+      import sys
+      sys.modules["random"] = module
+  `);
+  const initRandom = pyodide.globals.pop("_tmp");
+  const randomPatch = new TextDecoder().decode(
+    new Uint8Array(randomPatchBuffer),
+  );
+  initRandom(randomPatch);
+  initRandom.destroy();
   return pyodide;
 }

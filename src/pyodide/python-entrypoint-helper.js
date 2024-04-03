@@ -136,16 +136,17 @@ function reseedRandom(pyodide) {
   }
   isSeeded = true;
   pyodide.runPython(`
-    from random import seed
-    seed()
-    del seed
+    from random import _init
+    _init()
+    del _init
   `);
 }
 
 async function preparePython() {
   const pyodide = await getPyodide();
+  const mainModule = await getMainModule();
   reseedRandom(pyodide);
-  return await getMainModule();
+  return mainModule;
 }
 
 function makeHandler(pyHandlerName) {
