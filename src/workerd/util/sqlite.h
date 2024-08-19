@@ -36,6 +36,13 @@ public:
   class Regulator;
   struct VfsOptions;
 
+  struct IngestResult {
+    kj::StringPtr remainder;
+    uint64_t rowsRead;
+    uint64_t rowsWritten;
+    uint64_t statementCount;
+  };
+
   SqliteDatabase(const Vfs& vfs, kj::PathPtr path, kj::Maybe<kj::WriteMode> maybeMode = kj::none);
   ~SqliteDatabase() noexcept(false);
   KJ_DISALLOW_COPY_AND_MOVE(SqliteDatabase);
@@ -56,7 +63,7 @@ public:
   // except:
   // - It may be more efficient for one-off use caes.
   // - The code can include multiple statements, separated by semicolons. The bindings and returned
-  //   `Query` object are both associated with the last statement. This is particulary convenient
+  //   `Query` object are both associated with the last statement. This is particularly convenient
   //   for doing database initialization such as creating several tables at once.
   template <typename... Params>
   Query run(Regulator& regulator, kj::StringPtr sqlCode, Params&&... bindings);
@@ -92,7 +99,10 @@ public:
   // Helper to execute a chunk of SQL that may not be complete.
   // Executes every valid statement provided, and returns the remaining portion of the input
   // that was not processed. This is used for streaming SQL ingestion.
-  kj::StringPtr ingestSql(Regulator& regulator, kj::StringPtr sqlCode);
+  IngestResult ingestSql(Regulator& regulator, kj::StringPtr sqlCode);
+
+  // Execute a function with the given regulator.
+  void executeWithRegulator(Regulator& regulator, kj::FunctionParam<void()> func);
 
 private:
   sqlite3* db;
@@ -473,7 +483,7 @@ public:
 //
 // When using a Vfs based on a regular disk directory, this class isn't used; instead, SQLite's
 // native implementation kicks in, which is based on advisory file locks at the OS level, as well
-// as mmaped shared memory from a file next to the database with suffix `-shm`.
+// as mmapped shared memory from a file next to the database with suffix `-shm`.
 class SqliteDatabase::Lock {
 public:
   // The main database can be locked at one of these levels.
@@ -556,6 +566,11 @@ public:
 
   // There are exactly this many WAL-mode locks.
   static constexpr uint WAL_LOCK_COUNT = 8;
+
+  // Lock names as defined by https://www.sqlite.org/walformat.html#wal_locks
+  static constexpr uint WAL_WRITE_LOCK = 0;
+  static constexpr uint WAL_CKPT_LOCK = 1;
+  static constexpr uint WAL_RECOVER_LOCK = 2;
 
   // SQLite sets aside bytes [120, 128) of the first shared memory region for use by the WAL locking
   // implementation. SQLite will never touch these bytes. This may or may not be needed by your

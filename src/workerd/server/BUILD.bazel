@@ -1,5 +1,6 @@
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("//:build/kj_test.bzl", "kj_test")
 load("//:build/wd_cc_binary.bzl", "wd_cc_binary")
 load("//:build/wd_cc_capnp_library.bzl", "wd_cc_capnp_library")
@@ -50,10 +51,10 @@ wd_cc_binary(
         ":server",
         ":workerd-meta_capnp",
         ":workerd_capnp",
+        "//src/pyodide:pyodide_extra_capnp",
         "//src/workerd/util:autogate",
         "//src/workerd/util:perfetto",
         "@capnp-cpp//src/capnp:capnpc",
-        "//src/pyodide:pyodide_extra_capnp",
     ] + select({
         "@platforms//os:windows": [],
         "//conditions:default": ["@workerd//src/workerd/util:symbolizer"],
@@ -72,8 +73,26 @@ wd_cc_library(
     deps = [
         "//src/workerd/io",
         "//src/workerd/util:sqlite",
-        "@capnp-cpp//src/kj:kj",
+        "@capnp-cpp//src/kj",
         "@capnp-cpp//src/kj:kj-async",
+    ],
+)
+
+wd_cc_library(
+    name = "actor-id-impl",
+    srcs = [
+        "actor-id-impl.c++",
+    ],
+    hdrs = [
+        "actor-id-impl.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/workerd/io:actor-id",
+        "//src/workerd/jsg:exception",
+        "//src/workerd/util:thread-scopes",
+        "@capnp-cpp//src/kj:kj",
+        "@ssl",
     ],
 )
 
@@ -95,14 +114,18 @@ wd_cc_library(
     }),
     visibility = ["//visibility:public"],
     deps = [
+        ":actor-id-impl",
         ":alarm-scheduler",
         ":workerd_capnp",
         "//src/workerd/api:html-rewriter",
         "//src/workerd/api:pyodide",
         "//src/workerd/api:rtti",
         "//src/workerd/io",
+        "//src/workerd/io:worker-entrypoint",
         "//src/workerd/jsg",
         "//src/workerd/util:perfetto",
+        "@capnp-cpp//src/kj/compat:kj-tls",
+        "//src/workerd/api/node"
     ],
 )
 
@@ -122,10 +145,47 @@ wd_cc_capnp_library(
     ],
 )
 
-[kj_test(
-    src = f,
+sh_test(
+    name = "helloworld_compile_test",
+    size = "small",
+    srcs = ["tests/compile-tests/compile-test.sh"],
+    args = [
+        "$(location :workerd)",
+        "$(location //samples:helloworld/config.capnp)",
+        "$(location tests/compile-tests/compile-helloworld-test.ok)",
+    ],
+    data = [
+        "tests/compile-tests/compile-helloworld-test.ok",
+        ":workerd",
+        "//samples:helloworld/config.capnp",
+        "//samples:helloworld/worker.js",
+    ],
+    tags = ["no-qemu"],
+)
+
+kj_test(
+    src = "server-test.c++",
     deps = [
         ":server",
         "//src/workerd/util:test-util",
     ],
-) for f in glob(["*-test.c++"])]
+)
+
+kj_test(
+    src = "actor-id-impl-test.c++",
+    deps = [
+        ":actor-id-impl",
+        "//src/workerd/jsg:exception",
+        "//src/workerd/util:thread-scopes",
+        "@capnp-cpp//src/kj",
+        "@ssl",
+    ],
+)
+
+
+copy_file(
+    name = "pyodide.capnp.bin@rule",
+    src = "//src/pyodide:pyodide.capnp.bin@rule",
+    out = "pyodide.capnp.bin",
+)
+

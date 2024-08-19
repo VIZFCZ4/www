@@ -11,9 +11,6 @@ export const tests = {
             const resp = await env.ai.run('testModel', {prompt: 'test'})
             assert.deepStrictEqual(resp, { response: 'model response' });
 
-            // Test logs is empty
-            assert.deepStrictEqual(env.ai.getLogs(), []);
-
             // Test request id is present
             assert.deepStrictEqual(env.ai.lastRequestId, '3a1983d7-1ddd-453a-ab75-c4358c91b582');
         }
@@ -22,12 +19,6 @@ export const tests = {
             // Test ai blob model run response is a blob/stream
             const resp = await env.ai.run('blobResponseModel', {prompt: 'test'})
             assert.deepStrictEqual(resp instanceof ReadableStream, true);
-        }
-
-        {
-            // Test logs
-            await env.ai.run('testModel', {prompt: 'test'}, {debug: true})
-            assert.deepStrictEqual(env.ai.getLogs(),  [ 'Model started', 'Model run successfully' ]);
         }
 
         {
@@ -41,6 +32,60 @@ export const tests = {
                 })
             })
             assert.deepStrictEqual(await resp.json(),  { response: 'model response' });
+        }
+
+        {
+            // Test error response
+            try {
+                await env.ai.run('inputErrorModel', {prompt: 'test'})
+            } catch(e) {
+                assert.deepEqual({
+                    name: e.name, message: e.message
+                }, {
+                  name: 'InvalidInput',
+                  message: '1001: prompt and messages are mutually exclusive',
+                })
+            }
+        }
+
+        {
+            // Test error properties
+            const err = await env.ai._parseError(Response.json({
+                internalCode: 1001,
+                message: "InvalidInput: prompt and messages are mutually exclusive",
+                name: "InvalidInput",
+                description: "prompt and messages are mutually exclusive"
+            }))
+            assert.equal(err.name, 'InvalidInput')
+            assert.equal(err.message, '1001: prompt and messages are mutually exclusive')
+        }
+
+        {
+            // Test error properties from non json response
+            const err = await env.ai._parseError(new Response("Unknown error"))
+            assert.equal(err.name, 'InferenceUpstreamError')
+            assert.equal(err.message, 'Unknown error')
+        }
+
+        {
+            // Test raw input
+            const resp = await env.ai.run('rawInputs', {prompt: 'test'})
+
+            assert.deepStrictEqual(resp, { inputs: {prompt: 'test'}, options: {} });
+        }
+
+        {
+            // Test gateway option
+            const resp = await env.ai.run('rawInputs', {prompt: 'test'}, {gateway: {id: 'my-gateway', skipCache: true}})
+
+            assert.deepStrictEqual(resp, { inputs: {prompt: 'test'}, options: {gateway: {id: 'my-gateway', skipCache: true}}});
+        }
+
+        {
+            // Test unwanted options not getting sent upstream
+            const resp = await env.ai.run('rawInputs', {prompt: 'test'}, {extraHeaders: 'test', example: 123, gateway: {id: 'my-gateway', metadata: { "employee": 1233}}})
+
+            assert.deepStrictEqual(resp, { inputs: {prompt: 'test'}, options: {example: 123, gateway: {id: 'my-gateway', metadata: { "employee": 1233}}} });
         }
     },
 }

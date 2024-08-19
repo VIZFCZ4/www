@@ -1,11 +1,29 @@
 #include "pyodide.h"
 #include <kj/string.h>
 #include <workerd/util/string-buffer.h>
-#include "kj/array.h"
-#include "kj/common.h"
-#include "kj/debug.h"
+#include <kj/array.h>
+#include <kj/common.h>
+#include <kj/debug.h>
 
 namespace workerd::api::pyodide {
+
+// singleton that owns bundle
+
+const kj::Maybe<jsg::Bundle::Reader> PyodideBundleManager::getPyodideBundle(kj::StringPtr version) const {
+  KJ_IF_SOME(t, bundles.lockShared()->find(version)) {
+    return t.bundle;
+  }
+  return kj::none;
+}
+
+void PyodideBundleManager::setPyodideBundleData(kj::String version, kj::Array<unsigned char> data) const {
+  auto wordArray = kj::arrayPtr(reinterpret_cast<const capnp::word*>(data.begin()),
+                                data.size() / sizeof(capnp::word));
+  auto messageReader = kj::heap<capnp::FlatArrayMessageReader>(wordArray).attach(kj::mv(data));
+  auto bundle = messageReader->getRoot<jsg::Bundle>();
+  bundles.lockExclusive()->insert(kj::mv(version),
+                                  {.messageReader = kj::mv(messageReader), .bundle = bundle});
+}
 
 static int readToTarget(kj::ArrayPtr<const kj::byte> source, int offset, kj::ArrayPtr<kj::byte> buf) {
   int size = source.size();
@@ -70,7 +88,7 @@ int ArtifactBundler::readMemorySnapshot(int offset, kj::Array<kj::byte> buf) {
   return readToTarget(KJ_REQUIRE_NONNULL(existingSnapshot), offset, buf);
 }
 
-jsg::Ref<PyodideMetadataReader> makePyodideMetadataReader(Worker::Reader conf) {
+jsg::Ref<PyodideMetadataReader> makePyodideMetadataReader(Worker::Reader conf, const PythonConfig& pythonConfig) {
   auto modules = conf.getModules();
   auto mainModule = kj::str(modules.begin()->getName());
   int numFiles = 0;
@@ -117,9 +135,22 @@ jsg::Ref<PyodideMetadataReader> makePyodideMetadataReader(Worker::Reader conf) {
     }
     names.add(kj::str(module.getName()));
   }
-  return jsg::alloc<PyodideMetadataReader>(kj::mv(mainModule), names.finish(), contents.finish(),
-                                           requirements.finish(), true /* isWorkerd */,
-                                           false /* isTracing */, false /* createBaselineSnapshot */, kj::none /* memorySnapshot */);
+  bool createSnapshot = pythonConfig.createSnapshot;
+  bool createBaselineSnapshot = pythonConfig.createBaselineSnapshot;
+  bool snapshotToDisk = createSnapshot || createBaselineSnapshot;
+  // clang-format off
+  return jsg::alloc<PyodideMetadataReader>(
+    kj::mv(mainModule),
+    names.finish(),
+    contents.finish(),
+    requirements.finish(),
+    true      /* isWorkerd */,
+    false     /* isTracing */,
+    snapshotToDisk,
+    createBaselineSnapshot,
+    kj::none  /* memorySnapshot */
+  );
+  // clang-format on
 }
 
 const kj::Maybe<kj::Own<const kj::Directory>> DiskCache::NULL_CACHE_ROOT = kj::none;
@@ -152,6 +183,15 @@ void DiskCache::put(jsg::Lock& js, kj::String key, kj::Array<kj::byte> data) {
   } else {
     return;
   }
+}
+
+bool hasPythonModules(capnp::List<server::config::Worker::Module>::Reader modules) {
+  for (auto module: modules) {
+    if (module.isPythonModule()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace workerd::api::pyodide

@@ -7,12 +7,13 @@
 #include "r2-rpc.h"
 #include "util.h"
 #include <array>
-#include <math.h>
+#include <cmath>
 #include <workerd/api/http.h>
 #include <workerd/api/streams.h>
 #include <workerd/util/mimetype.h>
 #include <kj/encoding.h>
 #include <kj/compat/http.h>
+#include <capnp/message.h>
 #include <capnp/compat/json.h>
 #include <workerd/util/http-util.h>
 #include <workerd/api/r2-api.capnp.h>
@@ -38,6 +39,18 @@ enum class OptionalMetadata: uint16_t {
   Http = static_cast<uint8_t>(R2ListRequest::IncludeField::HTTP),
   Custom = static_cast<uint8_t>(R2ListRequest::IncludeField::CUSTOM),
 };
+
+
+namespace {
+void logIfMismatchedChecksumLength(
+    size_t expectedLength, capnp::Data::Reader checksum, R2HeadResponse::Reader responseReader) {
+  if (checksum.size() != expectedLength) {
+    KJ_LOG(WARNING, "NOSENTRY Checksum is of unexpected length",
+      expectedLength, checksum.size(), responseReader.getName(), responseReader.getVersion()
+    );
+  }
+}
+}
 
 template <typename T>
 concept HeadResultT = std::is_base_of_v<R2Bucket::HeadResult, T>;
@@ -113,26 +126,36 @@ static jsg::Ref<T> parseObjectMetadata(R2HeadResponse::Reader responseReader,
   if (responseReader.hasChecksums()) {
     R2Checksums::Reader checksumsBuilder = responseReader.getChecksums();
     if (checksumsBuilder.hasMd5()) {
-      checksums->md5 = kj::heapArray(checksumsBuilder.getMd5());
+      auto md5 = checksumsBuilder.getMd5();
+      logIfMismatchedChecksumLength(16, md5, responseReader);
+      checksums->md5 = kj::heapArray(md5);
     }
     if (checksumsBuilder.hasSha1()) {
-      checksums->sha1 = kj::heapArray(checksumsBuilder.getSha1());
+      auto sha1 = checksumsBuilder.getSha1();
+      logIfMismatchedChecksumLength(20, sha1, responseReader);
+      checksums->sha1 = kj::heapArray(sha1);
     }
     if (checksumsBuilder.hasSha256()) {
-      checksums->sha256 = kj::heapArray(checksumsBuilder.getSha256());
+      auto sha256 = checksumsBuilder.getSha256();
+      logIfMismatchedChecksumLength(32, sha256, responseReader);
+      checksums->sha256 = kj::heapArray(sha256);
     }
     if (checksumsBuilder.hasSha384()) {
-      checksums->sha384 = kj::heapArray(checksumsBuilder.getSha384());
+      auto sha384 = checksumsBuilder.getSha384();
+      logIfMismatchedChecksumLength(48, sha384, responseReader);
+      checksums->sha384 = kj::heapArray(sha384);
     }
     if (checksumsBuilder.hasSha512()) {
-      checksums->sha512 = kj::heapArray(checksumsBuilder.getSha512());
+      auto sha512 = checksumsBuilder.getSha512();
+      logIfMismatchedChecksumLength(64, sha512, responseReader);
+      checksums->sha512 = kj::heapArray(sha512);
     }
   }
 
   return jsg::alloc<T>(kj::str(responseReader.getName()),
       kj::str(responseReader.getVersion()), responseReader.getSize(),
       kj::str(responseReader.getEtag()), kj::mv(checksums), uploaded, kj::mv(httpMetadata),
-      kj::mv(customMetadata), range, kj::fwd<Args>(args)...);
+      kj::mv(customMetadata), range, kj::str(responseReader.getStorageClass()), kj::fwd<Args>(args)...);
 }
 
 template <HeadResultT T, typename... Args>
@@ -525,6 +548,9 @@ R2Bucket::put(jsg::Lock& js, kj::String name, kj::Maybe<R2PutValue> value,
           }
         }
       }
+      KJ_IF_SOME(s, o.storageClass) {
+        putBuilder.setStorageClass(s);
+      }
     }
 
     auto requestJson = json.encode(requestBuilder);
@@ -612,6 +638,9 @@ jsg::Promise<jsg::Ref<R2MultipartUpload>> R2Bucket::createMultipartUpload(jsg::L
         KJ_IF_SOME(ce, httpMetadata.cacheExpiry) {
           fields.setCacheExpiry((ce - kj::UNIX_EPOCH) / kj::MILLISECONDS);
         }
+      }
+      KJ_IF_SOME(s, o.storageClass) {
+        createMultipartUploadBuilder.setStorageClass(s);
       }
     }
 
@@ -840,8 +869,27 @@ kj::Array<R2Bucket::Etag> parseConditionalEtagHeader(
     // which just results in an empty list if it's out of bounds by 1.
     return parseConditionalEtagHeader(condHeader.slice(nextComma + 1), kj::mv(etagAccumulator));
   } else if (leadingCommaRequired) {
-  // Did not find a leading comma, and we expected a leading comma before any further etags
-    JSG_FAIL_REQUIRE(Error, "Comma was expected to separate etags");
+    // we don't need to include nextComma in this min check since in this else branch nextComma is
+    // always larger than at least one of nextWildcard, nextQuotation and nextWeak
+    size_t firstEncounteredProblem = std::min({nextWildcard, nextQuotation, nextWeak});
+
+    kj::String failureReason;
+    if (firstEncounteredProblem == nextWildcard) {
+      failureReason = kj::str("Encountered a wildcard character '*' instead.");
+    } else if (firstEncounteredProblem == nextQuotation) {
+      failureReason = kj::str(
+        "Encountered a double quote character '\"' instead. "
+        "This would otherwise indicate the start of a new strong etag.");
+    } else if (firstEncounteredProblem == nextWeak) {
+      failureReason = kj::str(
+        "Encountered a weak quotation character 'W' instead. "
+        "This would otherwise indicate the start of a new weak etag.");
+    } else {
+      KJ_FAIL_ASSERT("We shouldn't be able to reach this point. The above etag parsing code is incorrect.");
+    }
+
+    // Did not find a leading comma, and we expected a leading comma before any further etags
+    JSG_FAIL_REQUIRE(Error, "Comma was expected to separate etags. ", failureReason);
   }
 
   if (nextWildcard < nextQuotation) {
@@ -1045,7 +1093,7 @@ jsg::Promise<jsg::Ref<Blob>> R2Bucket::GetResult::blob(jsg::Lock& js) {
     kj::String contentType = KJ_REQUIRE_NONNULL(httpMetadata).contentType
         .map([](const auto& str) { return kj::str(str); })
         .orDefault(nullptr);
-    return jsg::alloc<Blob>(kj::mv(buffer), kj::mv(contentType));
+    return jsg::alloc<Blob>(js, kj::mv(buffer), kj::mv(contentType));
   });
 }
 

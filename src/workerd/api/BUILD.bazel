@@ -10,6 +10,7 @@ filegroup(
             ["**/*.c++"],
             exclude = [
                 "html-rewriter.c++",
+                "data-url.c++",
                 "rtti.c++",
                 "**/*test*.c++",
                 "pyodide.c++",
@@ -20,6 +21,7 @@ filegroup(
             ["**/*.c++"],
             exclude = [
                 "html-rewriter.c++",
+                "data-url.c++",
                 "rtti.c++",
                 "**/*test*.c++",
                 "pyodide.c++",
@@ -31,29 +33,25 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+api_header_exclusions = [
+    "html-rewriter.h",
+    "deferred-proxy.h",
+    "data-url.h",
+    "modules.h",
+    "rtti.h",
+    "**/*test*.h",
+]
+
 filegroup(
     name = "hdrs",
     srcs = select({
         "//src/workerd/io:set_enable_experimental_webgpu": glob(
             ["**/*.h"],
-            exclude = [
-                "html-rewriter.h",
-                "modules.h",
-                "rtti.h",
-                "**/*test*.h",
-                "pyodide.h",
-            ],
+            exclude = api_header_exclusions,
         ),
         "//conditions:default": glob(
             ["**/*.h"],
-            exclude = [
-                "html-rewriter.h",
-                "modules.h",
-                "rtti.h",
-                "**/*test*.h",
-                "pyodide.h",
-                "gpu/*.h",
-            ],
+            exclude = api_header_exclusions + ["gpu/*.h"],
         ),
     }),
     visibility = ["//visibility:public"],
@@ -76,6 +74,7 @@ wd_cc_library(
         "//src/workerd/io",
         "//src/workerd/jsg:rtti",
         "//src/workerd/server:workerd_capnp",
+        "//src/workerd/api/node",
     ],
 )
 
@@ -97,11 +96,9 @@ wd_cc_library(
 wd_cc_library(
     name = "pyodide",
     srcs = [
-        "pyodide.c++",
         "pyodide/pyodide.c++",
     ],
     hdrs = [
-        "pyodide.h",
         "pyodide/pyodide.h",
         "//src/pyodide:generated/pyodide_extra.capnp.h",
     ],
@@ -112,7 +109,28 @@ wd_cc_library(
         "//src/workerd/io",
         "//src/workerd/jsg",
         "//src/workerd/server:workerd_capnp",
-        "//src/workerd/util:autogate",
+    ],
+)
+
+wd_cc_library(
+    name = "data-url",
+    srcs = ["data-url.c++"],
+    hdrs = ["data-url.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/workerd/jsg:url",
+        "//src/workerd/util",
+        "@capnp-cpp//src/kj",
+    ],
+)
+
+wd_cc_library(
+    name = "deferred-proxy",
+    hdrs = ["deferred-proxy.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@capnp-cpp//src/kj",
+        "@capnp-cpp//src/kj:kj-async",
     ],
 )
 
@@ -133,16 +151,30 @@ wd_cc_capnp_library(
     deps = [
         "//src/workerd/io",
     ],
-) for f in glob(
-    ["**/*-test.c++"],
-    exclude = [
-        "api-rtti-test.c++",
-        "actor-state-iocontext-test.c++",
-        "cf-property-test.c++",
-        "node/*-test.c++",
-        "streams/internal-test.c++",
+) for f in [
+    "actor-state-test.c++",
+    "basics-test.c++",
+    "crypto/aes-test.c++",
+    "crypto/impl-test.c++",
+    "streams/queue-test.c++",
+    "streams/standard-test.c++",
+    "util-test.c++",
+    ]
+]
+
+kj_test(
+    src = "data-url-test.c++",
+    deps = [
+        ":data-url",
     ],
-)]
+)
+
+kj_test(
+    src = "deferred-proxy-test.c++",
+    deps = [
+        ":deferred-proxy",
+    ],
+)
 
 kj_test(
     src = "streams/internal-test.c++",
@@ -158,11 +190,6 @@ kj_test(
         "//src/workerd/io",
         "//src/workerd/tests:test-fixture",
     ],
-)
-
-kj_test(
-    src = "node/buffer-test.c++",
-    deps = ["//src/workerd/tests:test-fixture"],
 )
 
 kj_test(
@@ -195,6 +222,14 @@ wd_test(
     args = ["--experimental", "--no-verbose"],
     data = ["tests/js-rpc-test.js"],
 )
+
+[wd_test(
+    src = f,
+    data = [f.removesuffix(".ts-wd-test") + ".ts"],
+    args = ["--experimental"],
+) for f in glob(
+    ["**/*.ts-wd-test"],
+)]
 
 # Enable GPU tests if experimental GPU support is enabled. Unfortunately, this depends on the right
 # drivers being available on Linux and macOS, so turn it off by default. Run GPU tests with

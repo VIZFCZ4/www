@@ -5,6 +5,7 @@
 #pragma once
 // Classes to manage lifetime of workers, scripts, and isolates.
 
+#include <workerd/util/xthreadnotifier.h>
 #include <workerd/io/worker-interface.h>
 #include <workerd/io/limit-enforcer.h>
 #include <kj/compat/http.h>
@@ -74,6 +75,10 @@ public:
   public:
     virtual void addError(kj::String error) = 0;
     virtual void addHandler(kj::Maybe<kj::StringPtr> exportName, kj::StringPtr type) = 0;
+
+    // Called when an export is encountered that defines no handlers, thus isn't useful for
+    // anything.
+    virtual void addEmptyExport(kj::Maybe<kj::StringPtr> exportName) {}
   };
 
   class LockType;
@@ -92,7 +97,8 @@ public:
                       v8::Local<v8::Object> target)> compileBindings,
                   IsolateObserver::StartType startType,
                   SpanParent parentSpan, LockType lockType,
-                  kj::Maybe<ValidationErrorReporter&> errorReporter = kj::none);
+                  kj::Maybe<ValidationErrorReporter&> errorReporter = kj::none,
+                  kj::Maybe<kj::Duration&> startupTime = kj::none);
   // `compileBindings()` is a callback that constructs all of the bindings and adds them as
   // properties to `target`.
 
@@ -282,6 +288,17 @@ public:
   uint getLockSuccessCount() const;
 
   // Accepts a connection to the V8 inspector and handles requests until the client disconnects.
+  // Also adds a special JSON value to the header identified by `controlHeaderId`, for compatibility
+  // with internal Cloudflare systems.
+  //
+  // This overload will dispatch all inspector messages on the _calling thread's_ `kj::Executor`.
+  // When linked against vanilla V8, this means that CPU profiling will only profile JavaScript
+  // running on the _calling thread_, which will most likely only be inspector console commands, and
+  // is not typically desired.
+  //
+  // For the above reason , this overload is curently only suitable for use by the internal Workers
+  // Runtime codebase, which patches V8 to profile whichever thread currently holds the `v8::Locker`
+  // for this Isolate.
   kj::Promise<void> attachInspector(
       kj::Timer& timer,
       kj::Duration timerOffset,
@@ -289,7 +306,13 @@ public:
       const kj::HttpHeaderTable& headerTable,
       kj::HttpHeaderId controlHeaderId) const;
 
+  // Accepts a connection to the V8 inspector and handles requests until the client disconnects.
+  //
+  // This overload will dispatch all inspector messages on the `kj::Executor` passed in via
+  // `isolateThreadExecutorNotifierPair`. For CPU profiling to work as expected, this `kj::Executor`
+  // must be associated with the same thread which executes the Worker's JavaScript.
   kj::Promise<void> attachInspector(
+      ExecutorNotifierPair isolateThreadExecutorNotifierPair,
       kj::Timer& timer,
       kj::Duration timerOffset,
       kj::WebSocket& webSocket) const;
@@ -435,6 +458,9 @@ public:
 
     // Class constructor for DurableObject (aka api::DurableObjectBase).
     jsg::JsObject durableObject;
+
+    // Class constructor for Workflow.
+    jsg::JsObject workflow;
   };
 
   // Get the constructors for classes from which entrypoint classes may inherit.
@@ -474,7 +500,8 @@ public:
           kj::StringPtr,
           kj::Maybe<kj::String>,
           jsg::CompilationObserver&,
-          jsg::ModuleRegistry::ResolveMethod);
+          jsg::ModuleRegistry::ResolveMethod,
+          kj::Maybe<kj::StringPtr>);
   virtual void setModuleFallbackCallback(
       kj::Function<ModuleFallbackCallback>&& callback) const {
     // By default does nothing.
@@ -759,7 +786,7 @@ public:
 
   // Wait for `Date.now()` to be greater than or equal to `scheduledTime`. If the promise resolves
   // to an `AlarmFulfiller`, then the caller is responsible for invoking `fulfill()`, `reject()`, or
-  // `cancel()`. Otherwise, the scheduled alarm was overriden by another call to `scheduleAlarm()`
+  // `cancel()`. Otherwise, the scheduled alarm was overridden by another call to `scheduleAlarm()`
   // and thus was cancelled. Note that callers likely want to invoke `getAlarm()` first to see if
   // there is an existing alarm at `scheduledTime` for which they want to wait (instead of
   // cancelling it).

@@ -6,7 +6,9 @@
 
 #include <workerd/jsg/jsg.h>
 #include "basics.h"
+#include "events.h"
 #include "http.h"
+#include "eventsource.h"
 #include "hibernation-event-params.h"
 #include <workerd/io/io-timers.h>
 #ifdef WORKERD_EXPERIMENTAL_ENABLE_WEBGPU
@@ -310,6 +312,40 @@ struct ExportedHandler {
   }
 };
 
+// An approximation of Node.js setImmediate `Immediate` object.
+// This is used only when the `nodejs_compat_v2` compatibility flag is enabled.
+class Immediate final: public jsg::Object {
+public:
+  Immediate(IoContext& context, TimeoutId timeoutId);
+
+  // In Node.js, the "ref" mechanism refers to whether or not an i/o object
+  // will keep the libuv event loop alive (and therefore keep the process alive).
+  // We do not implement a similar mechanism in workerd. These are here only to
+  // satisfy the API contract for the `Immediate` object but are never expected
+  // to actually do anything.
+  bool hasRef() { return false; }
+  void ref() { /* non-op */ }
+  void unref() { /* non-op */ }
+
+  void dispose();
+
+  JSG_RESOURCE_TYPE(Immediate) {
+    JSG_METHOD(ref);
+    JSG_METHOD(unref);
+    JSG_METHOD(hasRef);
+    JSG_DISPOSE(dispose);
+  }
+
+private:
+  // On the off chance user code holds onto to the Ref<Immediate> longer than
+  // the IoContext remains alive, let's maintain just a weak reference to the
+  // IoContext here to avoid problems. This reference is used only for handling
+  // the dipose operation, so it should be perfectly fine for it to be weak
+  // and a non-op after the IoContext is gone.
+  kj::Own<IoContext::WeakRef> contextRef;
+  TimeoutId timeoutId;
+};
+
 // Global object API exposed to JavaScript.
 class ServiceWorkerGlobalScope: public WorkerGlobalScope {
 public:
@@ -451,6 +487,18 @@ public:
 
   jsg::Ref<CacheStorage> getCaches();
 
+  void reportError(jsg::Lock& js, jsg::JsValue error);
+
+  // When the nodejs_compat_v2 compatibility flag is enabled, we expose the Node.js
+  // compat Buffer and process at the global scope in all modules as lazy instance
+  // properties.
+  jsg::JsValue getBuffer(jsg::Lock& js);
+  jsg::JsValue getProcess(jsg::Lock& js);
+  jsg::Ref<Immediate> setImmediate(jsg::Lock& js,
+                                   jsg::Function<void(jsg::Arguments<jsg::Value>)> function,
+                                   jsg::Arguments<jsg::Value> args);
+  void clearImmediate(kj::Maybe<jsg::Ref<Immediate>> immediate);
+
   JSG_RESOURCE_TYPE(ServiceWorkerGlobalScope, CompatibilityFlags::Reader flags) {
     JSG_INHERIT(WorkerGlobalScope);
 
@@ -466,6 +514,7 @@ public:
     JSG_METHOD(clearInterval);
     JSG_METHOD(queueMicrotask);
     JSG_METHOD(structuredClone);
+    JSG_METHOD(reportError);
 
     JSG_METHOD(fetch);
 
@@ -513,12 +562,24 @@ public:
     JSG_NESTED_TYPE(TransformStream);
     JSG_NESTED_TYPE(ByteLengthQueuingStrategy);
     JSG_NESTED_TYPE(CountQueuingStrategy);
+    JSG_NESTED_TYPE(ErrorEvent);
+
+    JSG_NESTED_TYPE(EventSource);
 
     if (flags.getStreamsJavaScriptControllers()) {
       JSG_NESTED_TYPE(ReadableStreamBYOBRequest);
       JSG_NESTED_TYPE(ReadableStreamDefaultController);
       JSG_NESTED_TYPE(ReadableByteStreamController);
       JSG_NESTED_TYPE(WritableStreamDefaultController);
+      JSG_NESTED_TYPE(TransformStreamDefaultController);
+    }
+
+    if (flags.getNodeJsCompatV2()) {
+      JSG_LAZY_INSTANCE_PROPERTY(Buffer, getBuffer);
+      JSG_LAZY_INSTANCE_PROPERTY(process, getProcess);
+      JSG_LAZY_INSTANCE_PROPERTY(global, getSelf);
+      JSG_METHOD(setImmediate);
+      JSG_METHOD(clearImmediate);
     }
 
     JSG_NESTED_TYPE(CompressionStream);
@@ -741,6 +802,7 @@ private:
   api::PromiseRejectionEvent,                            \
   api::Navigator,                                        \
   api::Performance,                                      \
-  api::AlarmInvocationInfo
+  api::AlarmInvocationInfo,                              \
+  api::Immediate
 // The list of global-scope.h types that are added to worker.c++'s JSG_DECLARE_ISOLATE_TYPE
 }  // namespace workerd::api

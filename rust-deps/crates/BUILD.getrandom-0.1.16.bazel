@@ -11,15 +11,15 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-# licenses([
-#     "TODO",  # MIT OR Apache-2.0
-# ])
-
 rust_library(
     name = "getrandom",
-    srcs = glob(["**/*.rs"]),
+    srcs = glob(
+        include = ["**/*.rs"],
+        allow_empty = False,
+    ),
     compile_data = glob(
         include = ["**"],
+        allow_empty = True,
         exclude = [
             "**/* *",
             ".tmp_git_root/**/*",
@@ -50,24 +50,27 @@ rust_library(
         "@crates_vendor__getrandom-0.1.16//:build_script_build",
     ] + select({
         "@rules_rust//rust/platform:aarch64-apple-darwin": [
-            "@crates_vendor__libc-0.2.153//:libc",  # cfg(unix)
+            "@crates_vendor__libc-0.2.155//:libc",  # cfg(unix)
         ],
         "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
-            "@crates_vendor__libc-0.2.153//:libc",  # cfg(unix)
+            "@crates_vendor__libc-0.2.155//:libc",  # cfg(unix)
         ],
         "@rules_rust//rust/platform:x86_64-apple-darwin": [
-            "@crates_vendor__libc-0.2.153//:libc",  # cfg(unix)
+            "@crates_vendor__libc-0.2.155//:libc",  # cfg(unix)
         ],
         "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
-            "@crates_vendor__libc-0.2.153//:libc",  # cfg(unix)
+            "@crates_vendor__libc-0.2.155//:libc",  # cfg(unix)
         ],
         "//conditions:default": [],
     }),
 )
 
 cargo_build_script(
-    name = "getrandom_build_script",
-    srcs = glob(["**/*.rs"]),
+    name = "_bs",
+    srcs = glob(
+        include = ["**/*.rs"],
+        allow_empty = False,
+    ),
     crate_features = [
         "std",
     ],
@@ -75,6 +78,7 @@ cargo_build_script(
     crate_root = "build.rs",
     data = glob(
         include = ["**"],
+        allow_empty = True,
         exclude = [
             "**/* *",
             ".tmp_git_root/**/*",
@@ -85,6 +89,7 @@ cargo_build_script(
         ],
     ),
     edition = "2018",
+    pkg_name = "getrandom",
     rustc_flags = [
         "--cap-lints=allow",
     ],
@@ -101,6 +106,6 @@ cargo_build_script(
 
 alias(
     name = "build_script_build",
-    actual = "getrandom_build_script",
+    actual = ":_bs",
     tags = ["manual"],
 )

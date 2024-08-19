@@ -6,32 +6,51 @@ interface Fetcher {
   fetch: typeof fetch
 }
 
+interface AiError {
+  internalCode: number
+  message: string
+  name: string
+  description: string
+}
+
 export type SessionOptions = {  // Deprecated, do not use this
   extraHeaders?: object;
-};
+}
+
+export type GatewayOptions = {
+  id: string;
+  cacheTtl?: number
+  skipCache?: boolean
+  metadata?: Record<string, number | string | boolean | null | bigint>;
+}
 
 export type AiOptions = {
-  debug?: boolean;
+  gateway?: GatewayOptions;
+
   prefix?: string;
   extraHeaders?: object;
   /*
    * @deprecated this option is deprecated, do not use this
    */
   sessionOptions?: SessionOptions;
-};
+}
 
 export class InferenceUpstreamError extends Error {
-  public constructor(message: string) {
+  public constructor(message: string, name = "InferenceUpstreamError") {
     super(message);
-    this.name = "InferenceUpstreamError";
+    this.name = name;
   }
 }
 
 export class Ai {
   private readonly fetcher: Fetcher
 
-  private options: AiOptions = {};
+  /*
+   * @deprecated this option is deprecated, do not use this
+   */
+  // @ts-expect-error this option is deprecated, do not use this
   private logs: Array<string> = [];
+  private options: AiOptions = {};
   public lastRequestId: string | null = null;
 
   public constructor(fetcher: Fetcher) {
@@ -50,11 +69,12 @@ export class Ai {
     this.options = options;
     this.lastRequestId = "";
 
+    // This removes some unwanted options from getting sent in the body
+    const cleanedOptions = (({ prefix, extraHeaders, sessionOptions, ...object }): object => object)(this.options || {});
+
     const body = JSON.stringify({
       inputs,
-      options: {
-        debug: this.options?.debug,
-      },
+      options: cleanedOptions
     });
 
     const fetchOptions = {
@@ -64,40 +84,25 @@ export class Ai {
         ...(this.options?.sessionOptions?.extraHeaders || {}),
         ...(this.options?.extraHeaders || {}),
         "content-type": "application/json",
-        // 'content-encoding': 'gzip',
         "cf-consn-sdk-version": "2.0.0",
         "cf-consn-model-id": `${this.options.prefix ? `${this.options.prefix}:` : ""}${model}`,
       },
     };
 
-    const res = await this.fetcher.fetch("http://workers-binding.ai/run?version=2", fetchOptions);
+    const res = await this.fetcher.fetch("http://workers-binding.ai/run?version=3", fetchOptions);
 
     this.lastRequestId = res.headers.get("cf-ai-req-id");
 
     if (inputs['stream']) {
       if (!res.ok) {
-        throw new InferenceUpstreamError(await res.text());
+        throw await this._parseError(res)
       }
 
       return res.body;
+
     } else {
-      // load logs
-      if (this.options.debug) {
-        let parsedLogs: string[] = [];
-        try {
-          const logHeader = res.headers.get("cf-ai-logs")
-          if (logHeader) {
-            parsedLogs = (JSON.parse(atob(logHeader)) as string[]);
-          }
-        } catch {
-          /* empty */
-        }
-
-        this.logs = parsedLogs;
-      }
-
       if (!res.ok || !res.body) {
-        throw new InferenceUpstreamError(await res.text());
+        throw await this._parseError(res)
       }
 
       const contentType = res.headers.get("content-type");
@@ -110,9 +115,23 @@ export class Ai {
     }
   }
 
-  public getLogs(): Array<string> {
-    return this.logs;
-  }
+    /*
+     * @deprecated this method is deprecated, do not use this
+     */
+    public getLogs(): string[] {
+      return []
+    }
+
+    private async _parseError(res: Response): Promise<InferenceUpstreamError> {
+      const content = await res.text()
+
+      try {
+        const parsedContent = (JSON.parse(content)) as AiError
+        return new InferenceUpstreamError(`${parsedContent.internalCode}: ${parsedContent.description}`, parsedContent.name);
+      } catch {
+        return new InferenceUpstreamError(content);
+      }
+    }
 }
 
 export default function makeBinding(env: { fetcher: Fetcher }): Ai {

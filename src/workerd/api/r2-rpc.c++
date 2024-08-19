@@ -10,6 +10,7 @@
 // This is imported for the error type and that's shared between internal and public beta.
 
 #include <kj/compat/http.h>
+#include <capnp/message.h>
 #include <capnp/compat/json.h>
 
 namespace workerd::api {
@@ -206,19 +207,19 @@ kj::Promise<R2Result> doR2HTTPPutRequest(kj::Own<kj::HttpClient> client,
 
   auto request = client->request(kj::HttpMethod::PUT, url, headers, combinedSize);
 
-  co_await request.body->write(metadataPayload.begin(), metadataPayload.size());
+  co_await request.body->write(metadataPayload.asBytes());
 
   KJ_IF_SOME(b, supportedBody) {
     KJ_SWITCH_ONEOF(b) {
       KJ_CASE_ONEOF(text, jsg::NonCoercible<kj::String>) {
-        co_await request.body->write(text.value.begin(), text.value.size());
+        co_await request.body->write(text.value.asBytes());
       }
       KJ_CASE_ONEOF(data, kj::Array<byte>) {
-        co_await request.body->write(data.begin(), data.size());
+        co_await request.body->write(data);
       }
       KJ_CASE_ONEOF(blob, jsg::Ref<Blob>) {
         auto data = blob->getData();
-        co_await request.body->write(data.begin(), data.size());
+        co_await request.body->write(data);
       }
       KJ_CASE_ONEOF(stream, jsg::Ref<ReadableStream>) {
         // Because the ReadableStream might be a fully JavaScript-backed stream, we must

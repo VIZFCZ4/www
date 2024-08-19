@@ -131,10 +131,35 @@ export class EventEmitterAsyncResource extends EventEmitter {
   }
 }
 
+export function addAbortListener(signal : AbortSignal, listener : any) {
+  if (signal === undefined) {
+    throw new ERR_INVALID_ARG_TYPE("signal", "AbortSignal", signal);
+  }
+  validateAbortSignal(signal, 'signal');
+  validateFunction(listener, 'listener');
+
+  let removeEventListener : Function;
+  if (signal.aborted) {
+    queueMicrotask(() => listener());
+  } else {
+    signal.addEventListener('abort', listener, { once: true });
+    removeEventListener = () => {
+      signal.removeEventListener('abort', listener);
+    };
+  }
+  return {
+    __proto__: null,
+    [Symbol.dispose]() {
+      removeEventListener?.();
+    },
+  };
+}
+
 export default EventEmitter;
 EventEmitter.on = on;
 EventEmitter.once = once;
 EventEmitter.getEventListeners = getEventListeners;
+EventEmitter.getMaxListeners = _getMaxListeners;
 EventEmitter.setMaxListeners = setMaxListeners;
 EventEmitter.listenerCount = listenerCount;
 EventEmitter.EventEmitter = EventEmitter;
@@ -145,6 +170,8 @@ EventEmitter.EventEmitterAsyncResource = EventEmitterAsyncResource;
 
 export const captureRejectionSymbol = EventEmitter.captureRejectionSymbol;
 export const errorMonitor = EventEmitter.errorMonitor;
+export const getMaxListeners = _getMaxListeners;
+export const usingDomains = EventEmitter.usingDomains;
 export let defaultMaxListeners = 10;
 
 Object.defineProperties(EventEmitter, {
@@ -244,6 +271,7 @@ export function setMaxListeners(
 EventEmitter.prototype._events = undefined;
 EventEmitter.prototype._eventsCount = 0;
 EventEmitter.prototype._maxListeners = undefined;
+EventEmitter.addAbortListener = addAbortListener;
 
 function addCatch(that : any, promise : Promise<unknown>, type : string | symbol, args : any[]) {
   if (!that[kCapture]) {

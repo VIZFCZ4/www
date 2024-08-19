@@ -14,8 +14,8 @@
 #include "gpu-sampler.h"
 #include "gpu-texture.h"
 #include "gpu-utils.h"
-#include "workerd/jsg/exception.h"
-#include "workerd/jsg/jsg.h"
+#include <workerd/jsg/exception.h>
+#include <workerd/jsg/jsg.h>
 
 namespace workerd::api::gpu {
 
@@ -580,85 +580,73 @@ GPUDevice::createComputePipeline(GPUComputePipelineDescriptor descriptor) {
 }
 
 jsg::Promise<kj::Maybe<jsg::Ref<GPUError>>> GPUDevice::popErrorScope(jsg::Lock& js) {
-  struct Context {
-    kj::Own<kj::PromiseFulfiller<kj::Maybe<jsg::Ref<GPUError>>>> fulfiller;
-    AsyncTask task;
-  };
-
   auto paf = kj::newPromiseAndFulfiller<kj::Maybe<jsg::Ref<GPUError>>>();
   // This context object will hold information for the callback, including the
   // fullfiller to signal the caller with the result, and an async task that
   // will ensure the device's Tick() function is called periodically. It will be
   // deallocated at the end of the callback function.
-  auto ctx = new Context{kj::mv(paf.fulfiller), AsyncTask(kj::addRef(*async_))};
-
+  using MapAsyncContext = AsyncContext<kj::Maybe<jsg::Ref<GPUError>>>;
+  auto ctx = kj::heap<MapAsyncContext>(js, kj::addRef(*async_));
+  auto promise = kj::mv(ctx->promise_);
   device_.PopErrorScope(
-      [](WGPUErrorType type, char const* message, void* userdata) {
-        auto c = std::unique_ptr<Context>(static_cast<Context*>(userdata));
+      wgpu::CallbackMode::AllowProcessEvents,
+      [ctx = kj::mv(ctx)](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                          char const* message) mutable {
         switch (type) {
-        case WGPUErrorType::WGPUErrorType_NoError:
-          c->fulfiller->fulfill(kj::none);
+        case wgpu::ErrorType::NoError:
+          ctx->fulfiller_->fulfill(kj::none);
           break;
-        case WGPUErrorType::WGPUErrorType_OutOfMemory: {
+        case wgpu::ErrorType::OutOfMemory: {
           jsg::Ref<GPUError> err = jsg::alloc<GPUOutOfMemoryError>(kj::str(message));
-          c->fulfiller->fulfill(kj::mv(err));
+          ctx->fulfiller_->fulfill(kj::mv(err));
           break;
         }
-        case WGPUErrorType::WGPUErrorType_Validation: {
+        case wgpu::ErrorType::Validation: {
           jsg::Ref<GPUError> err = jsg::alloc<GPUValidationError>(kj::str(message));
-          c->fulfiller->fulfill(kj::mv(err));
+          ctx->fulfiller_->fulfill(kj::mv(err));
           break;
         }
-        case WGPUErrorType::WGPUErrorType_Unknown:
-        case WGPUErrorType::WGPUErrorType_DeviceLost:
-          c->fulfiller->reject(JSG_KJ_EXCEPTION(FAILED, TypeError, message));
+        case wgpu::ErrorType::Unknown:
+        case wgpu::ErrorType::DeviceLost:
+          ctx->fulfiller_->reject(JSG_KJ_EXCEPTION(FAILED, TypeError, message));
           break;
         default:
-          c->fulfiller->reject(JSG_KJ_EXCEPTION(FAILED, TypeError, "unhandled error type"));
+          ctx->fulfiller_->reject(JSG_KJ_EXCEPTION(FAILED, TypeError, "unhandled error type"));
           break;
         }
-      },
-      ctx);
+      });
 
-  auto& context = IoContext::current();
-  return context.awaitIo(js, kj::mv(paf.promise));
+  return promise;
 }
 
 jsg::Promise<jsg::Ref<GPUComputePipeline>>
 GPUDevice::createComputePipelineAsync(jsg::Lock& js, GPUComputePipelineDescriptor descriptor) {
   wgpu::ComputePipelineDescriptor desc = parseComputePipelineDescriptor(descriptor);
 
-  struct Context {
-    kj::Own<kj::PromiseFulfiller<jsg::Ref<GPUComputePipeline>>> fulfiller;
-    AsyncTask task;
-  };
-  auto paf = kj::newPromiseAndFulfiller<jsg::Ref<GPUComputePipeline>>();
   // This context object will hold information for the callback, including the
-  // fullfiller to signal the caller with the result, and an async task that
+  // fulfiller to signal the caller with the result, and an async task that
   // will ensure the device's Tick() function is called periodically. It will be
   // deallocated at the end of the callback function.
-  auto ctx = new Context{kj::mv(paf.fulfiller), AsyncTask(kj::addRef(*async_))};
-
+  using MapAsyncContext = AsyncContext<jsg::Ref<GPUComputePipeline>>;
+  auto ctx = kj::heap<MapAsyncContext>(js, kj::addRef(*async_));
+  auto promise = kj::mv(ctx->promise_);
   device_.CreateComputePipelineAsync(
-      &desc,
-      [](WGPUCreatePipelineAsyncStatus status, WGPUComputePipeline pipeline, char const* message,
-         void* userdata) {
+      &desc, wgpu::CallbackMode::AllowProcessEvents,
+      [ctx = kj::mv(ctx)](wgpu::CreatePipelineAsyncStatus status, wgpu::ComputePipeline pipeline,
+                          char const*) mutable {
         // Note: this is invoked outside the JS isolate lock
-        auto c = std::unique_ptr<Context>(static_cast<Context*>(userdata));
 
         switch (status) {
-        case WGPUCreatePipelineAsyncStatus::WGPUCreatePipelineAsyncStatus_Success:
-          c->fulfiller->fulfill(jsg::alloc<GPUComputePipeline>(kj::mv(pipeline)));
+        case wgpu::CreatePipelineAsyncStatus::Success:
+          ctx->fulfiller_->fulfill(jsg::alloc<GPUComputePipeline>(kj::mv(pipeline)));
           break;
         default:
-          c->fulfiller->reject(JSG_KJ_EXCEPTION(FAILED, TypeError, "unknown error"));
+          ctx->fulfiller_->reject(JSG_KJ_EXCEPTION(FAILED, TypeError, "unknown error"));
           break;
         }
-      },
-      ctx);
+      });
 
-  auto& context = IoContext::current();
-  return context.awaitIo(js, kj::mv(paf.promise));
+  return promise;
 }
 
 jsg::Ref<GPUQueue> GPUDevice::getQueue() {
@@ -674,10 +662,10 @@ GPUDevice::~GPUDevice() {
 }
 
 void GPUDevice::destroy() {
-  if (lost_promise_fulfiller_->isWaiting()) {
+  if (dlc_->fulfiller_->isWaiting()) {
     auto lostInfo =
         jsg::alloc<GPUDeviceLostInfo>(kj::str("destroyed"), kj::str("device was destroyed"));
-    lost_promise_fulfiller_->fulfill(kj::mv(lostInfo));
+    dlc_->fulfiller_->fulfill(kj::mv(lostInfo));
   }
 
   device_.Destroy();
@@ -688,71 +676,15 @@ jsg::MemoizedIdentity<jsg::Promise<jsg::Ref<GPUDeviceLostInfo>>>& GPUDevice::get
   return lost_promise_;
 }
 
-kj::String parseDeviceLostReason(WGPUDeviceLostReason reason) {
-  switch (reason) {
-  case WGPUDeviceLostReason_Force32:
-    KJ_UNREACHABLE
-  case WGPUDeviceLostReason_Destroyed:
-    return kj::str("destroyed");
-  case WGPUDeviceLostReason_Undefined:
-    return kj::str("undefined");
-  }
-}
-
-GPUDevice::GPUDevice(jsg::Lock& js, wgpu::Device d)
-    : device_(d), lost_promise_(nullptr), async_(kj::refcounted<AsyncRunner>(d)) {
-  auto& context = IoContext::current();
-  auto paf = kj::newPromiseAndFulfiller<jsg::Ref<GPUDeviceLostInfo>>();
-  lost_promise_fulfiller_ = kj::mv(paf.fulfiller);
-  lost_promise_ = context.awaitIo(js, kj::mv(paf.promise));
-
+GPUDevice::GPUDevice(jsg::Lock& js, wgpu::Device d, kj::Own<AsyncRunner> async,
+                     kj::Own<AsyncContext<jsg::Ref<GPUDeviceLostInfo>>> deviceLostCtx,
+                     kj::Own<UncapturedErrorContext> uErrorCtx)
+    : device_(d), dlc_(kj::mv(deviceLostCtx)), lost_promise_(kj::mv(dlc_->promise_)),
+      uec_(kj::mv(uErrorCtx)), async_(kj::mv(async)) {
+  uec_->target = this;
   device_.SetLoggingCallback(
       [](WGPULoggingType type, char const* message, void* userdata) {
         KJ_LOG(INFO, "WebGPU logging", kj::str(type), message);
-      },
-      this);
-
-  device_.SetUncapturedErrorCallback(
-      [](WGPUErrorType type, char const* message, void* userdata) {
-        auto* self = static_cast<GPUDevice*>(userdata);
-        if (self->getHandlerCount("uncapturederror") > 0) {
-          jsg::Ref<GPUError> error = nullptr;
-          switch (type) {
-          case WGPUErrorType_Validation:
-            error = jsg::alloc<GPUValidationError>(kj::str(message));
-            break;
-          case WGPUErrorType_NoError:
-          case WGPUErrorType_Force32:
-            KJ_UNREACHABLE;
-          case WGPUErrorType_OutOfMemory:
-            error = jsg::alloc<GPUOutOfMemoryError>(kj::str(message));
-            break;
-          case WGPUErrorType_Internal:
-          case WGPUErrorType_DeviceLost:
-          case WGPUErrorType_Unknown:
-            error = jsg::alloc<GPUInternalError>(kj::str(message));
-            break;
-          }
-
-          auto init = GPUUncapturedErrorEventInit{kj::mv(error)};
-          auto ev = jsg::alloc<GPUUncapturedErrorEvent>("uncapturederror"_kj, kj::mv(init));
-          self->dispatchEventImpl(IoContext::current().getCurrentLock(), kj::mv(ev));
-          return;
-        }
-
-        // no "uncapturederror" handler
-        KJ_LOG(INFO, "WebGPU uncaptured error", kj::str(type), message);
-      },
-      this);
-
-  device_.SetDeviceLostCallback(
-      [](WGPUDeviceLostReason reason, char const* message, void* userdata) {
-        auto r = parseDeviceLostReason(reason);
-        auto* self = static_cast<GPUDevice*>(userdata);
-        if (self->lost_promise_fulfiller_->isWaiting()) {
-          auto lostInfo = jsg::alloc<GPUDeviceLostInfo>(kj::mv(r), kj::str(message));
-          self->lost_promise_fulfiller_->fulfill(kj::mv(lostInfo));
-        }
       },
       this);
 };

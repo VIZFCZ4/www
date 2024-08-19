@@ -38,7 +38,7 @@ export const timeoutCount = {
       setTimeout(() => {});
     }
     throws(() => setTimeout(() => {}), {
-      message: 'You have exceeded the number of timeouts you may set.10000'
+      message: 'You have exceeded the number of active timeouts you may set. max active timeouts: 10000, current active timeouts: 10000, finished timeouts: 0'
     });
   }
 };
@@ -568,5 +568,13 @@ export const base64 = {
     );
 
     generate_tests(testAtob, tests);
+  }
+};
+
+export const webSocketPairIterable = {
+  test() {
+    const [a, b] = new WebSocketPair();
+    ok(a instanceof WebSocket);
+    ok(b instanceof WebSocket);
   }
 };

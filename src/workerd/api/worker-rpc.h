@@ -17,6 +17,8 @@
 #include <workerd/jsg/jsg.h>
 #include <workerd/jsg/ser.h>
 #include <workerd/jsg/function.h>
+#include <workerd/jsg/modules-new.h>
+#include <workerd/jsg/url.h>
 #include <workerd/io/io-context.h>
 #include <workerd/io/worker-interface.capnp.h>
 
@@ -213,8 +215,11 @@ private:
   struct Resolved {
     jsg::Value result;
 
-    // We only use this to prohibit use from the wrong context.
-    kj::Own<IoContext::WeakRef> ioCtx;
+    // Dummy IoPtr to self, used only to verify that we're running in the correct context.
+    // (Dereferencing from the wrong context would throw an exception.)
+    // Note: Can't use IoContext::WeakRef here because it's not thread-safe (it's only intended to
+    //   be helf from KJ I/O objects, but this is a JSG object).
+    IoPtr<JsRpcPromise> ctxCheck;
   };
   struct Disposed {};
 
@@ -473,12 +478,37 @@ public:
   JSG_RESOURCE_TYPE(DurableObjectBase) {}
 };
 
+// Base class for Workflows
+//
+// When the worker's top-level module exports a class that extends this class, it means that it
+// is a Workflow.
+//
+//     import {Workflow} from "cloudflare:workers";
+//     export class MyWorkflow extends Workflow {
+//       async run(batch, fns) { ... }
+//     }
+//
+// `env` and `ctx` are automatically available as `this.env` and `this.ctx`, without the need to
+// define a constructor.
+class Workflow: public jsg::Object {
+public:
+  static jsg::Ref<Workflow> constructor(
+      const v8::FunctionCallbackInfo<v8::Value>& args,
+      jsg::Ref<ExecutionContext> ctx, jsg::JsObject env);
+
+  JSG_RESOURCE_TYPE(Workflow) {}
+};
+
 // The "cloudflare:workers" module, which exposes the WorkerEntrypoint and DurableObject types
 // for extending.
 class EntrypointsModule: public jsg::Object {
 public:
+  EntrypointsModule() = default;
+  EntrypointsModule(jsg::Lock&, const jsg::Url&) {}
+
   JSG_RESOURCE_TYPE(EntrypointsModule) {
     JSG_NESTED_TYPE(WorkerEntrypoint);
+    JSG_NESTED_TYPE(Workflow);
     JSG_NESTED_TYPE_NAMED(DurableObjectBase, DurableObject);
     JSG_NESTED_TYPE_NAMED(JsRpcPromise, RpcPromise);
     JSG_NESTED_TYPE_NAMED(JsRpcProperty, RpcProperty);
@@ -493,6 +523,7 @@ public:
   api::JsRpcStub,                    \
   api::JsRpcTarget,                  \
   api::WorkerEntrypoint,             \
+  api::Workflow,                     \
   api::DurableObjectBase,            \
   api::EntrypointsModule
 
@@ -502,4 +533,12 @@ void registerRpcModules(Registry& registry, CompatibilityFlags::Reader flags) {
       "cloudflare-internal:workers", workerd::jsg::ModuleRegistry::Type::INTERNAL);
 }
 
+template <typename TypeWrapper>
+kj::Own<jsg::modules::ModuleBundle> getInternalRpcModuleBundle(auto featureFlags) {
+  jsg::modules::ModuleBundle::BuiltinBuilder builder(
+      jsg::modules::ModuleBundle::BuiltinBuilder::Type::BUILTIN_ONLY);
+  static const auto kSpecifier = "cloudflare-internal:workers"_url;
+  builder.addObject<EntrypointsModule, TypeWrapper>(kSpecifier);
+  return builder.finish();
+}
 }; // namespace workerd::api

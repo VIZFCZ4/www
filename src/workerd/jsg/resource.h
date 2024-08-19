@@ -21,12 +21,6 @@
 #include <workerd/jsg/memory.h>
 #include <workerd/jsg/modules.capnp.h>
 
-// The signature of SetAccessor changes in v8 12.1 to drop the v8::AccessControl
-// parameter.
-#if (V8_MAJOR_VERSION < 12) || ((V8_MAJOR_VERSION == 12) && (V8_MINOR_VERSION < 1))
-#define V8_PASS_ACCESS_CONTROL
-#endif
-
 namespace std {
   inline auto KJ_HASHCODE(const std::type_index& idx) {
     // Make std::type_index (which points to std::type_info) usable as a kj::HashMap key.
@@ -36,6 +30,10 @@ namespace std {
 }
 
 namespace workerd::jsg {
+
+const auto kIllegalInvocation =
+    "Illegal invocation: function called with incorrect `this` reference. "
+    "See https://developers.cloudflare.com/workers/observability/errors/#illegal-invocation-errors for details."_kj;
 
 class Serializer;
 class Deserializer;
@@ -82,9 +80,8 @@ void scheduleUnimplementedMethodError(
 // Called to throw errors about calling unimplemented functionality. It's assumed these are called
 // directly from the V8 trampoline without liftKj, so they don't throw JsExceptionThrown.
 void scheduleUnimplementedPropertyError(
-    const v8::PropertyCallbackInfo<v8::Value>& args,
+    v8::Isolate* isolate,
     const std::type_info& type, const char* propertyName);
-
 
 // Implements the V8 callback function for calling the static `constructor()` method of the C++
 // class.
@@ -386,8 +383,8 @@ struct GetterCallback;
           auto obj = info.This(); \
           auto& wrapper = TypeWrapper::from(isolate); \
           /* V8 no longer supports AccessorSignature, so we must manually verify `this`'s type. */\
-          if (!isContext && !wrapper.template getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) { \
-            throwTypeError(isolate, "Illegal invocation"); \
+          if (!isContext && !wrapper.getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) { \
+            throwTypeError(isolate, kIllegalInvocation); \
           } \
           auto& self = extractInternalPointer<T, isContext>(context, obj); \
           return wrapper.wrap(context, obj, (self.*method)( \
@@ -412,38 +409,11 @@ struct GetterCallback;
           auto obj = info.This(); \
           auto& wrapper = TypeWrapper::from(isolate); \
           /* V8 no longer supports AccessorSignature, so we must manually verify `this`'s type. */\
-          if (!isContext && !wrapper.template getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) { \
-            throwTypeError(isolate, "Illegal invocation"); \
+          if (!isContext && !wrapper.getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) { \
+            throwTypeError(isolate, kIllegalInvocation); \
           } \
           auto& self = extractInternalPointer<T, isContext>(context, obj); \
           return wrapper.wrap(context, obj, (self.*method)(Lock::from(isolate), \
-              wrapper.unwrap(context, (kj::Decay<Args>*)nullptr)...)); \
-        }); \
-      } \
-    }; \
-    \
-    /* Specialization for methods that take `const v8::PropertyCallbackInfo<v8::Value>&` as \
-      * their first parameter. */ \
-    template <typename TypeWrapper, const char* methodName, typename T, typename Ret, \
-              typename... Args, \
-              Ret (T::*method)(const v8::PropertyCallbackInfo<v8::Value>&, Args...) __VA_ARGS__, \
-              bool isContext> \
-    struct GetterCallback<TypeWrapper, methodName, \
-                          Ret (T::*)(const v8::PropertyCallbackInfo<v8::Value>&, Args...) __VA_ARGS__, \
-                          method, isContext> { \
-      static constexpr bool enumerable = true; \
-      static void callback(v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) { \
-        liftKj(info, [&]() { \
-          auto isolate = info.GetIsolate(); \
-          auto context = isolate->GetCurrentContext(); \
-          auto obj = info.This(); \
-          auto& wrapper = TypeWrapper::from(isolate); \
-          /* V8 no longer supports AccessorSignature, so we must manually verify `this`'s type. */\
-          if (!isContext && !wrapper.template getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) { \
-            throwTypeError(isolate, "Illegal invocation"); \
-          } \
-          auto& self = extractInternalPointer<T, isContext>(context, obj); \
-          return wrapper.wrap(context, obj, (self.*method)(info, \
               wrapper.unwrap(context, (kj::Decay<Args>*)nullptr)...)); \
         }); \
       } \
@@ -455,7 +425,7 @@ struct GetterCallback;
                           isContext> { \
       static constexpr bool enumerable = false; \
       static void callback(v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) { \
-        scheduleUnimplementedPropertyError(info, typeid(T), propertyName); \
+        scheduleUnimplementedPropertyError(info.GetIsolate(), typeid(T), propertyName); \
       } \
     };
 
@@ -463,6 +433,72 @@ JSG_DEFINE_GETTER_CALLBACK_STRUCTS()
 JSG_DEFINE_GETTER_CALLBACK_STRUCTS(const)
 
 #undef JSG_DEFINE_GETTER_CALLBACK_STRUCTS
+
+template <typename TypeWrapper, const char* methodName,
+          typename Method, Method method, bool isContext>
+struct PropertyGetterCallback;
+
+#define JSG_DEFINE_PROPERTY_GETTER_CALLBACK_STRUCTS(...) \
+    template <typename TypeWrapper, const char* methodName, typename T, typename Ret, \
+              typename... Args, Ret (T::*method)(Args...) __VA_ARGS__, bool isContext> \
+    struct PropertyGetterCallback<TypeWrapper, methodName, Ret (T::*)(Args...) __VA_ARGS__, \
+                                  method, isContext> { \
+      static constexpr bool enumerable = true; \
+      static void callback(const v8::FunctionCallbackInfo<v8::Value>& info) { \
+        liftKj(info, [&]() { \
+          auto isolate = info.GetIsolate(); \
+          auto context = isolate->GetCurrentContext(); \
+          auto obj = info.This(); \
+          auto& wrapper = TypeWrapper::from(isolate); \
+          /* V8 no longer supports AccessorSignature, so we must manually verify `this`'s type. */\
+          if (!isContext && !wrapper.getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) { \
+            throwTypeError(isolate, kIllegalInvocation); \
+          } \
+          auto& self = extractInternalPointer<T, isContext>(context, obj); \
+          return wrapper.wrap(context, obj, (self.*method)( \
+              wrapper.unwrap(context, (kj::Decay<Args>*)nullptr)...)); \
+        }); \
+      } \
+    }; \
+    \
+    /* Specialization for methods that take `Lock&` as their first parameter. */ \
+    template <typename TypeWrapper, const char* methodName, typename T, typename Ret, \
+              typename... Args, \
+              Ret (T::*method)(Lock&, Args...) __VA_ARGS__, \
+              bool isContext> \
+    struct PropertyGetterCallback<TypeWrapper, methodName, \
+                          Ret (T::*)(Lock&, Args...) __VA_ARGS__, \
+                          method, isContext> { \
+      static constexpr bool enumerable = true; \
+      static void callback(const v8::FunctionCallbackInfo<v8::Value>& info) { \
+        liftKj(info, [&]() { \
+          auto isolate = info.GetIsolate(); \
+          auto context = isolate->GetCurrentContext(); \
+          auto obj = info.This(); \
+          auto& wrapper = TypeWrapper::from(isolate); \
+          /* V8 no longer supports AccessorSignature, so we must manually verify `this`'s type. */\
+          if (!isContext && !wrapper.getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) { \
+            throwTypeError(isolate, kIllegalInvocation); \
+          } \
+          auto& self = extractInternalPointer<T, isContext>(context, obj); \
+          return wrapper.wrap(context, obj, (self.*method)(Lock::from(isolate), \
+              wrapper.unwrap(context, (kj::Decay<Args>*)nullptr)...)); \
+        }); \
+      } \
+    }; \
+    template <typename TypeWrapper, const char* propertyName, typename T, \
+              Unimplemented (T::*method)() __VA_ARGS__, bool isContext> \
+    struct PropertyGetterCallback<TypeWrapper, propertyName, \
+                                  Unimplemented (T::*)() __VA_ARGS__, method, isContext> { \
+      static constexpr bool enumerable = false; \
+      static void callback(const v8::FunctionCallbackInfo<v8::Value>& info) { \
+        scheduleUnimplementedPropertyError(info.GetIsolate(), typeid(T), propertyName); \
+      } \
+    };
+
+JSG_DEFINE_PROPERTY_GETTER_CALLBACK_STRUCTS()
+JSG_DEFINE_PROPERTY_GETTER_CALLBACK_STRUCTS(const)
+
 
 // Implements the V8 callback function for calling a property setter method of a C++ class.
 template <typename TypeWrapper, const char* methodName,
@@ -480,8 +516,8 @@ struct SetterCallback<TypeWrapper, methodName, void (T::*)(Arg), method, isConte
       auto obj = info.This();
       auto& wrapper = TypeWrapper::from(isolate);
       // V8 no longer supports AccessorSignature, so we must manually verify `this`'s type.
-      if (!isContext && !wrapper.template getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) {
-        throwTypeError(isolate, "Illegal invocation");
+      if (!isContext && !wrapper.getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) {
+        throwTypeError(isolate, kIllegalInvocation);
       }
       auto& self = extractInternalPointer<T, isContext>(context, obj);
       (self.*method)(wrapper.template unwrap<Arg>(context, value,
@@ -503,8 +539,8 @@ struct SetterCallback<TypeWrapper, methodName,
       auto obj = info.This();
       auto& wrapper = TypeWrapper::from(isolate);
       // V8 no longer supports AccessorSignature, so we must manually verify `this`'s type.
-      if (!isContext && !wrapper.template getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) {
-        throwTypeError(isolate, "Illegal invocation");
+      if (!isContext && !wrapper.getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) {
+        throwTypeError(isolate, kIllegalInvocation);
       }
       auto& self = extractInternalPointer<T, isContext>(context, obj);
       (self.*method)(Lock::from(isolate), wrapper.template unwrap<Arg>(context, value,
@@ -513,25 +549,47 @@ struct SetterCallback<TypeWrapper, methodName,
   }
 };
 
-// Specialization for methods that take `const v8::PropertyCallbackInfo<void>&` as their
-// first parameter.
+template <typename TypeWrapper, const char* methodName,
+          typename Method, Method method, bool isContext>
+struct PropertySetterCallback;
+
 template <typename TypeWrapper, const char* methodName, typename T, typename Arg,
-          void (T::*method)(const v8::PropertyCallbackInfo<void>&, Arg), bool isContext>
-struct SetterCallback<TypeWrapper, methodName,
-                      void (T::*)(const v8::PropertyCallbackInfo<void>&, Arg), method, isContext> {
-  static void callback(v8::Local<v8::Name>, v8::Local<v8::Value> value,
-                       const v8::PropertyCallbackInfo<void>& info) {
+          void (T::*method)(Arg), bool isContext>
+struct PropertySetterCallback<TypeWrapper, methodName, void (T::*)(Arg), method, isContext> {
+  static void callback(const v8::FunctionCallbackInfo<v8::Value>& info) {
     liftKj(info, [&]() {
       auto isolate = info.GetIsolate();
       auto context = isolate->GetCurrentContext();
       auto obj = info.This();
       auto& wrapper = TypeWrapper::from(isolate);
       // V8 no longer supports AccessorSignature, so we must manually verify `this`'s type.
-      if (!isContext && !wrapper.template getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) {
-        throwTypeError(isolate, "Illegal invocation");
+      if (!isContext && !wrapper.getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) {
+        throwTypeError(isolate, kIllegalInvocation);
       }
       auto& self = extractInternalPointer<T, isContext>(context, obj);
-      (self.*method)(info, wrapper.template unwrap<Arg>(context, value,
+      (self.*method)(wrapper.template unwrap<Arg>(context, info[0],
+          TypeErrorContext::setterArgument(typeid(T), methodName)));
+    });
+  }
+};
+
+// Specialization for methods that take `Lock&` as their first parameter.
+template <typename TypeWrapper, const char* methodName, typename T, typename Arg,
+          void (T::*method)(Lock&, Arg), bool isContext>
+struct PropertySetterCallback<TypeWrapper, methodName,
+                      void (T::*)(Lock&, Arg), method, isContext> {
+  static void callback(const v8::FunctionCallbackInfo<v8::Value>& info) {
+    liftKj(info, [&]() {
+      auto isolate = info.GetIsolate();
+      auto context = isolate->GetCurrentContext();
+      auto obj = info.This();
+      auto& wrapper = TypeWrapper::from(isolate);
+      // V8 no longer supports AccessorSignature, so we must manually verify `this`'s type.
+      if (!isContext && !wrapper.getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) {
+        throwTypeError(isolate, kIllegalInvocation);
+      }
+      auto& self = extractInternalPointer<T, isContext>(context, obj);
+      (self.*method)(Lock::from(isolate), wrapper.template unwrap<Arg>(context, info[0],
           TypeErrorContext::setterArgument(typeid(T), methodName)));
     });
   }
@@ -593,9 +651,6 @@ constexpr bool hasConstructorMethod(...) { return false; }
 //       }
 //     };
 void exposeGlobalScopeType(v8::Isolate* isolate, v8::Local<v8::Context> context);
-
-// Polyfill Symbol.dispose and Symbol.asyncDispose.
-void polyfillSymbols(jsg::Lock& js, v8::Local<v8::Context> context);
 
 v8::Local<v8::Symbol> getSymbolDispose(v8::Isolate* isolate);
 v8::Local<v8::Symbol> getSymbolAsyncDispose(v8::Isolate* isolate);
@@ -697,25 +752,28 @@ struct WildcardPropertyCallbacks<
         static_cast<int>(v8::PropertyHandlerFlags::kHasNoSideEffect) |
         static_cast<int>(v8::PropertyHandlerFlags::kOnlyInterceptStrings))) {}
 
-  static void getter(v8::Local<v8::Name> name,
+  static v8::Intercepted getter(v8::Local<v8::Name> name,
                        const v8::PropertyCallbackInfo<v8::Value>& info) {
+    v8::Intercepted result = v8::Intercepted::kNo;
     liftKj(info, [&]() -> v8::Local<v8::Value> {
       auto isolate = info.GetIsolate();
       auto context = isolate->GetCurrentContext();
       auto obj = info.This();
       auto& wrapper = TypeWrapper::from(isolate);
-      if (!wrapper.template getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) {
-        throwTypeError(isolate, "Illegal invocation");
+      if (!wrapper.getTemplate(isolate, (T*)nullptr)->HasInstance(obj)) {
+        throwTypeError(isolate, kIllegalInvocation);
       }
       auto& self = extractInternalPointer<T, false>(context, obj);
       auto& lock = Lock::from(isolate);
       KJ_IF_SOME(value, (self.*getNamedMethod)(lock, kj::str(name.As<v8::String>()))) {
+        result = v8::Intercepted::kYes;
         return wrapper.wrap(context, obj, kj::fwd<Ret>(value));
       } else {
         // Return an empty handle to indicate the member doesn't exist.
         return {};
       }
     });
+    return result;
   }
 };
 
@@ -822,19 +880,21 @@ struct ResourceTypeBuilder {
   inline void registerPrototypeProperty() {
     auto v8Name = v8StrIntern(isolate, name);
 
-    using Gcb = GetterCallback<TypeWrapper, name, Getter, getter, isContext>;
+    using Gcb = PropertyGetterCallback<TypeWrapper, name, Getter, getter, isContext>;
     if (!Gcb::enumerable) {
       inspectProperties->Set(v8Name, v8::False(isolate), v8::PropertyAttribute::ReadOnly);
     }
 
-    prototype->SetAccessor(
-        v8Name,
-        Gcb::callback,
-        &SetterCallback<TypeWrapper, name, Setter, setter, isContext>::callback,
-        v8::Local<v8::Value>(),
-#ifdef V8_PASS_ACCESS_CONTROL
-        v8::AccessControl::DEFAULT,
-#endif
+    // Note that we cannot use `SetNativeDataProperty(...)` here the way we do with other
+    // properties because it will not properly handle the prototype chain when it comes
+    // to using setters... which is annoying. It means we end up having to use FunctionTemplates
+    // instead of the more convenient property callbacks.
+    auto getterFn = v8::FunctionTemplate::New(isolate, Gcb::callback);
+    auto setterFn = v8::FunctionTemplate::New(isolate,
+        &PropertySetterCallback<TypeWrapper, name, Setter, setter, isContext>::callback);
+
+    prototype->SetAccessorProperty(
+        v8Name, getterFn, setterFn,
         Gcb::enumerable ? v8::PropertyAttribute::None : v8::PropertyAttribute::DontEnum);
   }
 
@@ -866,22 +926,17 @@ struct ResourceTypeBuilder {
   inline void registerReadonlyPrototypeProperty() {
     auto v8Name = v8StrIntern(isolate, name);
 
-    using Gcb = GetterCallback<TypeWrapper, name, Getter, getter, isContext>;
+    using Gcb = PropertyGetterCallback<TypeWrapper, name, Getter, getter, isContext>;
     if (!Gcb::enumerable) {
       inspectProperties->Set(v8Name, v8::False(isolate), v8::PropertyAttribute::ReadOnly);
     }
+    auto getterFn = v8::FunctionTemplate::New(isolate, Gcb::callback);
 
-    prototype->SetAccessor(
-        v8Name,
-        &Gcb::callback,
-        nullptr,
-        v8::Local<v8::Value>(),
-#ifdef V8_PASS_ACCESS_CONTROL
-        v8::AccessControl::DEFAULT,
-#endif
-        Gcb::enumerable ? v8::PropertyAttribute::ReadOnly
-                        : static_cast<v8::PropertyAttribute>(
-                            v8::PropertyAttribute::ReadOnly | v8::PropertyAttribute::DontEnum));
+    prototype->SetAccessorProperty(v8Name, getterFn, {},
+        Gcb::enumerable ?
+            v8::PropertyAttribute::ReadOnly :
+            static_cast<v8::PropertyAttribute>(
+                  v8::PropertyAttribute::DontEnum | v8::PropertyAttribute::ReadOnly));
   }
 
 
@@ -918,14 +973,11 @@ struct ResourceTypeBuilder {
     auto symbol = v8::Symbol::New(isolate, v8Name);
     inspectProperties->Set(v8Name, symbol, v8::PropertyAttribute::ReadOnly);
 
-    prototype->SetAccessor(
+    prototype->SetNativeDataProperty(
         symbol,
         &Gcb::callback,
         nullptr,
         v8::Local<v8::Value>(),
-#ifdef V8_PASS_ACCESS_CONTROL
-        v8::AccessControl::DEFAULT,
-#endif
         static_cast<v8::PropertyAttribute>(
           v8::PropertyAttribute::ReadOnly | v8::PropertyAttribute::DontEnum));
   }
@@ -1119,6 +1171,17 @@ private:
   v8::Local<v8::Context> context;
 };
 
+class ModuleRegistryBase {
+public:
+  virtual ~ModuleRegistryBase() noexcept(false) {}
+  virtual kj::Own<void> attachToIsolate(Lock& js, const CompilationObserver& observer)
+      KJ_WARN_UNUSED_RESULT = 0;
+};
+
+struct NewContextOptions {
+  kj::Maybe<ModuleRegistryBase&> newModuleRegistry = kj::none;
+};
+
 // TypeWrapper mixin for resource types (application-defined C++ classes declared with a
 // JSG_RESOURCE_TYPE block).
 template <typename TypeWrapper, typename T>
@@ -1225,6 +1288,7 @@ public:
   template <typename... Args>
   JsContext<T> newContext(
       jsg::Lock& js,
+      jsg::NewContextOptions options,
       CompilationObserver& compilationObserver,
       T*, Args&&... args) {
     // Construct an instance of this type to be used as the Javascript global object, creating
@@ -1272,14 +1336,20 @@ public:
     // Expose the type of the global scope in the global scope itself.
     exposeGlobalScopeType(isolate, context);
 
-    auto moduleRegistry = ModuleRegistryImpl<TypeWrapper>::install(
-        isolate, context, compilationObserver);
-    ptr->setModuleRegistry(kj::mv(moduleRegistry));
+    kj::Maybe<kj::Own<void>> maybeNewModuleRegistry;
+    KJ_IF_SOME(newModuleRegistry, options.newModuleRegistry) {
+      JSG_WITHIN_CONTEXT_SCOPE(js, context, [&](jsg::Lock& js) {
+        // The context must be current for attachToIsolate to succeed.
+        maybeNewModuleRegistry = newModuleRegistry.attachToIsolate(js, compilationObserver);
+      });
+    } else {
+      ptr->setModuleRegistry(ModuleRegistryImpl<TypeWrapper>::install(
+          isolate, context, compilationObserver));
+    }
 
     return JSG_WITHIN_CONTEXT_SCOPE(js, context, [&](jsg::Lock& js) {
-      polyfillSymbols(js, context);
       setupJavascript(js);
-      return JsContext<T>(context, kj::mv(ptr));
+      return JsContext<T>(context, kj::mv(ptr), kj::mv(maybeNewModuleRegistry));
     });
   }
 

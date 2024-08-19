@@ -1,5 +1,4 @@
 #include "url.h"
-#include "exception.h"
 #include <kj/hash.h>
 
 extern "C" {
@@ -162,7 +161,10 @@ kj::Maybe<Url> Url::tryParse(kj::ArrayPtr<const char> input,
   } else {
     result = ada_parse(input.begin(), input.size());
   }
-  if (!ada_is_valid(result)) return kj::none;
+  if (!ada_is_valid(result)) {
+    ada_free(result);
+    return kj::none;
+  }
   return Url(wrap(result));
 }
 
@@ -329,8 +331,12 @@ kj::uint Url::hashCode() const {
   return kj::hashCode(getHref());
 }
 
-const Url operator "" _url(const char* str, size_t size) {
-  return KJ_ASSERT_NONNULL(Url::tryParse(kj::ArrayPtr<const char>(str, size)));
+kj::Array<kj::byte> Url::percentDecode(kj::ArrayPtr<const kj::byte> input) {
+  std::string_view data(input.asChars().begin(), input.size());
+  auto str = ada::unicode::percent_decode(data, 0);
+  auto ret = kj::heapArray<kj::byte>(str.size());
+  memcpy(ret.begin(), str.data(), str.size());
+  return kj::mv(ret);
 }
 
 // ======================================================================================
@@ -410,7 +416,7 @@ kj::Array<kj::ArrayPtr<const char>> UrlSearchParams::getAll(kj::ArrayPtr<const c
     auto item = ada_strings_get(results, n);
     items.add(kj::ArrayPtr<const char>(item.data, item.length));
   }
-  return items.releaseAsArray();
+  return items.releaseAsArray().attach(kj::defer([results](){ada_free_strings(results);}));
 }
 
 void UrlSearchParams::sort() {
@@ -2121,8 +2127,11 @@ UrlPattern::Result<UrlPattern::Init> UrlPattern::processInit(
       if (!isAbsolutePathname(pathname)) {
         KJ_IF_SOME(url, maybeBaseUrl) {
           auto basePathname = url.getPathname();
-          auto index = KJ_ASSERT_NONNULL(basePathname.findLast('/'));
-          result.pathname = kj::str(basePathname.slice(0, index + 1), pathname);
+          KJ_IF_SOME(index, basePathname.findLast('/')) {
+            result.pathname = kj::str(basePathname.slice(0, index + 1), pathname);
+          } else {
+            result.pathname = kj::str(basePathname);
+          }
         } else {
           result.pathname = kj::mv(pathname);
         }
@@ -2335,3 +2344,7 @@ UrlPattern::UrlPattern(kj::Array<Component> components, bool ignoreCase)
       ignoreCase(ignoreCase) {}
 
 }  // namespace workerd::jsg
+
+const workerd::jsg::Url operator "" _url(const char* str, size_t size) {
+  return KJ_ASSERT_NONNULL(workerd::jsg::Url::tryParse(kj::ArrayPtr<const char>(str, size)));
+}

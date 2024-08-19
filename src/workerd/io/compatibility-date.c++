@@ -2,12 +2,14 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include <stdio.h>
+#include <cstdio>
 #include "compatibility-date.h"
 #include "time.h"
 #include <capnp/schema.h>
 #include <capnp/dynamic.h>
+#include <kj/debug.h>
 #include <kj/map.h>
+#include <kj/vector.h>
 
 namespace workerd {
 
@@ -84,7 +86,6 @@ struct CompatDate {
     return kj::str(year, '-', month < 10 ? "0" : "",  month, '-', day < 10 ? "0" : "", day);
   }
 };
-
 }  // namespace
 
 kj::String currentDateStr() {
@@ -129,6 +130,14 @@ void compileCompatibilityFlags(kj::StringPtr compatDate, capnp::List<capnp::Text
   auto schema = capnp::Schema::from<CompatibilityFlags>();
   auto dynamicOutput = capnp::toDynamic(output);
 
+  // For each item added to this list, the flag identified by field will be
+  // enabled if the flag identified by other is enabled.
+  struct ImpliedBy {
+    capnp::StructSchema::Field field;
+    capnp::StructSchema::Field other;
+  };
+  kj::Vector<ImpliedBy> impliedByList(schema.getFields().size());
+
   for (auto field: schema.getFields()) {
     bool enableByDate = false;
     bool enableByFlag = false;
@@ -138,6 +147,7 @@ void compileCompatibilityFlags(kj::StringPtr compatDate, capnp::List<capnp::Text
     kj::Maybe<CompatDate> enableDate;
     kj::StringPtr enableFlagName;
     kj::StringPtr disableFlagName;
+    kj::Maybe<ImpliedBy> maybeImpliedBy;
 
     for (auto annotation: field.getProto().getAnnotations()) {
       if (annotation.getId() == COMPAT_ENABLE_FLAG_ANNOTATION_ID) {
@@ -160,6 +170,26 @@ void compileCompatibilityFlags(kj::StringPtr compatDate, capnp::List<capnp::Text
         enableByDate = true;
       } else if (annotation.getId() == EXPERIMENTAl_ANNOTATION_ID) {
         isExperimental = true;
+      } else if (annotation.getId() == IMPLIED_BY_AFTER_DATE_ANNOTATION_ID) {
+        if (maybeImpliedBy == kj::none) {
+          auto value = annotation.getValue();
+          auto s = value.getStruct().getAs<workerd::ImpliedByAfterDate>();
+          auto parsedDate = KJ_ASSERT_NONNULL(CompatDate::parse(s.getDate()));
+          // This flag will be marked as enabled if the flag identified by
+          // s.getName() is enabled, but only on or after the specified date.
+          if (parsedCompatDate >= parsedDate && !disableByFlag) {
+            maybeImpliedBy.emplace(ImpliedBy {
+              .field = field,
+              .other = schema.getFieldByName(s.getName()),
+            });
+          }
+        }
+      }
+    }
+    KJ_IF_SOME(impliedBy, maybeImpliedBy) {
+      // We only want to add the implied by flag if it is not explicitly disabled.
+      if (!disableByFlag) {
+        impliedByList.add(kj::mv(impliedBy));
       }
     }
 
@@ -198,6 +228,12 @@ void compileCompatibilityFlags(kj::StringPtr compatDate, capnp::List<capnp::Text
     }
 
     dynamicOutput.set(field, enableByFlag || (enableByDate && !disableByFlag));
+  }
+
+  for (auto& implied : impliedByList) {
+    if (capnp::toDynamic(output).get(implied.other).as<bool>()) {
+      dynamicOutput.set(implied.field, true);
+    }
   }
 
   for (auto& flag: flagSet) {
@@ -258,6 +294,66 @@ kj::Array<kj::StringPtr> decompileCompatibilityFlagsForFl(CompatibilityFlags::Re
 
 kj::Maybe<kj::String> normalizeCompatDate(kj::StringPtr date) {
   return CompatDate::parse(date).map([](auto v) { return v.toString(); });
+}
+
+struct PythonSnapshotParsedField {
+  PythonSnapshotRelease::Reader pythonSnapshotRelease;
+  capnp::StructSchema::Field field;
+};
+
+kj::Array<const PythonSnapshotParsedField> makePythonSnapshotFieldTable(
+    capnp::StructSchema::FieldList fields) {
+  kj::Vector<PythonSnapshotParsedField> table(fields.size());
+
+  for (auto field: fields) {
+    kj::Maybe<PythonSnapshotRelease::Reader> maybePythonSnapshotRelease;
+
+    for (auto annotation: field.getProto().getAnnotations()) {
+      if (annotation.getId() == PYTHON_SNAPSHOT_RELEASE_ANNOTATION_ID) {
+        maybePythonSnapshotRelease =
+            annotation.getValue().getStruct().getAs<workerd::PythonSnapshotRelease>();
+      }
+    }
+
+    KJ_IF_SOME(pythonSnapshotRelease, maybePythonSnapshotRelease) {
+      table.add(PythonSnapshotParsedField{
+        .pythonSnapshotRelease = pythonSnapshotRelease,
+        .field = field,
+      });
+    }
+  }
+
+  return table.releaseAsArray();
+}
+
+kj::Maybe<PythonSnapshotRelease::Reader> getPythonSnapshotRelease(
+    CompatibilityFlags::Reader featureFlags) {
+  uint latestFieldOrdinal = 0;
+  kj::Maybe<PythonSnapshotRelease::Reader> result;
+
+  static auto fieldTable =
+      makePythonSnapshotFieldTable(capnp::Schema::from<CompatibilityFlags>().getFields());
+
+  for (auto field: fieldTable) {
+    bool isEnabled = capnp::toDynamic(featureFlags).get(field.field).as<bool>();
+    if (!isEnabled) {
+      continue;
+    }
+
+    // We pick the flag with the highest ordinal value that is enabled and has a
+    // pythonSnapshotRelease annotation.
+    //
+    // The fieldTable is probably ordered by the ordinal anyway, but doesn't hurt to be explicit
+    // here.
+    //
+    // TODO(later): make sure this is well tested once we have more than one compat flag.
+    if (latestFieldOrdinal < field.field.getIndex()) {
+      latestFieldOrdinal = field.field.getIndex();
+      result = field.pythonSnapshotRelease;
+    }
+  }
+
+  return result;
 }
 
 }  // namespace workerd

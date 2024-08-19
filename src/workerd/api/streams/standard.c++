@@ -15,8 +15,10 @@ namespace workerd::api {
 using DefaultController = jsg::Ref<ReadableStreamDefaultController>;
 using ByobController = jsg::Ref<ReadableByteStreamController>;
 
+namespace {
 struct ValueReadable;
 struct ByteReadable;
+}
 
 // =======================================================================================
 // The Unlocked, Locked, ReaderLocked, and WriterLocked structs
@@ -80,7 +82,7 @@ public:
   }
 
 private:
-  class PipeLocked: public PipeController {
+  class PipeLocked final: public PipeController {
   public:
     explicit PipeLocked(Controller& inner, jsg::Ref<WritableStream> ref)
         : inner(inner), writableStreamRef(kj::mv(ref)) {}
@@ -652,7 +654,7 @@ jsg::Promise<ReadResult> deferControllerStateChange(
 // jsg::Ref<ReadableStreamDefaultController> or jsg::Ref<ReadableByteStreamController>.
 // These are the objects that are actually passed on to the user-code's Underlying Source
 // implementation.
-class ReadableStreamJsController: public ReadableStreamController {
+class ReadableStreamJsController final: public ReadableStreamController {
 public:
   using ReadableLockImpl = ReadableLockImpl<ReadableStreamJsController>;
 
@@ -791,11 +793,7 @@ private:
 // The WritableStreamJsController provides the implementation of custom
 // WritableStream's backed by a user-code provided Underlying Sink. The implementation
 // is fairly complicated and defined entirely by the streams specification.
-//
-// Importantly, the controller is designed to operate entirely within the JavaScript
-// isolate lock. It is possible to call removeSink() to acquire a WritableStreamSink
-// implementation that delegates to the WritableStreamDefaultController.
-class WritableStreamJsController: public WritableStreamController {
+class WritableStreamJsController final: public WritableStreamController {
 public:
   using WritableLockImpl = WritableLockImpl<WritableStreamJsController>;
 
@@ -847,6 +845,7 @@ public:
   void releaseWriter(Writer& writer, kj::Maybe<jsg::Lock&> maybeJs) override;
 
   kj::Maybe<kj::Own<WritableStreamSink>> removeSink(jsg::Lock& js) override;
+  void detach(jsg::Lock& js) override;
 
   void setOwnerRef(WritableStream& stream) override;
 
@@ -1541,6 +1540,30 @@ void WritableImpl<Self>::updateBackpressure(jsg::Lock& js) {
   KJ_ASSERT(isWritable());
   KJ_ASSERT(!isCloseQueuedOrInFlight());
   bool bp = getDesiredSize() < 0;
+
+  // We use a variable multiplier here in order to prevent the warning from being too
+  // spammy in the default case. The default high water mark for a standard writable stream
+  // is 1, which means we'd end up emitting a warning every time the buffer size is greater
+  // than 2, which is not very helpful. Instead, for any highWaterMark < 10, we'll configure
+  // a multiplier of 10, and for any highWaterMark >= 10, we'll configure a multiplier of 2.
+  // This is fairly arbitrary and may need to be tuned further.
+  int warningMultiplier = highWaterMark <= 10 ? 10 : 2;
+
+  if (warnAboutExcessiveBackpressure && (amountBuffered >= warningMultiplier * highWaterMark)) {
+    excessiveBackpressureWarningCount++;
+    auto warning = kj::str("A WritableStream is experiencing excessive backpressure. "
+                            "The current write buffer size is ", amountBuffered,
+                            ", which is greater than or equal to ", warningMultiplier,
+                            " times the high water mark of ", highWaterMark,
+                            ". Streams that consistently exceed the configured high water ",
+                            "mark may cause excessive memory usage. ",
+                            "(Count ", excessiveBackpressureWarningCount, ")");
+    js.logWarning(warning);
+    warnAboutExcessiveBackpressure = false;
+  }
+
+  if (!bp) warnAboutExcessiveBackpressure = true;
+
   if (bp != backpressure) {
     backpressure = bp;
     KJ_IF_SOME(owner, tryGetOwner()) {
@@ -1659,7 +1682,6 @@ struct ReadableState {
     return ReadableState(controller.addRef(), consumer->clone(js, listener), owner);
   }
 };
-}  // namespace
 
 struct ValueReadable final: private api::ValueQueue::ConsumerImpl::StateListener {
 
@@ -1839,19 +1861,25 @@ struct ByteReadable final: private api::ByteQueue::ConsumerImpl::StateListener {
         s.consumer->read(js, ByteQueue::ReadRequest(
           kj::mv(prp.resolver),
           {
-            .store = source.detach(js),
+            .store = jsg::BufferSource(js, source.detach(js)),
             .atLeast = atLeast,
             .type = ByteQueue::ReadRequest::Type::BYOB,
           }
         ));
       } else {
-        s.consumer->read(js, ByteQueue::ReadRequest(
-          kj::mv(prp.resolver),
-          {
-            .store = jsg::BackingStore::alloc(js, autoAllocateChunkSize),
-            .type = ByteQueue::ReadRequest::Type::BYOB,
-          }
-        ));
+        KJ_IF_SOME(store, jsg::BufferSource::tryAlloc(js, autoAllocateChunkSize)) {
+          // Ensure that the handle is created here so that the size of the buffer
+          // is accounted for in the isolate memory tracking.
+          s.consumer->read(js, ByteQueue::ReadRequest(
+            kj::mv(prp.resolver),
+            {
+              .store = kj::mv(store),
+              .type = ByteQueue::ReadRequest::Type::BYOB,
+            }
+          ));
+        } else {
+          prp.resolver.reject(js, js.v8Error("Failed to allocate buffer for read."));
+        }
       }
 
       return kj::mv(prp.promise);
@@ -1925,6 +1953,7 @@ struct ByteReadable final: private api::ByteQueue::ConsumerImpl::StateListener {
     return state.map([](State& state) { return state.controller.addRef(); });
   }
 };
+}  // namespace
 
 // =======================================================================================
 
@@ -2082,7 +2111,7 @@ void ReadableStreamBYOBRequest::respond(jsg::Lock& js, int bytesWritten) {
       // While this particular request may be invalidated, there are still
       // other branches we can push the data to. Let's do so.
       jsg::BufferSource source(js, impl.view.getHandle(js));
-      auto entry = kj::heap<ByteQueue::Entry>(source.detach(js));
+      auto entry = kj::heap<ByteQueue::Entry>(jsg::BufferSource(js, source.detach(js)));
       impl.controller->impl.enqueue(js, kj::mv(entry), impl.controller.addRef());
     } else {
       JSG_REQUIRE(bytesWritten > 0,
@@ -2120,7 +2149,7 @@ void ReadableStreamBYOBRequest::respondWithNewView(jsg::Lock& js, jsg::BufferSou
     if (impl.readRequest->isInvalidated() && impl.controller->impl.consumerCount() >= 1) {
       // While this particular request may be invalidated, there are still
       // other branches we can push the data to. Let's do so.
-      auto entry = kj::heap<ByteQueue::Entry>(view.detach(js));
+      auto entry = kj::heap<ByteQueue::Entry>(jsg::BufferSource(js, view.detach(js)));
       impl.controller->impl.enqueue(js, kj::mv(entry), impl.controller.addRef());
     } else {
       JSG_REQUIRE(view.size() > 0,
@@ -2213,7 +2242,7 @@ void ReadableByteStreamController::enqueue(jsg::Lock& js, jsg::BufferSource chun
     byobRequest->invalidate(js);
   }
 
-  impl.enqueue(js, kj::heap<ByteQueue::Entry>(chunk.detach(js)), JSG_THIS);
+  impl.enqueue(js, kj::heap<ByteQueue::Entry>(jsg::BufferSource(js, chunk.detach(js))), JSG_THIS);
 }
 
 void ReadableByteStreamController::error(jsg::Lock& js, v8::Local<v8::Value> reason) {
@@ -2729,7 +2758,7 @@ public:
 private:
   kj::OneOf<StreamStates::Closed, StreamStates::Errored, jsg::Ref<ReadableStream>> state;
   uint64_t limit;
-  kj::Vector<jsg::BackingStore> parts;
+  kj::Vector<jsg::BufferSource> parts;
   uint64_t runningTotal = 0;
 
   jsg::Promise<PartList> loop(jsg::Lock& js) {
@@ -2781,7 +2810,7 @@ private:
           }
 
           runningTotal += backing.size();
-          parts.add(kj::mv(backing));
+          parts.add(jsg::BufferSource(js, kj::mv(backing)));
           return loop(js);
         };
 
@@ -2843,7 +2872,7 @@ public:
         // by kj write promise. If the outer kj Promise is dropped, the PumpToReader attached
         // to it is dropped. When that happens, there's a chance the JS continuation will still
         // be scheduled to run. The IoOwn ensures that the PumpToReader, and the sink it owns,
-        // are always accessed from the right IoContext. Thw WeakRef ensures that if the
+        // are always accessed from the right IoContext. The WeakRef ensures that if the
         // PumpToReader is freed while the JS continuation is pending, there won't be a dangling
         // reference.
         return ioContext.awaitJs(js,
@@ -2992,8 +3021,7 @@ private:
             KJ_SWITCH_ONEOF(result) {
               KJ_CASE_ONEOF(bytes, kj::Array<kj::byte>) {
                 // We received bytes to write. Do so...
-                auto promise = reader.sink->write(bytes.begin(), bytes.size())
-                    .attach(kj::mv(bytes));
+                auto promise = reader.sink->write(bytes).attach(kj::mv(bytes));
                 // Wrap the write promise in a canceler that will be triggered when the
                 // PumpToReader is dropped. While the write promise is pending, it is
                 // possible for the promise that is holding the PumpToReader to be
@@ -3460,7 +3488,10 @@ void WritableStreamJsController::releaseWriter(
 }
 
 kj::Maybe<kj::Own<WritableStreamSink>> WritableStreamJsController::removeSink(jsg::Lock& js) {
-  KJ_UNIMPLEMENTED("WritableStreamJsController::removeSink is not implemented");
+  return kj::none;
+}
+void WritableStreamJsController::detach(jsg::Lock& js) {
+  KJ_UNIMPLEMENTED("WritableStreamJsController::detach is not implemented");
 }
 
 void WritableStreamJsController::setOwnerRef(WritableStream& stream) {

@@ -1,7 +1,7 @@
 name: Publish to NPM
 on:
-# Since we still need to manually upload binaries, use manual run
-# Ideally this would trigger off `release`
+  # Since we still need to manually upload binaries, use manual run
+  # Ideally this would trigger off `release`
   workflow_dispatch:
     inputs:
       patch:
@@ -19,7 +19,7 @@ jobs:
       version: ${{ steps.echo.outputs.version }}
       date: ${{ steps.echo.outputs.date }}
       release_version: ${{ steps.echo.outputs.release_version }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - id: echo
@@ -57,7 +57,7 @@ jobs:
           fileName: workerd-${{ matrix.arch }}.gz
           tarBall: false
           zipBall: false
-          out-file-path: "release-downloads"
+          out-file-path: 'release-downloads'
           token: ${{ secrets.GITHUB_TOKEN }}
         # release-downloader does not support .gz files (unlike .tar.gz), decompress manually
         # Using the -N flag the right file name should be restored
@@ -86,6 +86,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 18
+
+      - name: Cache
+        id: cache
+        uses: actions/cache@v4
+        # Use same cache and build configuration as release build, this allows us to keep download
+        # sizes small and generate types with optimization enabled, should be slightly faster.
+        with:
+          path: ~/bazel-disk-cache
+          key: bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'WORKSPACE') }}
+      - name: Setup Linux
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          wget https://apt.llvm.org/llvm.sh
+          sed -i '/apt-get install/d' llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 16
+          sudo apt-get install -y --no-install-recommends clang-16 lld-16 libunwind-16 libc++abi1-16 libc++1-16 libc++-16-dev
+          echo "build:linux --action_env=CC=/usr/lib/llvm-16/bin/clang --action_env=CXX=/usr/lib/llvm-16/bin/clang++" >> .bazelrc
+          echo "build:linux --host_action_env=CC=/usr/lib/llvm-16/bin/clang --host_action_env=CXX=/usr/lib/llvm-16/bin/clang++" >> .bazelrc
+      - name: Build type generating Worker
+        run: |
+          bazel build --disk_cache=~/bazel-disk-cache --strip=always --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --config=release_linux //types:types_worker
 
       - name: Modify package.json version
         run: node npm/scripts/bump-version.mjs npm/workerd/package.json

@@ -5,7 +5,8 @@
 #include <benchmark/benchmark.h>
 #include <workerd/tests/bench-tools.h>
 #include <workerd/api/r2-api.capnp.h>
-#include "capnp/compat/json.h"
+#include <capnp/message.h>
+#include <capnp/compat/json.h>
 #include <kj/string.h>
 #include <kj/test.h>
 

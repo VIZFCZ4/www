@@ -6,7 +6,7 @@
 #include "setup.h"
 #include "ser.h"
 #include <kj/debug.h>
-#include <stdlib.h>
+#include <cstdlib>
 
 #if !_WIN32
 #include <cxxabi.h>
@@ -100,48 +100,6 @@ kj::StringPtr trimErrorMessage(kj::StringPtr errorString) {
   return "";
 }
 
-kj::Maybe<v8::Local<v8::Value>> tryMakeDomException(v8::Isolate* isolate,
-                                                    v8::Local<v8::String> message,
-                                                    kj::StringPtr errorName) {
-  // If the global scope object has a "DOMException" object that is a constructor, construct a new
-  // DOMException with the passed parameters. Note that this information is available at
-  // compile-time via TypeWrapper, but threading TypeWrapper up from liftKj() call sites all the
-  // way up here would be a readability nerf and lock users into our version of DOMException.
-
-  auto context = isolate->GetCurrentContext();
-  auto global = context->Global();
-
-  const auto toObject = [context](v8::Local<v8::Value> value) {
-    return check(value->ToObject(context));
-  };
-  const auto getInterned = [isolate, context](v8::Local<v8::Object> object, const char* s) {
-    return check(object->Get(context, v8StrIntern(isolate, s)));
-  };
-
-  if (auto domException = getInterned(global, "DOMException"); domException->IsObject()) {
-    if (auto domExceptionCtor = toObject(domException); domExceptionCtor->IsConstructor()) {
-      v8::Local<v8::Value> args[2] = {
-        message, v8StrIntern(isolate, errorName)
-      };
-      return check(domExceptionCtor->CallAsConstructor(context, 2, args));
-    }
-  }
-
-  return kj::none;
-}
-
-v8::Local<v8::Value> tryMakeDomExceptionOrDefaultError(
-    v8::Isolate* isolate, v8::Local<v8::String> message, kj::StringPtr errorName) {
-  return tryMakeDomException(isolate, message, errorName).orDefault([&]() {
-    return v8::Exception::Error(message);
-  });
-}
-
-v8::Local<v8::Value> tryMakeDomExceptionOrDefaultError(
-    v8::Isolate* isolate, kj::StringPtr message, kj::StringPtr errorName) {
-  return tryMakeDomExceptionOrDefaultError(isolate, v8Str(isolate, message), errorName);
-}
-
 bool setRemoteError(v8::Isolate* isolate, v8::Local<v8::Value>& exception) {
   // If an exception was tunneled, we add a property `.remote` to the Javascript error.
   KJ_ASSERT(exception->IsObject());
@@ -150,6 +108,26 @@ bool setRemoteError(v8::Isolate* isolate, v8::Local<v8::Value>& exception) {
     obj->Set(
       isolate->GetCurrentContext(),
       jsg::v8StrIntern(isolate, "remote"_kj),
+      v8::True(isolate)));
+}
+
+bool setRetryableError(v8::Isolate* isolate, v8::Local<v8::Value>& exception) {
+  KJ_ASSERT(exception->IsObject());
+  auto obj = exception.As<v8::Object>();
+  return jsg::check(
+    obj->Set(
+      isolate->GetCurrentContext(),
+      jsg::v8StrIntern(isolate, "retryable"_kj),
+      v8::True(isolate)));
+}
+
+bool setOverloadedError(v8::Isolate* isolate, v8::Local<v8::Value>& exception) {
+  KJ_ASSERT(exception->IsObject());
+  auto obj = exception.As<v8::Object>();
+  return jsg::check(
+    obj->Set(
+      isolate->GetCurrentContext(),
+      jsg::v8StrIntern(isolate, "overloaded"_kj),
       v8::True(isolate)));
 }
 
@@ -170,7 +148,8 @@ struct DecodedException {
 };
 
 DecodedException decodeTunneledException(v8::Isolate* isolate,
-                                         kj::StringPtr internalMessage) {
+                                         kj::StringPtr internalMessage,
+                                         kj::Exception::Type excType) {
   // We currently support tunneling the following error types:
   //
   // - Error:        While the Web IDL spec claims this is reserved for use by program authors, this
@@ -227,9 +206,11 @@ DecodedException decodeTunneledException(v8::Isolate* isolate,
         errorType = errorType.slice(strlen("DOMException("));
         // Check for closing brace
         KJ_IF_SOME(closeParen, errorType.findFirst(')')) {
+          auto& js = Lock::from(isolate);
           auto errorName = kj::str(errorType.slice(0, closeParen));
           auto message = appMessage(errorType.slice(1 + closeParen));
-          result.handle = tryMakeDomExceptionOrDefaultError(isolate, message, errorName);
+          auto exception = js.domException(kj::mv(errorName), kj::str(message));
+          result.handle = KJ_ASSERT_NONNULL(exception.tryGetHandle(js));
           break;
         }
       }
@@ -242,6 +223,12 @@ DecodedException decodeTunneledException(v8::Isolate* isolate,
 
   if (result.isFromRemote) {
     setRemoteError(isolate, result.handle);
+  }
+
+  if (excType == kj::Exception::Type::DISCONNECTED) {
+    setRetryableError(isolate, result.handle);
+  } else if (excType == kj::Exception::Type::OVERLOADED) {
+    setOverloadedError(isolate, result.handle);
   }
 
   if (result.isDurableObjectReset) {
@@ -262,8 +249,6 @@ kj::StringPtr extractTunneledExceptionDescription(kj::StringPtr message) {
   }
 }
 
-
-
 v8::Local<v8::Value> makeInternalError(v8::Isolate* isolate, kj::Exception&& exception) {
   auto desc = exception.getDescription();
 
@@ -275,7 +260,7 @@ v8::Local<v8::Value> makeInternalError(v8::Isolate* isolate, kj::Exception&& exc
   //   in order to extract a full stack trace. Once we do it here, we can remove the code from
   //   there.
 
-  auto tunneledException = decodeTunneledException(isolate, desc);
+  auto tunneledException = decodeTunneledException(isolate, desc, exception.getType());
 
   if (tunneledException.isInternal) {
     auto& observer = IsolateBase::from(isolate).getObserver();
@@ -298,6 +283,9 @@ v8::Local<v8::Value> makeInternalError(v8::Isolate* isolate, kj::Exception&& exc
       if (tunneledException.isFromRemote) {
         setRemoteError(isolate, exception);
       }
+
+      // DISCONNECTED exceptions are considered retryable
+      setRetryableError(isolate, exception);
 
       if (tunneledException.isDurableObjectReset) {
         setDurableObjectResetError(isolate, exception);
@@ -352,17 +340,23 @@ void throwInternalError(v8::Isolate* isolate, kj::Exception&& exception) {
 }
 
 void addExceptionDetail(Lock& js, kj::Exception& exception, v8::Local<v8::Value> handle) {
-  js.tryCatch([&]() {
+  v8::TryCatch tryCatch(js.v8Isolate);
+  try {
     Serializer ser(js, {
-      // Make sure we don't break compatibility if V8 introduces a new version. This vaule can
+      // Make sure we don't break compatibility if V8 introduces a new version. This value can
       // be bumped to match the new version once all of production is updated to understand it.
       .version = 15,
     });
     ser.write(js, JsValue(handle));
     exception.setDetail(TUNNELED_EXCEPTION_DETAIL_ID, ser.release().data);
-  }, [](jsg::Value&& error) {
-    // Exception not serializable, ignore.
-  });
+  } catch (JsExceptionThrown&) {
+    // Either:
+    // a. The exception is not serializable, and we caught the exception. We will just ignore it
+    //    and proceed without annotating.
+    // b. The isolate's execution is being terminated, and so tryCatch.CanContinue() is false. In
+    //    this case we cannot serialize the exception, but again we'll just move on without the
+    //    annotation.
+  }
 }
 
 static kj::String typeErrorMessage(TypeErrorContext c, const char* expectedType) {
@@ -588,13 +582,6 @@ v8::Local<v8::Value> deepClone(v8::Local<v8::Context> context, v8::Local<v8::Val
   return check(v8::JSON::Parse(context, serialized));
 }
 
-v8::Local<v8::Value> makeDOMException(
-    v8::Isolate* isolate,
-    v8::Local<v8::String> message,
-    kj::StringPtr name) {
-  return KJ_ASSERT_NONNULL(tryMakeDomException(isolate, message, name));
-}
-
 namespace {
 v8::MaybeLocal<v8::Value> makeRejectedPromise(
     v8::Isolate* isolate,
@@ -627,14 +614,14 @@ void returnRejectedPromise(
     const v8::FunctionCallbackInfo<v8::Value>& info,
     v8::Local<v8::Value> exception,
     v8::TryCatch& tryCatch) {
-  return returnRejectedPromiseImpl(info, exception, tryCatch);
+  return returnRejectedPromiseImpl<const v8::FunctionCallbackInfo<v8::Value>&>(info, exception, tryCatch);
 }
 
 void returnRejectedPromise(
     const v8::PropertyCallbackInfo<v8::Value>& info,
     v8::Local<v8::Value> exception,
     v8::TryCatch& tryCatch) {
-  return returnRejectedPromiseImpl(info, exception, tryCatch);
+  return returnRejectedPromiseImpl<const v8::PropertyCallbackInfo<v8::Value>&>(info, exception, tryCatch);
 }
 
 // ======================================================================================

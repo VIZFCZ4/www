@@ -3,6 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "http.h"
+#include "data-url.h"
 #include "sockets.h"
 #include "system-streams.h"
 #include "util.h"
@@ -595,7 +596,7 @@ public:
     if (unread != nullptr) {
       auto data = unread;
       unread = nullptr;
-      co_await output.write(data.begin(), data.size());
+      co_await output.write(data);
       if (end) co_await output.end();
     }
 
@@ -781,6 +782,13 @@ jsg::Promise<kj::Array<byte>> Body::arrayBuffer(jsg::Lock& js) {
   // See https://fetch.spec.whatwg.org/#concept-body-consume-body
   return js.resolvedPromise(kj::Array<byte>());
 }
+
+jsg::Promise<jsg::BufferSource> Body::bytes(jsg::Lock& js) {
+  return arrayBuffer(js).then(js, [](jsg::Lock& js, kj::Array<kj::byte> data) {
+    return js.bytes(kj::mv(data));
+  });
+}
+
 jsg::Promise<kj::String> Body::text(jsg::Lock& js) {
   KJ_IF_SOME(i, impl) {
     return js.evalNow([&] {
@@ -825,7 +833,7 @@ jsg::Promise<jsg::Ref<FormData>> Body::formData(jsg::Lock& js) {
           context.getLimitEnforcer().getBufferingLimit()).then(js,
           [contentType = kj::mv(contentType), formData = kj::mv(formData)]
           (auto& js, kj::String rawText) mutable {
-        formData->parse(kj::mv(rawText), contentType,
+        formData->parse(js, kj::mv(rawText), contentType,
             !FeatureFlags::get(js).getFormDataParserSupportsFiles());
         return kj::mv(formData);
       });
@@ -834,7 +842,7 @@ jsg::Promise<jsg::Ref<FormData>> Body::formData(jsg::Lock& js) {
     // Theoretically, we already know if this will throw: the empty string is a valid
     // application/x-www-form-urlencoded body, but not multipart/form-data. However, best to let
     // FormData::parse() make the decision, to keep the logic in one place.
-    formData->parse(kj::String(), contentType,
+    formData->parse(js, kj::String(), contentType,
         !FeatureFlags::get(js).getFormDataParserSupportsFiles());
     return js.resolvedPromise(kj::mv(formData));
   });
@@ -847,12 +855,20 @@ jsg::Promise<jsg::Value> Body::json(jsg::Lock& js) {
 }
 
 jsg::Promise<jsg::Ref<Blob>> Body::blob(jsg::Lock& js) {
-  return arrayBuffer(js).then(js, [this](jsg::Lock&, kj::Array<byte> buffer) {
+  return arrayBuffer(js).then(js, [this](jsg::Lock& js, kj::Array<byte> buffer) {
     kj::String contentType =
         headersRef.get(jsg::ByteString(kj::str("Content-Type")))
             .map([](jsg::ByteString&& b) -> kj::String { return kj::mv(b); })
             .orDefault(nullptr);
-    return jsg::alloc<Blob>(kj::mv(buffer), kj::mv(contentType));
+
+    if (FeatureFlags::get(js).getBlobStandardMimeType()) {
+      contentType =
+          MimeType::extract(contentType).map([](MimeType&& mt) -> kj::String {
+            return mt.toString();
+          }).orDefault(nullptr);
+    }
+
+    return jsg::alloc<Blob>(js, kj::mv(buffer), kj::mv(contentType));
   });
 }
 
@@ -898,6 +914,22 @@ jsg::Ref<Request> Request::constructor(
   KJ_SWITCH_ONEOF(input) {
     KJ_CASE_ONEOF(u, kj::String) {
       url = kj::mv(u);
+
+      // TODO(later): This is rather unfortunate. The original implementation of
+      // this used non-standard URL parsing in violation of the spec. Unfortunately
+      // some users have come to depend on the non-standard behavior so we have to
+      // gate the standard behavior with a compat flag. Ideally we'd just be able to
+      // use the standard parsed URL throughout all of the code but in order to
+      // minimize the number of changes, we're going to ultimately end up double
+      // parsing (and serializing) the URL... here we parse it with the standard
+      // parser, reserialize it back into a string for the sake of not modifying
+      // the rest of the implementation. Fortunately the standard parser is fast
+      // but it would eventually be nice to eliminate the double parsing.
+      if (FeatureFlags::get(js).getFetchStandardUrl()) {
+        auto parsed = JSG_REQUIRE_NONNULL(jsg::Url::tryParse(url.asPtr()), TypeError,
+            kj::str("Invalid URL: ", url));
+        url = kj::str(parsed.getHref());
+      }
     }
     KJ_CASE_ONEOF(r, jsg::Ref<Request>) {
       // Check to see if we're getting a new body from `init`. If so, we want to ignore `input`'s
@@ -1517,7 +1549,7 @@ kj::Promise<DeferredProxy<void>> Response::send(
     }
 
     auto clientSocket = outer.acceptWebSocket(outHeaders);
-    auto wsPromise = ws->couple(kj::mv(clientSocket));
+    auto wsPromise = ws->couple(kj::mv(clientSocket), context.getMetrics());
 
     KJ_IF_SOME(a, context.getActor()) {
       KJ_IF_SOME(hib, a.getHibernationManager()) {
@@ -1776,7 +1808,7 @@ jsg::Promise<jsg::Ref<Response>> fetchImplNoOutputLock(
               jsRequest->getMethodEnum(), kj::mv(urlList),
               response.statusCode, response.statusText, *response.headers,
               newNullInputStream(),
-              jsg::alloc<WebSocket>(kj::mv(webSocket), WebSocket::REMOTE),
+              jsg::alloc<WebSocket>(kj::mv(webSocket)),
               Response::BodyEncoding::AUTO,
               kj::mv(signal)));
         }
@@ -1837,7 +1869,15 @@ jsg::Promise<jsg::Ref<Response>> fetchImplNoOutputLock(
       nativeRequest = client->request(jsRequest->getMethodEnum(), url, headers, uint64_t(0));
     }
     return ioContext.awaitIo(js,
-        AbortSignal::maybeCancelWrap(signal, kj::mv(KJ_ASSERT_NONNULL(nativeRequest).response)),
+        AbortSignal::maybeCancelWrap(signal, kj::mv(KJ_ASSERT_NONNULL(nativeRequest).response))
+            .catch_([](kj::Exception&& exception) -> kj::Promise<kj::HttpClient::Response> {
+          if (exception.getDescription().startsWith("invalid Content-Length header value")) {
+            return JSG_KJ_EXCEPTION(FAILED, Error, exception.getDescription());
+          } else if (exception.getDescription().contains("NOSENTRY script not found")) {
+            return JSG_KJ_EXCEPTION(FAILED, Error, "Worker not found.");
+          }
+          return kj::mv(exception);
+        }),
         [fetcher = kj::mv(fetcher), jsRequest = kj::mv(jsRequest),
          urlList = kj::mv(urlList), client = kj::mv(client)]
         (jsg::Lock& js, kj::HttpClient::Response&& response) mutable
@@ -1915,7 +1955,29 @@ jsg::Promise<jsg::Ref<Response>> handleHttpRedirectResponse(
   //   - Translates HEAD requests that hit 303 into HEAD requests with null bodies.
   //   - Translates all other requests that hit 303 into GET requests with null bodies.
 
-  auto redirectedLocation = urlList.back().tryParseRelative(location);
+  auto redirectedLocation = ([&]() -> kj::Maybe<kj::Url> {
+    // TODO(later): This is a bit unfortunate. Per the fetch spec, we're supposed to be
+    // using standard WHATWG URL parsing to resolve the redirect URL. However, changing it
+    // now requires a compat flag. In order to minimize changes to the rest of the impl
+    // we end up double parsing the URL here, once with the standard parser to produce the
+    // correct result, and again with kj::Url in order to produce something that works with
+    // the existing code. Fortunately the standard parser is fast but it would be nice to
+    // be able to avoid the double parse at some point.
+    if (FeatureFlags::get(js).getFetchStandardUrl()) {
+      auto base = urlList.back().toString();
+      KJ_IF_SOME(parsed, jsg::Url::tryParse(location, base.asPtr())) {
+        auto str = kj::str(parsed.getHref());
+        return kj::Url::tryParse(str.asPtr(), kj::Url::Context::REMOTE_HREF, kj::Url::Options {
+          .percentDecode = false,
+          .allowEmpty = true,
+        });
+      } else {
+        return kj::none;
+      }
+    } else {
+      return urlList.back().tryParseRelative(location);
+    }
+  })();
 
   if (redirectedLocation == kj::none) {
     auto exception = JSG_KJ_EXCEPTION(FAILED, TypeError,
@@ -2057,6 +2119,20 @@ jsg::Promise<jsg::Ref<Response>> fetchImplNoOutputLock(
     } else {
       actualFetcher = jsg::alloc<Fetcher>(
           IoContext::NULL_CLIENT_CHANNEL, Fetcher::RequiresHostAndProtocol::YES);
+    }
+
+    KJ_IF_SOME(dataUrl, DataUrl::tryParse(jsRequest->getUrl())) {
+      // If the URL is a data URL, we need to handle it specially.
+      auto data = dataUrl.releaseData();
+      auto headers = jsg::alloc<Headers>();
+      headers->set(jsg::ByteString(kj::str("content-type")),
+                   jsg::ByteString(dataUrl.getMimeType().toString()));
+      return js.resolvedPromise(Response::constructor(js, kj::Maybe(kj::mv(data)),
+         Response::InitializerDict {
+          .status = 200,
+          .statusText = kj::str("OK"),
+          .headers = kj::mv(headers),
+        }));
     }
 
     urlList.add(actualFetcher->parseUrl(js, jsRequest->getUrl()));

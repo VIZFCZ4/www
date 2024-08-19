@@ -43,6 +43,7 @@ struct Trace @0x8e8d911203762d34 {
   outcome @2 :EventOutcome;
   scriptName @4 :Text;
   scriptVersion @19 :ScriptVersion;
+  scriptId @23 :Text;
 
   eventTimestampNs @5 :Int64;
 
@@ -134,6 +135,9 @@ struct Trace @0x8e8d911203762d34 {
     channel @1 :Text;
     message @2 :Data;
   }
+
+  truncated @24 :Bool;
+  # Indicates that the trace was truncated due to reaching the maximum size limit.
 }
 
 struct ScheduledRun @0xd98fc1ae5c8095d0 {
@@ -225,6 +229,12 @@ enum SerializationTag {
   headers @4;
   request @5;
   response @6;
+
+  domException @7;
+  domExceptionV2 @8;
+  # Keep this value in sync with the DOMException::SERIALIZATION_TAG in
+  # /src/workerd/jsg/dom-exception (but we can't actually change this value
+  # without breaking things).
 }
 
 enum StreamEncoding {

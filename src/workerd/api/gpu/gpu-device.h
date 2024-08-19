@@ -20,7 +20,7 @@
 #include "gpu-supported-features.h"
 #include "gpu-supported-limits.h"
 #include "gpu-texture.h"
-#include "workerd/jsg/promise.h"
+#include <workerd/jsg/promise.h>
 #include <dawn/native/DawnNative.h>
 #include <webgpu/webgpu_cpp.h>
 #include <workerd/api/basics.h>
@@ -28,9 +28,15 @@
 
 namespace workerd::api::gpu {
 
+struct UncapturedErrorContext {
+  kj::Maybe<EventTarget*> target;
+};
+
 class GPUDevice : public EventTarget {
 public:
-  explicit GPUDevice(jsg::Lock& js, wgpu::Device d);
+  explicit GPUDevice(jsg::Lock& js, wgpu::Device d, kj::Own<AsyncRunner> async,
+                     kj::Own<AsyncContext<jsg::Ref<GPUDeviceLostInfo>>> deviceLostCtx,
+                     kj::Own<UncapturedErrorContext> uErrorCtx);
   ~GPUDevice();
   JSG_RESOURCE_TYPE(GPUDevice) {
     JSG_INHERIT(EventTarget);
@@ -60,8 +66,9 @@ public:
 
 private:
   wgpu::Device device_;
+  kj::Own<AsyncContext<jsg::Ref<GPUDeviceLostInfo>>> dlc_;
   jsg::MemoizedIdentity<jsg::Promise<jsg::Ref<GPUDeviceLostInfo>>> lost_promise_;
-  kj::Own<kj::PromiseFulfiller<jsg::Ref<GPUDeviceLostInfo>>> lost_promise_fulfiller_;
+  kj::Own<UncapturedErrorContext> uec_;
   kj::Own<AsyncRunner> async_;
   bool destroyed_ = false;
   jsg::Ref<GPUBuffer> createBuffer(jsg::Lock&, GPUBufferDescriptor);

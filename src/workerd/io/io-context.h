@@ -6,12 +6,12 @@
 
 #include <workerd/io/actor-id.h>
 #include <workerd/io/io-channels.h>
-#include "io-gate.h"
+#include <workerd/io/io-gate.h>
 #include "io-own.h"
 #include "io-timers.h"
 #include "io-thread-context.h"
 #include "limit-enforcer.h"
-#include "trace.h"
+#include <workerd/io/trace.h>
 #include "worker.h"
 #include <workerd/api/deferred-proxy.h>
 #include <workerd/jsg/async-context.h>
@@ -24,7 +24,6 @@
 #include <workerd/util/weak-refs.h>
 #include <workerd/io/limit-enforcer.h>
 #include <workerd/io/io-channels.h>
-#include <workerd/util/perfetto-tracing.h>
 #include <workerd/util/uncaught-exception-source.h>
 
 namespace capnp { class HttpOverCapnpFactory; }
@@ -96,7 +95,7 @@ private:
 // heuristic approximation, we attribute each subrequest (and all other forms of resource
 // usage) to the "current" incoming request, which is defined as the newest request that hasn't
 // already completed.
-class IoContext_IncomingRequest {
+class IoContext_IncomingRequest final {
 public:
   IoContext_IncomingRequest(kj::Own<IoContext> context,
                             kj::Own<IoChannelFactory> ioChannelFactory,
@@ -370,7 +369,8 @@ public:
   static void requireCurrentOrThrowJs(WeakRef& weak);
 
   // Just throw the error that requireCurrentOrThrowJs() would throw on failure.
-  [[noreturn]] static void throwNotCurrentJsError();
+  [[noreturn]] static void throwNotCurrentJsError(
+      kj::Maybe<const std::type_info&> maybeType = kj::none);
 
   // -----------------------------------------------------------------
   // Task scheduling and object storage
@@ -407,7 +407,7 @@ public:
   // Historically, we solved this with something called `capctx`. You would write something like:
   // `awaitIo(promise.then(capctx(func)))`. This provided both properties: `func()` ran both in
   // the KJ event loop and with the isolate lock held. However, this had the problem that it
-  // required returning to the KJ event loop between running func() and runnning whatever
+  // required returning to the KJ event loop between running func() and running whatever
   // JavaScript code was waiting on it. This implies releasing the isolate lock just to
   // immediately acquire it again, which was wasteful. Passing `func` as a parameter to `awaitIo()`
   // allows it to run under the same isolate lock that then runs the awaiting JavaScript.
@@ -504,6 +504,12 @@ public:
   template <typename Func>
   auto addFunctor(Func&& func);
 
+  // Attach an object to the IoContext such that it will be destroyed when either the returned
+  // reference is dropped OR the IoContext itself is destroyed. In the latter case, further
+  // attempts to access the returned reference will throw. The reference can only be used and
+  // destroyed within the same thread as the IoContext lives.
+  template <typename T> ReverseIoOwn<T> addObjectReverse(kj::Own<T> obj);
+
   // Call this to indicate that the caller expects to call into JavaScript in this IoContext
   // at some point in the future, in response to some *external* event that the caller is waiting
   // for. Then, hold on to the returned handle until that time. This prevents finalizers from being
@@ -522,7 +528,7 @@ public:
   }
 
   // Like awaitIo(), but handles the specific case of Promise<DeferredProxy>. This is special
-  // becaues the convention is that the outer promise is NOT treated as a pending I/O event; it
+  // because the convention is that the outer promise is NOT treated as a pending I/O event; it
   // may actually be waiting for something to happen in JavaScript land. Once the outer promise
   // resolves, the inner promise (the DeferredProxy<T>) is treated as external I/O.
   template <typename T>
@@ -811,7 +817,7 @@ private:
 
   void taskFailed(kj::Exception&& exception) override;
   void requireCurrent();
-  void checkFarGet(const DeleteQueue* expectedQueue);
+  void checkFarGet(const DeleteQueue* expectedQueue, const std::type_info& type);
 
   kj::Maybe<jsg::JsRef<jsg::JsObject>> promiseContextTag;
 
@@ -869,7 +875,7 @@ private:
     return incomingRequests.front();
   }
 
-  // Run the given callback within the scope of this IoContext. This encapsultes the
+  // Run the given callback within the scope of this IoContext. This encapsulates the
   // setup of a number of scopes that must be entered prior to running within the
   // context, including entering the V8StackScope and acquiring the Worker::Lock.
   void runInContextScope(Worker::LockType lockType,
@@ -878,6 +884,10 @@ private:
 
   friend class Finalizeable;
   friend class DeleteQueue;
+  template <typename T>
+  friend kj::Promise<ExceptionOr<T>> promiseForExceptionOrT(kj::Promise<T> promise);
+  template<typename Result>
+  friend Result throwOrReturnResult(jsg::Lock& js, IoContext::ExceptionOr<Result>&& exceptionOrResult);
 };
 
 // =======================================================================================
@@ -992,6 +1002,49 @@ jsg::Promise<T> IoContext::awaitIoLegacyWithInputLock(jsg::Lock& js, kj::Promise
   return awaitIoImpl(js, kj::mv(promise), getInputLock(), IdentityFunc<T>());
 }
 
+// To reduce the code size impact of awaitIoImpl, move promise continuation code out of
+// awaitIoImpl() where possible. This way, the then() parameters are only templated based on one
+// type each.
+template<typename T>
+kj::Promise<IoContext::ExceptionOr<T>> promiseForExceptionOrT(kj::Promise<T> promise) {
+  if constexpr (jsg::isVoid<T>()) {
+    return promise.then([]() -> IoContext::ExceptionOr<T> {
+      return kj::none;
+    }, [](kj::Exception&& exception) -> IoContext::ExceptionOr<T> {
+      return kj::mv(exception);
+    });
+  } else {
+    return promise.then([](T&& result) -> IoContext::ExceptionOr<T> {
+      return kj::mv(result);
+    }, [](kj::Exception&& exception) -> IoContext::ExceptionOr<T> {
+      return kj::mv(exception);
+    });
+  }
+};
+
+template<typename Result>
+Result throwOrReturnResult(jsg::Lock& js, IoContext::ExceptionOr<Result>&& exceptionOrResult) {
+  if constexpr (jsg::isVoid<Result>()) {
+    KJ_IF_SOME(e, exceptionOrResult) {
+      // Now that we're in a promise continuation, we can convert the error and get a good stack
+      // trace.
+      js.throwException(kj::mv(e));
+    }
+  } else {
+    KJ_SWITCH_ONEOF(exceptionOrResult) {
+      KJ_CASE_ONEOF(e, kj::Exception) {
+        // Now that we're in a promise continuation, we can convert the error and get a good stack
+        // trace.
+        js.throwException(kj::mv(e));
+      }
+      KJ_CASE_ONEOF(result, Result) {
+        return kj::mv(result);
+      }
+    }
+    KJ_UNREACHABLE;
+  }
+};
+
 template <typename T, typename InputLockOrMaybeCriticalSection, typename Func>
 jsg::PromiseForResult<Func, T, true> IoContext::awaitIoImpl(
     jsg::Lock& js, kj::Promise<T> promise, InputLockOrMaybeCriticalSection ilOrCs, Func&& func) {
@@ -1013,27 +1066,13 @@ jsg::PromiseForResult<Func, T, true> IoContext::awaitIoImpl(
 
   // We need to catch exceptions from KJ and merge them into the result, so that they can propagate
   // to JavaScript.
-  kj::Promise<ExceptionOr<T>> promiseForExceptionOrT = [&]() {
-    if constexpr (jsg::isVoid<T>()) {
-      return promise.then([]() -> ExceptionOr<T> {
-        return kj::none;
-      }, [](kj::Exception&& exception) -> ExceptionOr<T> {
-        return kj::mv(exception);
-      });
-    } else {
-      return promise.then([](T&& result) -> ExceptionOr<T> {
-        return kj::mv(result);
-      }, [](kj::Exception&& exception) -> ExceptionOr<T> {
-        return kj::mv(exception);
-      });
-    }
-  }();
+  kj::Promise<ExceptionOr<T>> promiseExceptionOrT = promiseForExceptionOrT(kj::mv(promise));
 
-  // Reminder: This can throw JsExceptionThrown if the execution context has been termintaed.
-  // it's important in that case that `promiseForExceptionOrT` will be destroyed before `func`.
+  // Reminder: This can throw JsExceptionThrown if the execution context has been terminated.
+  // it's important in that case that `promiseExceptionOrT` will be destroyed before `func`.
   auto [ jsPromise, resolver ] = js.newPromiseAndResolver<ExceptionOr<Result>>();
 
-  addTask(promiseForExceptionOrT
+  addTask(promiseExceptionOrT
       .then([this, resolver = kj::mv(resolver), ilOrCs = kj::mv(ilOrCs),
             maybeAsyncContext = jsg::AsyncContextFrame::currentRef(js),
             // Reminder: It's important that `func` gets attached to the promise before the whole
@@ -1060,9 +1099,9 @@ jsg::PromiseForResult<Func, T, true> IoContext::awaitIoImpl(
           // We don't use `resolver.reject()` here because if we convert the kj::Exception into
           // a JS Error here, it won't have a useful stack trace. V8 can generate a good stack
           // trace as long as we construct the Error inside of a promise continuation, so we use
-          // a `.then()` below that acutally extracts the kj::Exception and turn it into a JS
+          // a `.then()` below that actually extracts the kj::Exception and turn it into a JS
           // Error.
-          resolver.resolve(kj::mv(e));
+          resolver.resolve(js, kj::mv(e));
         } else {
           try {
             js.tryCatch([&]() {
@@ -1076,6 +1115,10 @@ jsg::PromiseForResult<Func, T, true> IoContext::awaitIoImpl(
               // Here we can just `resolver.reject` because we already have a JS exception.
               resolver.reject(js, error.getHandle(js));
             });
+          } catch (jsg::JsExceptionThrown&) {
+            // An uncatchable JS exception -- presumably, the isolate has been terminated. We
+            // can't convert this into a promise rejection, we need to just propagate it up.
+            throw;
           } catch (...) {
             // Again, pass along the KJ exception so we can convert it later in the right context.
             resolver.resolve(js, kj::getCaughtExceptionAsKj());
@@ -1101,6 +1144,10 @@ jsg::PromiseForResult<Func, T, true> IoContext::awaitIoImpl(
               }, [&](jsg::Value error) {
                 resolver.reject(js, error.getHandle(js));
               });
+            } catch (jsg::JsExceptionThrown&) {
+              // An uncatchable JS exception -- presumably, the isolate has been terminated. We
+              // can't convert this into a promise rejection, we need to just propagate it up.
+              throw;
             } catch (...) {
               // Again, pass along the KJ exception so we can convert it later in the right context.
               resolver.resolve(js, kj::getCaughtExceptionAsKj());
@@ -1111,31 +1158,10 @@ jsg::PromiseForResult<Func, T, true> IoContext::awaitIoImpl(
     }, kj::mv(ilOrCs));
   }));
 
-  // Reminder: This can throw JsExceptionThrown if the execution context has been termintaed. We
+  // Reminder: This can throw JsExceptionThrown if the execution context has been terminated. We
   // have already disowned `promise` and `func` by this point, though, so teardown order is no
   // longer our concern.
-  return jsPromise.then(js, [](jsg::Lock& js, ExceptionOr<Result>&& exceptionOrResult) -> Result {
-    if constexpr (jsg::isVoid<Result>()) {
-      KJ_IF_SOME(e, exceptionOrResult) {
-        // Now that we're in a promise continuation, we can convert the error and get a good stack
-        // trace.
-        js.throwException(kj::mv(e));
-      }
-      return;
-    } else {
-      KJ_SWITCH_ONEOF(exceptionOrResult) {
-        KJ_CASE_ONEOF(e, kj::Exception) {
-          // Now that we're in a promise continuation, we can convert the error and get a good stack
-          // trace.
-          js.throwException(kj::mv(e));
-        }
-        KJ_CASE_ONEOF(result, Result) {
-          return kj::mv(result);
-        }
-      }
-      KJ_UNREACHABLE;
-    }
-  });
+  return jsPromise.then(js, throwOrReturnResult<Result>);
 }
 
 template <typename T>
@@ -1244,6 +1270,13 @@ auto IoContext::addFunctor(Func&& func) {
   }
 }
 
+template <typename T>
+inline ReverseIoOwn<T> IoContext::addObjectReverse(kj::Own<T> obj) {
+  // We intentionally don't requireCurrent() -- the only requirement is that the caller is in the
+  // same thread.
+  return deleteQueue->addObjectReverse(getWeakRef(), kj::mv(obj), ownedObjects);
+}
+
 template <typename Func>
 jsg::PromiseForResult<Func, void, true> IoContext::blockConcurrencyWhile(
     jsg::Lock& js, Func&& callback) {
@@ -1284,14 +1317,14 @@ jsg::PromiseForResult<Func, void, true> IoContext::blockConcurrencyWhile(
     return run([value = kj::mv(value),resolver = kj::mv(resolver),
                 maybeAsyncContext = kj::mv(maybeAsyncContext)](Worker::Lock& lock) mutable {
       jsg::AsyncContextFrame::Scope scope(lock, maybeAsyncContext);
-      resolver.resolve(kj::mv(value));
+      resolver.resolve(lock, kj::mv(value));
     }, kj::mv(inputLock));
   }, [cs = kj::mv(cs2)]
      (kj::Exception&& e) mutable {
     // Annotate as broken for periodic metrics.
     auto msg = e.getDescription();
     if (!msg.startsWith("broken."_kj) && !msg.startsWith("remote.broken."_kj)) {
-      // If we already set up a brokeness reason, we shouldn't override it.
+      // If we already set up a brokenness reason, we shouldn't override it.
 
       auto description = jsg::annotateBroken(msg, "broken.inputGateBroken");
       e.setDescription(kj::mv(description));

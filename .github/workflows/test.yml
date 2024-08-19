@@ -30,8 +30,11 @@ jobs:
           - os:     { name: linux, image: ubuntu-20.04 }
             config: { suffix: -asan, bazel-args: --config=asan }
           # Windows has a custom non-debug bazel config.
+          # As of 7.2.1 support for Bazel remote cache BwoB is broken on Windows, likely due to
+          # disk I/O race conditions causing permission denied errors (this also happened in
+          # previous versions). Use remote_download_all for now.
           - os:     { name : windows, image : windows-2022 }
-            config: { suffix: '', bazel-args: --config=windows_no_dbg }
+            config: { suffix: '', bazel-args: "--config=windows_no_dbg --remote_download_all" }
           # TODO (later): The custom Windows-debug configuration consistently runs out of disk
           # space on CI, disable it for now. Once https://github.com/bazelbuild/bazel/issues/21615
           # has been resolved we can likely re-enable it and possibly fold up the custom
@@ -43,6 +46,10 @@ jobs:
           - os:     { name : windows, image : windows-2022 }
             config: { suffix: '', bazel-args: '' }
           - os:     { name : windows, image : windows-2022 }
+            config: { suffix: -debug, bazel-args: --config=debug }
+          # due to resource constraints, exclude the macOS-debug runner for now. linux-debug and
+          # linux-asan should provide sufficient coverage for building in the debug configuration.
+          - os:     { name : macOS, image : macos-13 }
             config: { suffix: -debug, bazel-args: --config=debug }
       fail-fast: false
     runs-on: ${{ matrix.os.image }}
@@ -62,29 +69,29 @@ jobs:
           # resulting in a snowballing cache size and cache download/upload times.
       - name: Setup Linux
         if: matrix.os.name == 'linux'
-        # Install dependencies, including clang via through LLVM APT repository. Note that this
-        # will also install lldb and clangd alongside dependencies, which can be removed with
-        # `sudo apt-get remove -y lldb-15 clangd-15; sudo apt-get autoremove -y` if space is
-        # limited.
+        # Install dependencies, including clang through the LLVM APT repository. We drop the
+        # install step so we can install just the packages we need.
         # libunwind, libc++abi1 and libc++1 should be automatically installed as dependencies of
         # libc++, but this appears to cause errors so they are also being explicitly installed.
         # Since the GitHub runner image comes with a number of preinstalled packages, we don't need
         # to use APT much otherwise.
-        # TODO(cleanup): Upgrade this to LLVM 16 as soon as it is available on the latest Ubuntu
-        # LTS release. Debian includes LLVM 16 since the Bookworm 12.4 point release.
         run: |
           export DEBIAN_FRONTEND=noninteractive
           wget https://apt.llvm.org/llvm.sh
+          sed -i '/apt-get install/d' llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 15
-          sudo apt-get install -y libunwind-15 libc++abi1-15 libc++1-15 libc++-15-dev libclang-rt-15-dev
-          echo "build:linux --action_env=CC=/usr/lib/llvm-15/bin/clang --action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
-          echo "build:linux --host_action_env=CC=/usr/lib/llvm-15/bin/clang --host_action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
-          sed -i -e "s%llvm-symbolizer%/usr/lib/llvm-15/bin/llvm-symbolizer%" .bazelrc
+          sudo ./llvm.sh 16
+          sudo apt-get install -y --no-install-recommends clang-16 lld-16 libunwind-16 libc++abi1-16 libc++1-16 libc++-16-dev libclang-rt-16-dev
+          echo "build:linux --action_env=CC=/usr/lib/llvm-16/bin/clang --action_env=CXX=/usr/lib/llvm-16/bin/clang++" >> .bazelrc
+          echo "build:linux --host_action_env=CC=/usr/lib/llvm-16/bin/clang --host_action_env=CXX=/usr/lib/llvm-16/bin/clang++" >> .bazelrc
+          echo "build:linux --copt='-Werror'" >> .bazelrc
+          echo "build:linux --copt='-Wno-error=#warnings'" >> .bazelrc
+          echo "build:linux --copt='-Wno-error=deprecated-declarations'" >> .bazelrc
+          sed -i -e "s%llvm-symbolizer%/usr/lib/llvm-16/bin/llvm-symbolizer%" .bazelrc
       - name: Setup macOS
         if: matrix.os.name == 'macOS'
         # TODO: We want to symbolize stacks for crashes on CI. Xcode is currently based on LLVM 16
-        # and the macos-13 image has llvm@15 installed:
+        # but the macos-13 image has llvm@15 installed:
         # https://github.com/actions/runner-images/blob/main/images/macos/macos-13-Readme.md
         #
         # Not enabled because symbolication does not work on workerd macOS builds yet and running
@@ -107,6 +114,17 @@ jobs:
             # Strip comment in front of WORKERS_MIRROR_URL, then substitute secret to use it.
             sed -e '/WORKERS_MIRROR_URL/ { s@# *@@; s@WORKERS_MIRROR_URL@${{ secrets.WORKERS_MIRROR_URL }}@; }' -i.bak WORKSPACE
           fi
+      - name: Enable slow tests if applicable
+        # Some tests (like Python import tests) take a long time to run and don't benefit much
+        # from multi-platform testing. For that reason, we only run them in a single configuration
+        # to minimize effect on CI pipeline runtime.
+        if: matrix.os.name == 'linux' && matrix.config.suffix == ''
+        shell: bash
+        run: |
+          cat <<EOF >> .bazelrc
+          build --build_tag_filters=-off-by-default
+          test --test_tag_filters=-off-by-default
+          EOF
       - name: Generate list of excluded Bazel targets
         # Exclude large benchmarking binaries created in debug and asan configurations to avoid
         # running out of disk space on the runner (nominally 14GB). We typically have two copies
@@ -122,36 +140,52 @@ jobs:
         shell: bash
         run: |
           cat <<EOF >> .bazelrc
-          build:limit-storage --build_tag_filters=-off-by-default,-benchmark
+          build:limit-storage --build_tag_filters=-off-by-default,-slow,-benchmark
           build:limit-storage --copt="-g1"
           build:limit-storage --copt="-fno-standalone-debug"
-          build:limit-storage --@rules_rust//:extra_rustc_flags=-C,panic=unwind,-C,debug-assertions=y,-C,debuginfo=limited,-C,embed-bitcode=n
+          build:limit-storage --config=rust-debug
           build:asan --config=limit-storage
           build:debug --config=limit-storage
+          EOF
+      - name: Fix macOS fastbuild configuration
+        # Unlike the bazel Unix toolchain the macOS toolchain sets "-O0 -DDEBUG" for fastbuild by
+        # default. This is unhelpful for compile speeds and test performance, remove the DEBUG
+        # define.
+        if: ${{ !(contains(matrix.config.suffix, 'debug') || contains(matrix.config.suffix, 'asan')) }}
+        shell: bash
+        run: |
+          cat <<EOF >> .bazelrc
+          build:macos --copt=-UDEBUG
           EOF
       - name: Configure git hooks
         # Configure git to quell an irrelevant warning for runners (they never commit / push).
         run: git config core.hooksPath githooks
       - name: Bazel build
+        # Use a higher jobs level to effectively fetch from CPU and and use the remote cache at the
+        # same time, see https://github.com/bazelbuild/bazel/issues/6394. 32 is still a fairly
+        # small number here and should work for the small CI runners we use, if we switch to a
+        # bigger runner consider increasing this towards the suggested value of 200.
+        # Note the number of maximum build jobs is controlled by the --local_resources=cpu flag and
+        # still limited to the number of cores by default.
         # timestamps are no longer being added here, the GitHub logs include timestamps (Use
         # 'Show timestamps' on the web interface)
         run: |
-          bazelisk build ${{ matrix.config.bazel-args }} --disk_cache=~/bazel-disk-cache --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --verbose_failures //...
+          bazelisk build --remote_download_minimal ${{ matrix.config.bazel-args }} --jobs=32 --disk_cache=~/bazel-disk-cache --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --verbose_failures --config=v8-codegen-opt //...
       - name: Bazel test
         run: |
-          bazelisk test ${{ matrix.config.bazel-args }} --disk_cache=~/bazel-disk-cache --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --keep_going --verbose_failures --test_output=errors //...
-      - name: Report disk usage
+          bazelisk test --remote_download_minimal ${{ matrix.config.bazel-args }} --jobs=32 --disk_cache=~/bazel-disk-cache --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --keep_going --verbose_failures --test_output=errors --config=v8-codegen-opt //...
+      - name: Report disk usage (in MB)
         if: always()
         shell: bash
         run: |
-          BAZEL_OUTPUT_BASE=$(bazel info --ui_event_filters=-WARNING output_base)
-          BAZEL_REPOSITORY_CACHE=$(bazel info --ui_event_filters=-WARNING repository_cache)
+          BAZEL_OUTPUT_BASE=$(bazel info output_base)
+          BAZEL_REPOSITORY_CACHE=$(bazel info repository_cache)
           echo "Bazel cache usage statistics"
-          du -hs -t 1 ~/bazel-disk-cache/* $BAZEL_REPOSITORY_CACHE
+          du -ms -t 1 ~/bazel-disk-cache/* $BAZEL_REPOSITORY_CACHE
           echo "Bazel output usage statistics"
-          du -hs -t 1 $BAZEL_OUTPUT_BASE
+          du -ms -t 1 $BAZEL_OUTPUT_BASE
           echo "Workspace usage statistics"
-          du -hs -t 1 $GITHUB_WORKSPACE
+          du -ms -t 1 $GITHUB_WORKSPACE
       - name: Drop large Bazel cache files
         if: always()
         # Github has a nominal 10GB of storage for all cached builds associated with a project.
@@ -164,15 +198,10 @@ jobs:
           if [ -d ~/bazel-disk-cache ]; then
             find ~/bazel-disk-cache -size +100M -type f -exec rm {} \;
             echo "Trimmed Bazel cache usage statistics"
-            du -hs -t 1 ~/bazel-disk-cache/*
+            du -ms -t 1 ~/bazel-disk-cache/*
           else
             echo "Disk cache does not exist: ~/bazel-disk-cache"
           fi
-      - name: Bazel clean (expunge)
-        # Only files in the disk cache are needed at this point, but generating the tarball created
-        # of the bazel disk cache requires disk space. This step blows away build outputs and leaves
-        # the Bazel disk cache untouched.
-        run: bazelisk clean --expunge
       - name: Bazel shutdown
         # Check that there are no .bazelrc issues that prevent shutdown.
         run: bazelisk shutdown

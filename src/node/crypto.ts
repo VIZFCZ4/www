@@ -10,8 +10,11 @@ import {
 
 export const getRandomValues = crypto.getRandomValues;
 export const subtle = crypto.subtle;
-export const timingSafeEqual = (crypto as any).timingSafeEqual;
 export const webcrypto = crypto;
+
+export function timingSafeEqual(a: any, b: any) {
+  return (subtle as any).timingSafeEqual(a, b);
+}
 
 import {
   DiffieHellman,
@@ -56,6 +59,11 @@ import {
 } from 'node-internal:crypto_pbkdf2';
 
 import {
+  scrypt,
+  scryptSync,
+} from 'node-internal:crypto_scrypt';
+
+import {
   KeyObject,
   PublicKeyObject,
   PrivateKeyObject,
@@ -68,6 +76,12 @@ import {
   createPublicKey,
   createSecretKey,
 } from 'node-internal:crypto_keys';
+
+import { Certificate } from 'node-internal:crypto_spkac';
+
+import {
+  X509Certificate,
+} from 'node-internal:crypto_x509';
 
 export {
   // DH
@@ -102,6 +116,9 @@ export {
   // Pbkdf2
   pbkdf2,
   pbkdf2Sync,
+  // Scrypt
+  scrypt,
+  scryptSync,
   ArrayLike as arrayLike,
   // Keys
   KeyObject,
@@ -115,6 +132,10 @@ export {
   createPrivateKey,
   createPublicKey,
   createSecretKey,
+  // Spkac
+  Certificate,
+  // X509
+  X509Certificate,
 }
 
 export function getCiphers() {
@@ -203,6 +224,9 @@ export default {
   // Pbkdf2
   pbkdf2,
   pbkdf2Sync,
+  // Scrypt
+  scrypt,
+  scryptSync,
   // Misc
   getCiphers,
   getCurves,
@@ -217,10 +241,12 @@ export default {
   // WebCrypto
   subtle,
   webcrypto,
+  // X509
+  X509Certificate,
 };
 
 // Classes
-//   * [ ] crypto.Certificate
+//   * [x] crypto.Certificate
 //   * [ ] crypto.Cipher
 //   * [ ] crypto.Decipher
 //   * [x] crypto.DiffieHellman
@@ -231,7 +257,7 @@ export default {
 //   * [ ] crypto.KeyObject
 //   * [ ] crypto.Sign
 //   * [ ] crypto.Verify
-//   * [ ] crypto.X509Certificate
+//   * [x] crypto.X509Certificate
 //   * [ ] crypto.constants
 //   * [ ] crypto.DEFAULT_ENCODING
 // * Primes
@@ -295,8 +321,8 @@ export default {
 //   * [.] crypto.hkdfSync(digest, ikm, salt, info, keylen) (* still needs KeyObject support)
 //   * [x] crypto.pbkdf2(password, salt, iterations, keylen, digest, callback)
 //   * [x] crypto.pbkdf2Sync(password, salt, iterations, keylen, digest)
-//   * [ ] crypto.scrypt(password, salt, keylen[, options], callback)
-//   * [ ] crypto.scryptSync(password, salt, keylen[, options])
+//   * [x] crypto.scrypt(password, salt, keylen[, options], callback)
+//   * [x] crypto.scryptSync(password, salt, keylen[, options])
 // * WebCrypto
 //   * [x] crypto.subtle
 //   * [x] crypto.webcrypto

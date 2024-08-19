@@ -293,6 +293,30 @@ export class MyService extends WorkerEntrypoint {
     await writer.close();
   }
 
+  async writeToStreamExpectingError(stream) {
+    // We expect the writes to fail on the remote end. However, that won't happen
+    // right away. Due to backpressure and flow control, write does not wait until
+    // the remote end has received the data. It resolves as soon as there is space
+    // in the buffer to perform another write. Here we'll just keep writing until
+    // we get the expected error.
+    let writer = stream.getWriter();
+    let enc = new TextEncoder();
+    for (;;) {
+      await writer.write(enc.encode("foo, "));
+    }
+  }
+
+  async writeToStreamAbort(stream) {
+    // In this test, aborting the stream should propagate back to the remote
+    // side, causing the stream to be errored and the abort algorithm to be
+    // called with the provided error. Unfortunately the current implementation
+    // does not allow for that. The reason passed to abort is cached locally and
+    // is never communicated to the remote. Instead, the remote side will end up
+    // with a generic disconnect error. Sad face.
+    let writer = stream.getWriter();
+    writer.abort(new Error('boom'));
+  }
+
   async readFromStream(stream) {
     return await new Response(stream).text();
   }
@@ -412,24 +436,33 @@ export let basicServiceBinding = {
     assert.strictEqual(await env.self.oneArg(3), 36);
     assert.strictEqual(await env.self.oneArgOmitCtx(3), 37);
     assert.strictEqual(await env.self.oneArgOmitEnvCtx(3), 6);
-    assert.rejects(() => env.self.twoArgs(123, 2),
+    await assert.rejects(() => env.self.twoArgs(123, 2), {
+      name: "TypeError",
+      message:
         "Cannot call handler function \"twoArgs\" over RPC because it has the wrong " +
         "number of arguments. A simple function handler can only be called over RPC if it has " +
         "exactly the arguments (arg, env, ctx), where only the first argument comes from the " +
         "client. To support multi-argument RPC functions, use class-based syntax (extending " +
-        "WorkerEntrypoint) instead.");
-    assert.rejects(() => env.self.noArgs(),
+        "WorkerEntrypoint) instead."
+    });
+    await assert.rejects(() => env.self.noArgs(), {
+      name: "TypeError",
+      message:
         "Attempted to call RPC function \"noArgs\" with the wrong number of arguments. " +
         "When calling a top-level handler function that is not declared as part of a class, you " +
         "must always send exactly one argument. In order to support variable numbers of " +
         "arguments, the server must use class-based syntax (extending WorkerEntrypoint) " +
-        "instead.");
-    assert.rejects(() => env.self.oneArg(1, 2),
+        "instead."
+    });
+    await assert.rejects(() => env.self.oneArg(1, 2), {
+      name: "TypeError",
+      message:
         "Attempted to call RPC function \"oneArg\" with the wrong number of arguments. " +
         "When calling a top-level handler function that is not declared as part of a class, you " +
         "must always send exactly one argument. In order to support variable numbers of " +
         "arguments, the server must use class-based syntax (extending WorkerEntrypoint) " +
-        "instead.");
+        "instead."
+    });
 
     // If we restore multi-arg support, remove the `rejects` checks above and un-comment these:
     // assert.strictEqual(await env.self.noArgs(), 13);
@@ -857,18 +890,51 @@ export let crossContextSharingDoesntWork = {
     // tryUseGlobalRpcPromise() tries to return the result, it tries to serialize the stub, but
     // it can't do that from the wrong context.
     globalRpcPromise = env.MyService.makeCounter(12);
-    await assert.rejects(() => env.MyService.tryUseGlobalRpcPromise(), expectedError);
+
+    await assert.rejects(() => env.MyService.tryUseGlobalRpcPromise(), {
+      name: "Error",
+      message:
+          "Cannot perform I/O on behalf of a different request. I/O objects (such as streams, " +
+          "request/response bodies, and others) created in the context of one request handler " +
+          "cannot be accessed from a different request's handler. This is a limitation of " +
+          "Cloudflare Workers which allows us to improve overall performance. (I/O type: Client)"
+    });
 
     // Pipelining on someone else's promise straight-up doesn't work.
-    await assert.rejects(() => env.MyService.tryUseGlobalRpcPromisePipeline(), expectedError);
+    await assert.rejects(() => env.MyService.tryUseGlobalRpcPromisePipeline(), {
+      name: "Error",
+      message:
+          "Cannot perform I/O on behalf of a different request. I/O objects (such as streams, " +
+          "request/response bodies, and others) created in the context of one request handler " +
+          "cannot be accessed from a different request's handler. This is a limitation of " +
+          "Cloudflare Workers which allows us to improve overall performance. " +
+          "(I/O type: JsRpcPromise)"
+    });
 
     // Now let's try accessing a JsRpcProperty, where the property is NOT a direct property of a
     // top-level service binding. This works even less than a JsRpcPromise, since there's no inner
     // JS promise, it tries to create one on-demand, which fails because the parent object is
     // tied to the original I/O context.
     globalRpcPromise = env.MyService.getAnObject(5).counter;
-    await assert.rejects(() => env.MyService.tryUseGlobalRpcPromise(), expectedError);
-    await assert.rejects(() => env.MyService.tryUseGlobalRpcPromisePipeline(), expectedError);
+
+    await assert.rejects(() => env.MyService.tryUseGlobalRpcPromise(), {
+      name: "Error",
+      message:
+          "Cannot perform I/O on behalf of a different request. I/O objects (such as streams, " +
+          "request/response bodies, and others) created in the context of one request handler " +
+          "cannot be accessed from a different request's handler. This is a limitation of " +
+          "Cloudflare Workers which allows us to improve overall performance. (I/O type: Pipeline)"
+    });
+
+    await assert.rejects(() => env.MyService.tryUseGlobalRpcPromisePipeline(), {
+      name: "Error",
+      message:
+          "Cannot perform I/O on behalf of a different request. I/O objects (such as streams, " +
+          "request/response bodies, and others) created in the context of one request handler " +
+          "cannot be accessed from a different request's handler. This is a limitation of " +
+          "Cloudflare Workers which allows us to improve overall performance. " +
+          "(I/O type: JsRpcPromise)"
+    });
   },
 }
 
@@ -975,7 +1041,76 @@ export let streams = {
       await promise;
     }
 
-    // TODO(someday): Test JS-backed WritableStream, when it actually works.
+    {
+      const dec = new TextDecoder();
+      let result = '';
+      const { promise, resolve } = Promise.withResolvers();
+      const writable = new WritableStream({
+        write(chunk) {
+          result += dec.decode(chunk, {stream: true});
+        },
+        close() {
+          result += dec.decode();
+          resolve();
+        },
+      });
+      const p1 = env.MyService.writeToStream(writable);
+      await promise;
+      assert.strictEqual(result, "foo, bar, baz!");
+      await p1;
+    }
+
+    {
+      // In this test, the remote side writes a chunk to the stream below, which throws
+      // an error. Ideally the error would propagate back to the calling side so that the
+      // remote knows the stream failed and can no longer be written to. The call to
+      // writeToStreamExpectingError should throw because the error should be propagated
+      // through the round trip.
+      const dec = new TextDecoder();
+      let result = '';
+      let writeCalled = 0;
+      const writable = new WritableStream({
+        write(chunk) {
+          writeCalled++;
+          throw new Error('boom');
+        },
+      });
+
+      try {
+        await env.MyService.writeToStreamExpectingError(writable);
+        throw new Error('should have thrown');
+      } catch (err) {
+        assert.strictEqual(err.message, 'boom');
+        // The write method should have been called once.
+        assert.strictEqual(writeCalled, 1);
+      }
+    }
+
+    {
+      // In this test, the remote side aborts the writable stream it receives.
+      // The abort should propagate such that the abort algorithm is called and the
+      // writeToStreamAbort call should succeed. The error passed on to abort(reason)
+      // should be the error that was given on the remote side when abort is called,
+      // but we currently do not propagate the abort reason through. What ends up
+      // happening is that the local stream is dropped with a generic cancelation
+      // error.
+      const dec = new TextDecoder();
+      const { promise, resolve } = Promise.withResolvers();
+      const writable = new WritableStream({
+        write(chunk) {},
+        abort(reason) {
+          resolve(reason);
+        }
+      });
+      await env.MyService.writeToStreamAbort(writable);
+      const reason = await promise;
+      // TODO(someday): The reason should be the error that was passed to abort on the
+      // remote side, but we currently do not propagate this. We end up with a generic
+      // disconnection error instead, which certainly not ideal.
+      assert.strictEqual(reason.message,
+          'WritableStream received over RPC was disconnected because the remote execution ' +
+          'context has endeded.');
+    }
 
     // TODO(someday): Is there any way to construct an encoded WritableStream? Only system
     //   streams can be encoded, but there's no API that returns an encoded WritableStream I think.
@@ -1206,6 +1341,18 @@ export let testAsyncStackTrace = {
   }
 }
 
+// Test that exceptions thrown over RPC have the .remote property.
+export let testExceptionProperties = {
+  async test(controller, env, ctx) {
+    try {
+      await env.MyService.throwingMethod();
+    } catch (e) {
+      assert.strictEqual(e.remote, true);
+      assert.strictEqual(e.message, "METHOD THREW");
+    }
+  }
+}
+
 // Test that get(), put(), and delete() are valid RPC method names, not hijacked by Fetcher.
 export let canUseGetPutDelete = {
   async test(controller, env, ctx) {
@@ -1224,5 +1371,24 @@ export let logging = {
     assert.strictEqual(await stub.increment(1), 2);
     console.log(stub);
     assert.strictEqual(await stub.increment(1), 3);
+  }
+}
+
+// DOMException is structured cloneable
+export let domExceptionClone = {
+  test() {
+    const de1 = new DOMException("hello", "NotAllowedError");
+
+    // custom own properties on the instance are not preserved...
+    de1.foo = "ignored";
+
+    const de2 = structuredClone(de1);
+    assert.strictEqual(de1.name, de2.name);
+    assert.strictEqual(de1.message, de2.message);
+    assert.strictEqual(de1.stack, de2.stack);
+    assert.strictEqual(de1.code, de2.code);
+    assert.notStrictEqual(de1, de2);
+    assert.notStrictEqual(de1.foo, de2.foo);
+    assert.strictEqual(de2.foo, undefined);
   }
 }

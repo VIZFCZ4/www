@@ -514,7 +514,7 @@ IoContext::PendingEvent::~PendingEvent() noexcept(false) {
     return;
   });
 
-  context.pendingEvent = nullptr;
+  context.pendingEvent = kj::none;
 
   // We can't execute finalizers just yet. We need to run the event loop to see if any queued
   // events come back into JavaScript. If registerPendingEvent() is called in the meantime, this
@@ -594,8 +594,10 @@ void IoContext::TimeoutManagerImpl::TimeoutState::cancel() {
 auto IoContext::TimeoutManagerImpl::addState(
     TimeoutId::Generator& generator, TimeoutParameters params) -> IdAndIterator {
   JSG_REQUIRE(getTimeoutCount() < MAX_TIMEOUTS, DOMQuotaExceededError,
-              "You have exceeded the number of timeouts you may set.",
-              MAX_TIMEOUTS);
+              "You have exceeded the number of active timeouts you may set.",
+              " max active timeouts: ", MAX_TIMEOUTS,
+              ", current active timeouts: ", getTimeoutCount(),
+              ", finished timeouts: ", timeoutsFinished);
 
   auto id = generator.getNext();
   auto [it, wasEmplaced] = timeouts.try_emplace(id, *this, kj::mv(params));
@@ -606,7 +608,8 @@ auto IoContext::TimeoutManagerImpl::addState(
     auto& state = it->second;
     auto delay = state.params.msDelay;
     auto repeat = state.params.repeat;
-    KJ_FAIL_ASSERT("Saw a timeout id collision", getTimeoutCount(), id.toNumber(), delay, repeat);
+    KJ_FAIL_ASSERT("Saw a timeout id collision", getTimeoutCount(), timeoutsStarted, id.toNumber(),
+        delay, repeat);
   }
 
   return { id, it };
@@ -771,7 +774,7 @@ TimeoutId IoContext::setTimeoutImpl(
   // do not indicate a clear maximum range for setTimeout/setInterval so the
   // limit here is fairly arbitrary. 100 years max should be plenty safe.
   int64_t delay =
-      msDelay <= 0 ? 0 :
+      msDelay <= 0 || std::isnan(msDelay) ? 0 :
       msDelay >= static_cast<double>(max) ? max : static_cast<int64_t>(msDelay);
   auto params = TimeoutManager::TimeoutParameters(repeat, delay, kj::mv(function));
   return timeoutManager->setTimeout(*this, generator, kj::mv(params));
@@ -956,14 +959,14 @@ void IoContext::requireCurrent() {
   KJ_REQUIRE(threadLocalRequest == this, "request is not current in this thread");
 }
 
-void IoContext::checkFarGet(const DeleteQueue* expectedQueue) {
+void IoContext::checkFarGet(const DeleteQueue* expectedQueue, const std::type_info& type) {
   KJ_ASSERT(expectedQueue);
   requireCurrent();
 
   if (expectedQueue == deleteQueue.get()) {
     // same request or same actor, success
   } else {
-    throwNotCurrentJsError();
+    throwNotCurrentJsError(type);
   }
 }
 
@@ -1273,20 +1276,24 @@ void IoContext::requireCurrentOrThrowJs(WeakRef& weak) {
   throwNotCurrentJsError();
 }
 
-void IoContext::throwNotCurrentJsError() {
+void IoContext::throwNotCurrentJsError(kj::Maybe<const std::type_info&> maybeType) {
+  auto type = maybeType.map([](const std::type_info& type) {
+    return kj::str(" (I/O type: ", jsg::typeName(type), ")");
+  }).orDefault(kj::String());
+
   if (threadLocalRequest != nullptr && threadLocalRequest->actor != kj::none) {
     JSG_FAIL_REQUIRE(Error,
-        "Cannot perform I/O on behalf of a different Durable Object. I/O objects "
+        kj::str("Cannot perform I/O on behalf of a different Durable Object. I/O objects "
         "(such as streams, request/response bodies, and others) created in the context of one "
         "Durable Object cannot be accessed from a different Durable Object in the same isolate. "
         "This is a limitation of Cloudflare Workers which allows us to improve overall "
-        "performance.");
+        "performance.", type));
   } else {
     JSG_FAIL_REQUIRE(Error,
-        "Cannot perform I/O on behalf of a different request. I/O objects (such as "
+        kj::str("Cannot perform I/O on behalf of a different request. I/O objects (such as "
         "streams, request/response bodies, and others) created in the context of one request "
         "handler cannot be accessed from a different request's handler. This is a limitation "
-        "of Cloudflare Workers which allows us to improve overall performance.");
+        "of Cloudflare Workers which allows us to improve overall performance.", type));
   }
 }
 

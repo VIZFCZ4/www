@@ -10,7 +10,6 @@ export default {
 
         const respHeaders = {
             'cf-ai-req-id': '3a1983d7-1ddd-453a-ab75-c4358c91b582',
-            'cf-ai-logs': (data.options.debug) ? btoa(JSON.stringify(["Model started", "Model run successfully"])) : null
         }
 
         if (modelName === 'blobResponseModel') {
@@ -19,6 +18,27 @@ export default {
 
             return new Response(utf8Encode, {
                 headers: respHeaders
+            })
+        }
+
+        if (modelName === 'rawInputs') {
+            return Response.json(data, {
+                headers: respHeaders
+            })
+        }
+
+        if (modelName === 'inputErrorModel') {
+            return Response.json({
+                internalCode: 1001,
+                message: "InvalidInput: prompt and messages are mutually exclusive",
+                name: "InvalidInput",
+                description: "prompt and messages are mutually exclusive"
+            }, {
+                status: 400,
+                headers: {
+                    'content-type': 'application/json',
+                    ...respHeaders
+                }
             })
         }
 

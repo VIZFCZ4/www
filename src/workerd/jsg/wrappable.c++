@@ -25,7 +25,7 @@ static thread_local bool inCppgcShimDestructor = false;
 bool HeapTracer::isInCppgcDestructor() { return inCppgcShimDestructor; }
 
 void HeapTracer::clearWrappers() {
-  // When clearing wrappers (at isolate shutdown), we may be destroying objects that were recenly
+  // When clearing wrappers (at isolate shutdown), we may be destroying objects that were recently
   // determined to be unreachable, but the CppgcShim destructors haven't been run yet. We need to
   // treat this case as if we are running CppgcShim destructors, that is, assume any
   // TracedReferences we destroy have already been collected so cannot be touched.
@@ -44,7 +44,7 @@ void HeapTracer::clearWrappers() {
 // V8's GC integrates with cppgc, aka "oilpan", a garbage collector for C++ objects. We want to
 // integrate with the GC in order to receive GC visitation callbacks, so that the GC is able to
 // trace through our C++ objects to find what is reachable through them. The only way for us to
-// supprot this is by integrating with cppgc.
+// support this is by integrating with cppgc.
 //
 // However, workerd was written using KJ idioms long before cppgc existed. Rewriting all our code
 // to use cppgc allocation instead would be a highly invasive change. Maybe we'll do it someday,
@@ -341,16 +341,17 @@ void Wrappable::attachWrapper(v8::Isolate* isolate,
 
   // Set up internal fields for a newly-allocated object.
   KJ_REQUIRE(object->InternalFieldCount() == Wrappable::INTERNAL_FIELD_COUNT);
-  object->SetAlignedPointerInInternalField(WRAPPED_OBJECT_FIELD_INDEX, this);
+  int indices[] = {
+      WRAPPABLE_TAG_FIELD_INDEX,
+      WRAPPED_OBJECT_FIELD_INDEX
+  };
+  void* values[] = {
+    const_cast<uint16_t*>(&WORKERD_WRAPPABLE_TAG),
+    this
+  };
+  object->SetAlignedPointerInInternalFields(2, indices, values);
 
-  // Allocate the cppgc shim.
-  auto cppgcShim = tracer.allocateShim(*this);
-
-  object->SetAlignedPointerInInternalField(CPPGC_SHIM_FIELD_INDEX, cppgcShim);
-  object->SetAlignedPointerInInternalField(WRAPPABLE_TAG_FIELD_INDEX,
-      // const_cast because V8 expects non-const `void*` pointers, but it won't actually modify
-      // the tag.
-      const_cast<uint16_t*>(&WRAPPABLE_TAG));
+  v8::Object::Wrap<WRAPPABLE_TAG>(isolate, object, tracer.allocateShim(*this));
 
   if (strongRefcount > 0) {
     strongWrapper.Reset(isolate, object);

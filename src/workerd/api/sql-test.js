@@ -4,7 +4,8 @@
 
 import * as assert from 'node:assert'
 
-async function test(storage) {
+async function test(state) {
+  const storage = state.storage
   const sql = storage.sql
   // Test numeric results
   const resultNumber = [...sql.exec('SELECT 123')]
@@ -62,23 +63,23 @@ async function test(storage) {
 
 
   // Test partial query ingestion
-  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 456;    `), '    ')
-  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 456;`), '')
-  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 456`), ' SELECT 456')
-  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 45`), ' SELECT 45')
-  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 4`), ' SELECT 4')
-  assert.deepEqual(sql.ingest(`SELECT 123; SELECT `), ' SELECT ')
-  assert.deepEqual(sql.ingest(`SELECT 123; SELECT`), ' SELECT')
-  assert.deepEqual(sql.ingest(`SELECT 123; SELEC`), ' SELEC')
-  assert.deepEqual(sql.ingest(`SELECT 123; SELE`), ' SELE')
-  assert.deepEqual(sql.ingest(`SELECT 123; SEL`), ' SEL')
-  assert.deepEqual(sql.ingest(`SELECT 123; SE`), ' SE')
-  assert.deepEqual(sql.ingest(`SELECT 123; S`), ' S')
-  assert.deepEqual(sql.ingest(`SELECT 123; `), ' ')
-  assert.deepEqual(sql.ingest(`SELECT 123;`), '')
-  assert.deepEqual(sql.ingest(`SELECT 123`), 'SELECT 123')
-  assert.deepEqual(sql.ingest(`SELECT 12`), 'SELECT 12')
-  assert.deepEqual(sql.ingest(`SELECT 1`), 'SELECT 1')
+  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 456;    `).remainder, '    ')
+  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 456;`).remainder, '')
+  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 456`).remainder, ' SELECT 456')
+  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 45`).remainder, ' SELECT 45')
+  assert.deepEqual(sql.ingest(`SELECT 123; SELECT 4`).remainder, ' SELECT 4')
+  assert.deepEqual(sql.ingest(`SELECT 123; SELECT `).remainder, ' SELECT ')
+  assert.deepEqual(sql.ingest(`SELECT 123; SELECT`).remainder, ' SELECT')
+  assert.deepEqual(sql.ingest(`SELECT 123; SELEC`).remainder, ' SELEC')
+  assert.deepEqual(sql.ingest(`SELECT 123; SELE`).remainder, ' SELE')
+  assert.deepEqual(sql.ingest(`SELECT 123; SEL`).remainder, ' SEL')
+  assert.deepEqual(sql.ingest(`SELECT 123; SE`).remainder, ' SE')
+  assert.deepEqual(sql.ingest(`SELECT 123; S`).remainder, ' S')
+  assert.deepEqual(sql.ingest(`SELECT 123; `).remainder, ' ')
+  assert.deepEqual(sql.ingest(`SELECT 123;`).remainder, '')
+  assert.deepEqual(sql.ingest(`SELECT 123`).remainder, 'SELECT 123')
+  assert.deepEqual(sql.ingest(`SELECT 12`).remainder, 'SELECT 12')
+  assert.deepEqual(sql.ingest(`SELECT 1`).remainder, 'SELECT 1')
 
   // Exec throws with trailing comments
   assert.throws(
@@ -87,7 +88,7 @@ async function test(storage) {
   )
   // Ingest does not
   assert.deepEqual(
-    sql.ingest(`SELECT 123; SELECT 456; -- trailing comment`),
+    sql.ingest(`SELECT 123; SELECT 456; -- trailing comment`).remainder,
     ' -- trailing comment'
   )
 
@@ -107,6 +108,8 @@ async function test(storage) {
 
     // Use a chunk size 1, 3, 9, 27, 81, ... bytes
     for (let length = 1; length < inputBytes.length; length = length * 3) {
+      let totalRowsWritten = 0;
+      let totalSqlStatements = 0;
       let buffer = ''
       for (let offset = 0; offset < inputBytes.length; offset += length) {
         // Simulate a single "chunk" arriving
@@ -116,7 +119,10 @@ async function test(storage) {
         buffer += decoder.decode(chunk, { stream: true })
 
         // Ingest any complete statements and snip those chars off the buffer
-        buffer = sql.ingest(buffer)
+        let result = sql.ingest(buffer);
+        buffer = result.remainder;
+        totalRowsWritten += result.rowsWritten;
+        totalSqlStatements += result.statementCount;
 
         // Simulate awaiting next chunk
         await scheduler.wait(1)
@@ -139,6 +145,11 @@ async function test(storage) {
           { val: 'f: 🔥😎🔥' },
         ]
       )
+
+      // Verify that all 36 rows we inserted were accounted for.
+      assert.equal(totalRowsWritten, 36);
+      assert.equal(totalSqlStatements, 6);
+
       sql.exec(`DELETE FROM streaming`)
       await scheduler.wait(1)
     }
@@ -190,6 +201,11 @@ async function test(storage) {
   assert.throws(() => sql.exec('SELECT ;'), /syntax error at offset 7/)
   assert.throws(() => sql.exec('SELECT -;'), /syntax error at offset 8/)
 
+  // Data type mismatch
+  sql.exec(`CREATE TABLE test_error_codes (name TEXT);`)
+  assert.throws(() => sql.exec(`INSERT INTO test_error_codes(rowid, name) values ('yeah','nah');`), /Error: datatype mismatch: SQLITE_MISMATCH/)
+  sql.exec(`DROP TABLE test_error_codes;`)
+
   // Incorrect number of binding values
   assert.throws(
     () => sql.exec('SELECT ?'),
@@ -228,11 +244,27 @@ async function test(storage) {
     'Error: Wrong number of parameter bindings for SQL query.'
   )
 
+  // Prepared statement with whitespace
+  const whitespace = [' ', '\t', '\n', '\r', '\v', '\f', '\r\n']
+
+  for (const char of whitespace) {
+    const prepared = sql.prepare(`SELECT 1;${char}`);
+    const result = [...prepared()]
+
+    assert.equal(result.length, 1)
+  }
+
+  // Prepared statement with multiple statements
+  assert.throws(() => {
+    sql.prepare('SELECT 1; SELECT 2;');
+  }, /A prepared SQL statement must contain only one statement./)
+
   // Accessing a hidden _cf_ table
   assert.throws(
     () => sql.exec('CREATE TABLE _cf_invalid (name TEXT)'),
     /not authorized/
   )
+  storage.put("blah", 123);  // force creation of _cf_KV table
   assert.throws(
     () => sql.exec('SELECT * FROM _cf_KV'),
     /access to _cf_KV.key is prohibited/
@@ -252,12 +284,12 @@ async function test(storage) {
   }
 
   // Trying to write to read-only pragmas is not allowed
-  assert.throws(() => sql.exec('PRAGMA data_version = 5'), /not authorized/)
+  assert.throws(() => sql.exec('PRAGMA data_version = 5'), /not authorized: SQLITE_AUTH/)
   assert.throws(
     () => sql.exec('PRAGMA max_page_count = 65536'),
     /not authorized/
   )
-  assert.throws(() => sql.exec('PRAGMA page_size = 8192'), /not authorized/)
+  assert.throws(() => sql.exec('PRAGMA page_size = 8192'), /not authorized: SQLITE_AUTH/)
 
   // PRAGMA table_info and PRAGMA table_xinfo are allowed.
   sql.exec('CREATE TABLE myTable (foo TEXT, bar INTEGER)')
@@ -346,7 +378,7 @@ async function test(storage) {
   assert.throws(() => sql.exec('SAVEPOINT foo'), /not authorized/)
 
   // Virtual tables
-  // Only fts5 module is allowed
+  // Only fts5 and fts5vocab modules are allowed
   assert.throws(
     () => sql.exec(`CREATE VIRTUAL TABLE test_fts USING fts5abcd(id);`),
     /not authorized/
@@ -361,9 +393,18 @@ async function test(storage) {
     );
   `)
 
-  // Module name is case-insensitive
+  // Module names are case-insensitive
   sql.exec(`
     CREATE VIRTUAL TABLE documents_fts USING FtS5(id, title, content, tokenize = porter);
+  `)
+  sql.exec(`
+    CREATE VIRTUAL TABLE documents_fts_v_col USING fTs5VoCaB(documents_fts, col);
+  `)
+  sql.exec(`
+    CREATE VIRTUAL TABLE documents_fts_v_row USING FtS5vOcAb(documents_fts, row);
+  `)
+  sql.exec(`
+    CREATE VIRTUAL TABLE documents_fts_v_instance USING fTs5VoCaB(documents_fts, instance);
   `)
 
   sql.exec(`
@@ -488,10 +529,10 @@ async function test(storage) {
         )
       )[0].data
     )
-    assert.equal(jsonResult.length, 8)
+    assert.equal(jsonResult.length, 11)
     assert.equal(
       jsonResult.map((r) => r.name).join(','),
-      'myTable,documents,documents_fts,documents_fts_data,documents_fts_idx,documents_fts_content,documents_fts_docsize,documents_fts_config'
+      'myTable,documents,documents_fts,documents_fts_data,documents_fts_idx,documents_fts_content,documents_fts_docsize,documents_fts_config,documents_fts_v_col,documents_fts_v_row,documents_fts_v_instance'
     )
     assert.equal(jsonResult[0].columns.foo, 'TEXT')
     assert.equal(jsonResult[0].columns.bar, 'INTEGER')
@@ -850,6 +891,36 @@ async function test(storage) {
   `),
     'Error: not authorized'
   )
+
+  // Assert foreign keys can be truly turned off, not just deferred
+  await state.blockConcurrencyWhile(async () => {
+    sql.exec(`PRAGMA foreign_keys = OFF;`)
+  })
+  storage.transactionSync(() => {
+    sql.exec(`
+      CREATE TABLE A (
+        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        bId INTEGER NOT NULL REFERENCES B (id) ON DELETE RESTRICT ON UPDATE CASCADE
+      );
+      INSERT INTO A VALUES(1,1); -- this would throw a parse error with foreign keys on
+      CREATE TABLE B (
+        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT
+      );
+    `)
+  })
+
+  // Until we've inserted the row into B, we can detect our
+  // foreign key violation (even with foreign_keys=OFF)
+  assert.deepEqual(Array.from(sql.exec(`pragma foreign_key_check;`)), [
+    { table: 'A', rowid: 1, parent: 'B', fkid: 0 },
+  ])
+  sql.exec(`INSERT INTO B VALUES (1);`)
+  assert.deepEqual(Array.from(sql.exec(`pragma foreign_key_check;`)), [])
+
+  // Restore foreign keys for the rest of the tests
+  await state.blockConcurrencyWhile(async () => {
+    sql.exec(`PRAGMA foreign_keys = ON;`)
+  })
 }
 
 async function testIoStats(storage) {
@@ -1030,9 +1101,10 @@ async function testStreamingIngestion(request, storage) {
       buffer += chunk
 
       // Ingest any complete statements and snip those chars off the buffer
-      buffer = sql.ingest(buffer)
+      buffer = sql.ingest(buffer).remainder
     }
   })
+
   // Verify exactly 36 rows were added
   assert.deepEqual(Array.from(sql.exec(`SELECT count(*) FROM streaming`)), [
     { 'count(*)': 36 },
@@ -1057,7 +1129,7 @@ export class DurableObjectExample {
 
   async fetch(req) {
     if (req.url.endsWith('/sql-test')) {
-      await test(this.state.storage)
+      await test(this.state)
       return Response.json({ ok: true })
     } else if (req.url.endsWith('/sql-test-foreign-keys')) {
       await testForeignKeys(this.state.storage)

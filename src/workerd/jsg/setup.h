@@ -9,7 +9,7 @@
 #include "async-context.h"
 #include "type-wrapper.h"
 #include "v8-platform-wrapper.h"
-#include "v8-profiler.h"
+#include <v8-profiler.h>
 #include <workerd/util/batch-queue.h>
 #include <kj/map.h>
 #include <kj/mutex.h>
@@ -93,13 +93,19 @@ public:
     maybeLogger = kj::mv(logger);
   }
 
+  using ErrorReporter = Lock::ErrorReporter;
+  inline void setErrorReporterCallback(kj::Badge<Lock>, kj::Function<ErrorReporter>&& reporter) {
+    maybeErrorReporter = kj::mv(reporter);
+  }
+
   using ModuleFallbackCallback =
       kj::Maybe<kj::OneOf<kj::String, jsg::ModuleRegistry::ModuleInfo>>(
           jsg::Lock&,
           kj::StringPtr,
           kj::Maybe<kj::String>,
           jsg::CompilationObserver&,
-          jsg::ModuleRegistry::ResolveMethod);
+          jsg::ModuleRegistry::ResolveMethod,
+          kj::Maybe<kj::StringPtr>);
   inline void setModuleFallbackCallback(kj::Function<ModuleFallbackCallback>&& callback) {
     maybeModuleFallbackCallback = kj::mv(callback);
   }
@@ -118,13 +124,28 @@ public:
     exportCommonJsDefault = exportDefault;
   }
 
+  inline void setNodeJsCompatEnabled(kj::Badge<Lock>, bool enabled) {
+    nodeJsCompatEnabled = enabled;
+  }
+
   inline bool areWarningsLogged() const { return maybeLogger != kj::none; }
+  inline bool areErrorsReported() const { return maybeErrorReporter != kj::none; }
+
+  inline bool isNodeJsCompatEnabled() const { return nodeJsCompatEnabled; }
 
   // The logger will be optionally set by the isolate setup logic if there is anywhere
   // for the log to go (for instance, if debug logging is enabled or the inspector is
   // being used).
   inline void logWarning(Lock& js, kj::StringPtr message) {
     KJ_IF_SOME(logger, maybeLogger) { logger(js, message); }
+  }
+
+  inline void reportError(Lock& js, kj::String desc,
+                          const JsValue& error,
+                          const JsMessage& message) {
+    KJ_IF_SOME(reporter, maybeErrorReporter) {
+      reporter(js, kj::mv(desc), error, message);
+    }
   }
 
   // Returns a random UUID for this isolate instance.
@@ -138,9 +159,6 @@ public:
   size_t jsgGetMemorySelfSize() const { return sizeof(IsolateBase); }
   bool jsgGetMemoryInfoIsRootNode() const { return true; }
 
-  JsSymbol getSymbolDispose() {
-    return JsSymbol(symbolDispose.Get(ptr));
-  }
   JsSymbol getSymbolAsyncDispose() {
     return JsSymbol(symbolAsyncDispose.Get(ptr));
   }
@@ -176,6 +194,7 @@ private:
   using Item = kj::OneOf<v8::Global<v8::Data>, RefToDelete>;
 
   const V8System& system;
+  std::unique_ptr<class v8::CppHeap> cppHeap;
   v8::Isolate* ptr;
   kj::Maybe<kj::String> uuid;
   bool evalAllowed = false;
@@ -188,16 +207,17 @@ private:
   bool captureThrowsAsRejections = false;
   bool exportCommonJsDefault = false;
   bool asyncContextTrackingEnabled = false;
+  bool nodeJsCompatEnabled = false;
 
   kj::Maybe<kj::Function<Logger>> maybeLogger;
+  kj::Maybe<kj::Function<ErrorReporter>> maybeErrorReporter;
   kj::Maybe<kj::Function<ModuleFallbackCallback>> maybeModuleFallbackCallback;
 
   // FunctionTemplate used by Wrappable::attachOpaqueWrapper(). Just a constructor for an empty
   // object with 2 internal fields.
   v8::Global<v8::FunctionTemplate> opaqueTemplate;
 
-  // Polyfilled Symbol.dispose and Symbol.asyncDispose.
-  v8::Global<v8::Symbol> symbolDispose;
+  // Polyfilled Symbol.asyncDispose.
   v8::Global<v8::Symbol> symbolAsyncDispose;
 
   // We expect queues to remain relatively small -- 8 is the largest size I have observed from local
@@ -214,6 +234,7 @@ private:
     DESTRUCTION_QUEUE_INITIAL_SIZE,
     DESTRUCTION_QUEUE_MAX_CAPACITY
   };
+  std::atomic<int64_t> pendingExternalMemoryDecrement = {0};
 
   struct CodeBlockInfo {
     size_t size = 0;
@@ -244,9 +265,11 @@ private:
 
   // Add an item to the deferred destruction queue. Safe to call from any thread at any time.
   void deferDestruction(Item item);
+  void deferExternalMemoryDecrement(int64_t size);
 
   // Destroy everything in the deferred destruction queue. Must be called under the isolate lock.
   void clearDestructionQueue();
+  void clearPendingExternalMemoryDecrement();
 
   static void fatalError(const char* location, const char* message);
   static void oomError(const char* location, const v8::OOMDetails& details);
@@ -266,6 +289,7 @@ private:
   friend class Data;
   friend class Wrappable;
   friend class HeapTracer;
+  friend class ExternalMemoryAdjustment;
 
   friend bool getCaptureThrowsAsRejections(v8::Isolate* isolate);
   friend bool getCommonJsExportDefault(v8::Isolate* isolate);
@@ -391,6 +415,7 @@ public:
     Lock(const Isolate& isolate, V8StackScope&)
         : jsg::Lock(isolate.ptr), jsgIsolate(const_cast<Isolate&>(isolate)) {
       jsgIsolate.clearDestructionQueue();
+      jsgIsolate.clearPendingExternalMemoryDecrement();
     }
     KJ_DISALLOW_COPY_AND_MOVE(Lock);
     KJ_DISALLOW_AS_COROUTINE_PARAM;
@@ -424,6 +449,33 @@ public:
           context, handle, jsg::TypeErrorContext::other());
     }
 
+    Ref<DOMException> domException(kj::String name, kj::String message,
+                                   kj::Maybe<kj::String> maybeStack)
+                                   override {
+      return withinHandleScope([&] {
+        v8::Local<v8::FunctionTemplate> tmpl = jsgIsolate.wrapper->getTemplate(v8Isolate, (DOMException*)nullptr);
+        KJ_DASSERT(!tmpl.IsEmpty());
+        v8::Local<v8::Object> obj = check(tmpl->InstanceTemplate()->NewInstance(v8Context()));
+        v8::Local<v8::String> stackName = str("stack"_kjc);
+
+        KJ_IF_SOME(stack, maybeStack) {
+          v8::PropertyDescriptor prop(str(stack), true);
+          prop.set_enumerable(true);
+          jsg::check(obj->DefineProperty(v8Context(), stackName, prop));
+        } else {
+          v8::Exception::CaptureStackTrace(v8Context(), obj);
+          v8::PropertyDescriptor prop;
+          prop.set_enumerable(true);
+          jsg::check(obj->DefineProperty(v8Context(), stackName, prop));
+        }
+
+        auto de = jsg::alloc<DOMException>(kj::mv(message), kj::mv(name));
+        de.attachWrapper(v8Isolate, obj);
+
+        return kj::mv(de);
+      });
+    }
+
     // Returns the constructor function for a given type declared as JSG_RESOURCE_TYPE.
     //
     // Note there's a useful property of class constructor functions: A constructor's __proto__
@@ -438,7 +490,7 @@ public:
     jsg::JsObject getConstructor(v8::Local<v8::Context> context) {
       v8::EscapableHandleScope scope(v8Isolate);
       v8::Local<v8::FunctionTemplate> tpl =
-          jsgIsolate.wrapper->template getTemplate(v8Isolate, (T*)nullptr);
+          jsgIsolate.wrapper->getTemplate(v8Isolate, (T*)nullptr);
       v8::Local<v8::Object> prototype = check(tpl->GetFunction(context));
       return jsg::JsObject(scope.Escape(prototype));
     }
@@ -485,12 +537,32 @@ public:
     // executing JavaScript code. T should be one of your API types which you want to use as the
     // global object. `args...` are passed to the type's constructor.
     template <typename T, typename... Args>
-    JsContext<T> newContext(Args&&... args) {
+    JsContext<T> newContext(NewContextOptions options, Args&&... args) {
       // TODO(soon): Requiring move semantics for the global object is awkward. This should instead
       //   allocate the object (forwarding arguments to the constructor) and return something like
       //   a Ref.
+      return jsgIsolate.wrapper->newContext(*this, options, jsgIsolate.getObserver(), (T*)nullptr, kj::fwd<Args>(args)...);
+    }
 
-      return jsgIsolate.wrapper->newContext(*this, jsgIsolate.getObserver(), (T*)nullptr, kj::fwd<Args>(args)...);
+    // Creates a new JavaScript "context", i.e. the global object. This is the first step to
+    // executing JavaScript code. T should be one of your API types which you want to use as the
+    // global object. `args...` are passed to the type's constructor.
+    template <typename T, typename... Args>
+    JsContext<T> newContext(Args&&... args) {
+      return newContext<T>(NewContextOptions {}, kj::fwd<Args>(args)...);
+    }
+
+    void reportError(const JsValue& value) override {
+      KJ_IF_SOME(domException, jsgIsolate.wrapper->tryUnwrap(v8Context(), value,
+                                                             (DOMException*)nullptr,
+                                                             kj::none)) {
+        auto desc = kj::str("DOMException(", domException.getName(), "): ",
+                               domException.getMessage());
+        jsgIsolate.reportError(*this, kj::mv(desc), value, JsMessage::create(*this, value));
+      } else {
+        jsgIsolate.reportError(*this, value.toString(*this),
+                               value, JsMessage::create(*this, value));
+      }
     }
 
   private:

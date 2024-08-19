@@ -4,6 +4,7 @@
 
 #include "uuid.h"
 
+#include <kj/compat/http.h>
 #include <openssl/rand.h>
 #include <cstdlib>
 
@@ -13,7 +14,7 @@ constexpr char HEX_DIGITS[] = "0123456789abcdef";
 }  // namespace
 
 kj::String randomUUID(kj::Maybe<kj::EntropySource&> optionalEntropySource) {
-  kj::byte buffer[16];
+  kj::byte buffer[16]{};
 
   KJ_IF_SOME(entropySource, optionalEntropySource) {
     entropySource.generate(buffer);

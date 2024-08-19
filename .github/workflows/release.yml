@@ -9,9 +9,9 @@ jobs:
   version:
     outputs:
       version: ${{ steps.echo.outputs.version }}
-    # version job uses ubuntu 22.04, this way we don't have to install the updated clang while
+    # version job uses ubuntu 24.04, this way we don't have to install the updated clang while
     # the build job uses 20.04 for libc compatibility.
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - id: echo
@@ -86,11 +86,12 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           wget https://apt.llvm.org/llvm.sh
+          sed -i '/apt-get install/d' llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 15
-          sudo apt-get install -y libunwind-15 libc++abi1-15 libc++1-15 libc++-15-dev
-          echo "build:linux --action_env=CC=/usr/lib/llvm-15/bin/clang --action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
-          echo "build:linux --host_action_env=CC=/usr/lib/llvm-15/bin/clang --host_action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
+          sudo ./llvm.sh 16
+          sudo apt-get install -y --no-install-recommends clang-16 lld-16 libunwind-16 libc++abi1-16 libc++1-16 libc++-16-dev
+          echo "build:linux --action_env=CC=/usr/lib/llvm-16/bin/clang --action_env=CXX=/usr/lib/llvm-16/bin/clang++" >> .bazelrc
+          echo "build:linux --host_action_env=CC=/usr/lib/llvm-16/bin/clang --host_action_env=CXX=/usr/lib/llvm-16/bin/clang++" >> .bazelrc
       - name: Setup macOS
         if: runner.os == 'macOS'
         run: |
@@ -108,16 +109,11 @@ jobs:
             sed -e '/WORKERS_MIRROR_URL/ { s@# *@@; s@WORKERS_MIRROR_URL@${{ secrets.WORKERS_MIRROR_URL }}@; }' -i.bak WORKSPACE
           fi
       - name: Bazel build
+        # Strip debug info here – we don't generate debug info but some is pulled in from external
+        # static libraries, for example the Rust STL. This is equivalent to the -Wl,-S linker
+        # option, symbols will not be removed.
         run: |
-          bazelisk build --disk_cache=~/bazel-disk-cache --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --config=${{ matrix.bazel-config }} //src/workerd/server:workerd
-      - name: Strip debug symbols
-        if: runner.os != 'Windows'
-        run: |
-          # bazel makes the output directory read-only, fix permissions for binary
-          chmod +w bazel-bin/src/workerd/server/workerd
-          # Strip debug information from the binary, this is acceptable as debug symbols are not
-          # generated for the release configuration. Regular symbols are still included.
-          strip -S bazel-bin/src/workerd/server/workerd
+          bazelisk build --jobs=32 --disk_cache=~/bazel-disk-cache --strip=always --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --config=${{ matrix.bazel-config }} //src/workerd/server:workerd
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
@@ -180,7 +176,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v3
         with:
-          version: 8.8.0
+          version: ^9.1.3
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:

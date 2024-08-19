@@ -4,7 +4,7 @@
 
 #include "jsg.h"
 #include "setup.h"
-#include "workerd/jsg/util.h"
+#include <workerd/jsg/util.h>
 #include <workerd/util/thread-scopes.h>
 
 namespace workerd::jsg {
@@ -116,7 +116,7 @@ void Data::moveFromTraced(Data& other, v8::TracedReference<v8::Data>& otherTrace
 }
 
 Lock::Lock(v8::Isolate* v8Isolate)
-    : v8Isolate(v8Isolate), locker(v8Isolate),
+    : v8Isolate(v8Isolate), locker(v8Isolate), isolateScope(v8Isolate),
       previousData(v8Isolate->GetData(2)),
       warningsLogged(IsolateBase::from(v8Isolate).areWarningsLogged()) {
   if (previousData != nullptr) {
@@ -192,12 +192,20 @@ void Lock::setCaptureThrowsAsRejections(bool capture) {
   IsolateBase::from(v8Isolate).setCaptureThrowsAsRejections({}, capture);
 }
 
+void Lock::setNodeJsCompatEnabled() {
+  IsolateBase::from(v8Isolate).setNodeJsCompatEnabled({}, true);
+}
+
 void Lock::setCommonJsExportDefault(bool exportDefault) {
   IsolateBase::from(v8Isolate).setCommonJsExportDefault({}, exportDefault);
 }
 
 void Lock::setLoggerCallback(kj::Function<Logger>&& logger) {
   IsolateBase::from(v8Isolate).setLoggerCallback({}, kj::mv(logger));
+}
+
+void Lock::setErrorReporterCallback(kj::Function<ErrorReporter>&& errorReporter) {
+  IsolateBase::from(v8Isolate).setErrorReporterCallback({}, kj::mv(errorReporter));
 }
 
 void Lock::requestGcForTesting() const {
@@ -264,10 +272,66 @@ Name Lock::newApiSymbol(kj::StringPtr symbol) {
 }
 
 JsSymbol Lock::symbolDispose() {
-  return IsolateBase::from(v8Isolate).getSymbolDispose();
+  return JsSymbol(v8::Symbol::GetDispose(v8Isolate));
 }
 JsSymbol Lock::symbolAsyncDispose() {
   return IsolateBase::from(v8Isolate).getSymbolAsyncDispose();
+}
+
+void ExternalMemoryAdjustment::maybeDeferAdjustment(v8::Isolate* isolate, size_t amount) {
+  if (isolate == nullptr) return;
+  if (v8::Locker::IsLocked(isolate)) {
+    isolate->AdjustAmountOfExternalAllocatedMemory(static_cast<int64_t>(-amount));
+  } else {
+    // Otherwise, if we don't have the isolate locked, defer the adjustment to the next
+    // time that we do.
+    auto& jsgIsolate = *reinterpret_cast<IsolateBase*>(isolate->GetData(0));
+    jsgIsolate.deferExternalMemoryDecrement(static_cast<int64_t>(amount));
+  }
+}
+
+ExternalMemoryAdjustment::ExternalMemoryAdjustment(v8::Isolate* isolate, size_t amount)
+    : amount(amount), isolate(isolate) {
+  KJ_DASSERT(isolate != nullptr);
+  isolate->AdjustAmountOfExternalAllocatedMemory(amount);
+}
+
+ExternalMemoryAdjustment::ExternalMemoryAdjustment(ExternalMemoryAdjustment&& other) :
+    amount(other.amount), isolate(other.isolate) {
+  other.amount = 0;
+  other.isolate = nullptr;
+}
+
+ExternalMemoryAdjustment& ExternalMemoryAdjustment::operator=(ExternalMemoryAdjustment&& other) {
+  // If we currently have an amount, adjust it back to zero.
+  // In the case we don't have the isolate lock here, the adjustment
+  // will be deferred until the next time we do.
+  if (amount > 0) maybeDeferAdjustment(isolate, amount);
+  amount = other.amount;
+  isolate = other.isolate;
+  other.amount = 0;
+  other.isolate = nullptr;
+  return *this;
+}
+
+ExternalMemoryAdjustment::~ExternalMemoryAdjustment() noexcept(false) {
+  if (amount != 0) {
+    maybeDeferAdjustment(isolate, amount);
+  }
+}
+
+void ExternalMemoryAdjustment::adjust(Lock& js, ssize_t amount) {
+  amount = kj::max(amount, -static_cast<ssize_t>(this->amount));
+  this->amount += amount;
+  isolate->AdjustAmountOfExternalAllocatedMemory(amount);
+}
+
+void ExternalMemoryAdjustment::set(Lock& js, size_t amount) {
+  adjust(js, amount - this->amount);
+}
+
+ExternalMemoryAdjustment Lock::getExternalMemoryAdjustment(int64_t amount) {
+  return ExternalMemoryAdjustment(v8Isolate, amount);
 }
 
 Name::Name(kj::String string)
@@ -279,7 +343,7 @@ Name::Name(kj::StringPtr string)
       inner(kj::str(string)) {}
 
 Name::Name(Lock& js, v8::Local<v8::Symbol> symbol)
-    : hash(symbol->GetIdentityHash()),
+    : hash(kj::hashCode(symbol->GetIdentityHash())),
       inner(js.v8Ref(symbol)) {}
 
 kj::OneOf<kj::StringPtr, v8::Local<v8::Symbol>> Name::getUnwrapped(v8::Isolate* isolate) {

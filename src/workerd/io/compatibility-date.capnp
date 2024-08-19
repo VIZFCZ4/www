@@ -8,6 +8,37 @@ using Cxx = import "/capnp/c++.capnp";
 $Cxx.namespace("workerd");
 $Cxx.allowCancellation;
 
+struct ImpliedByAfterDate @0x8f8c1b68151b6cff {
+  # Annotates a compatibility flag to indicate that it is implied by the enablement
+  # of the named flag after the specified date.
+  name @0 :Text;
+  date @1 :Text;
+}
+
+struct PythonSnapshotRelease @0x89c66fb883cb6975 {
+  # Used to indicate a specific Python release that introduces a change which likely breaks
+  # existing memory snapshots.
+  #
+  # The versions/dates specified here are used to generate a filename for the package memory
+  # snapshots created by the validator. They are also used to generate a filename of the Pyodide
+  # and package bundle that gets downloaded for Python Workers.
+  pyodide @0 :Text;
+  # The Pyodide version, for example "0.26.0a2".
+  pyodideRevision @1 :Text;
+  # A date identifying a revision of the above Pyodide version. A change in this field but not
+  # the `pyodide` version field may indicate that changes to the workerd Pyodide integration code
+  # were made with the Pyodide version remaining the same.
+  #
+  # For example "2024-05-25".
+  packages @2 :Text;
+  # A date identifying a revision of the Python package bundle.
+  #
+  # For example "2024-02-18".
+  backport @3 :Int64;
+  # A number that is incremented each time we need to backport a fix to an existing Python release.
+}
+
+
 struct CompatibilityFlags @0x8f8c1b68151b6cef {
   # Flags that change the basic behavior of the runtime API, especially for
   # backwards-compatibility with old bugs.
@@ -27,7 +58,7 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   #
   # A disable-flag is used when a worker needs to keep long-term backwards compatibility with one
   # bug but doesn't want to hold back everything else. This is hopefully rare! Most features
-  # should not have a disable-flag defined unless we get requests from customers.
+  # should have a disable-flag defined.
 
   annotation compatEnableDate @0x91a5d5d7244cf6d0 (field) :Text;
   # The compatibility date (date string, like "2021-05-17") after which this flag should always
@@ -59,6 +90,13 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   # not covered by Workers' usual backwards-compatibility promise. Experimental flags cannot be
   # used in Workers deployed on Cloudflare except by test accounts belonging to Cloudflare team
   # members.
+
+  annotation impliedByAfterDate @0xe3e5a63e76284d89 (field) :ImpliedByAfterDate;
+
+  annotation pythonSnapshotRelease @0xef74c0cc5d18cc0c (field) :PythonSnapshotRelease;
+  # This annotation marks a compat flag as introducing a potentially breaking change to Python
+  # memory snapshots. See the doc comment for the `PythonSnapshotRelease` struct above for more
+  # details.
 
   formDataParserSupportsFiles @0 :Bool
       $compatEnableFlag("formdata_parser_supports_files")
@@ -384,7 +422,9 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   # Queues bindings serialize messages to JSON format by default (the previous default was v8 format)
 
   pythonWorkers @43 :Bool
-      $compatEnableFlag("python_workers");
+      $compatEnableFlag("python_workers")
+      $pythonSnapshotRelease(pyodide = "0.26.0a2", pyodideRevision = "2024-03-01",
+          packages = "2024-03-01", backport = 0);
   # Enables Python Workers. Access to this flag is not restricted, instead bundles containing
   # Python modules are restricted in EWC.
   #
@@ -415,4 +455,121 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   # type of Durable Object stubs -- support RPC. If so, this type will have a wildcard method, so
   # it will appear that all possible property names are present on any fetcher instance. This could
   # break code that tries to infer types based on the presence or absence of methods.
+
+  internalStreamByobReturn @47 :Bool
+      $compatEnableFlag("internal_stream_byob_return_view")
+      $compatDisableFlag("internal_stream_byob_return_undefined")
+      $compatEnableDate("2024-05-13");
+  # Sadly, the original implementation of ReadableStream (now called "internal" streams), did not
+  # properly implement the result of ReadableStreamBYOBReader's read method. When done = true,
+  # per the spec, the result `value` must be an empty ArrayBufferView whose underlying ArrayBuffer
+  # is the same as the one passed to the read method. Our original implementation returned
+  # undefined instead. This flag changes the behavior to match the spec and to match the behavior
+  # implemented by the JS-backed ReadableStream implementation.
+
+  blobStandardMimeType @48 :Bool
+      $compatEnableFlag("blob_standard_mime_type")
+      $compatDisableFlag("blob_legacy_mime_type")
+      $compatEnableDate("2024-06-03");
+  # The original implementation of the Blob mime type normalization when extracting a blob
+  # from the Request or Response body is not compliant with the standard. Unfortunately,
+  # making it compliant is a breaking change. This flag controls the availability of the
+  # new spec-compliant Blob mime type normalization.
+
+  fetchStandardUrl @49 :Bool
+    $compatEnableFlag("fetch_standard_url")
+    $compatDisableFlag("fetch_legacy_url")
+    $compatEnableDate("2024-06-03");
+  # Ensures that WHATWG standard URL parsing is used in the fetch API implementation.
+
+  nodeJsCompatV2 @50 :Bool
+      $compatEnableFlag("nodejs_compat_v2")
+      $compatDisableFlag("no_nodejs_compat_v2")
+      $impliedByAfterDate(name = "nodeJsCompat", date = "2024-09-02");
+  # Implies nodeJSCompat with the following additional modifications:
+  # * Node.js Compat built-ins may be imported/required with or without the node: prefix
+  # * Node.js Compat the globals Buffer and process are available everywhere
+
+  globalFetchStrictlyPublic @51 :Bool
+      $compatEnableFlag("global_fetch_strictly_public")
+      $compatDisableFlag("global_fetch_private_origin")
+      $experimental;
+  # Controls what happens when a Worker hosted on Cloudflare uses the global `fetch()` function to
+  # request a hostname that is within the Worker's own Cloudflare zone (domain).
+  #
+  # Historically, such requests would be routed to the zone's origin server, ignoring any Workers
+  # mapped to the URL and also bypassing Cloudflare security settings. This behavior made sense
+  # when Workers was first introduced as a way to rewrite requests before passing them along to
+  # the origin, and bindings didn't exist: the only way to forward the request to origin was to
+  # use global fetch(), and if it didn't bypass Workers, you'd end up looping back to the same
+  # Worker.
+  #
+  # However, this behavior has a problem: it opens the door for SSRF attacks. Imagine a Worker is
+  # designed to fetch a resource from a user-provided URL. An attacker could provide a URL that
+  # points back to the Worker's own zone, and possibly cause the Worker to fetch a resource from
+  # origin that isn't meant to be reachable by the public.
+  #
+  # Traditionally, this kind of attack is considered a bug in the application: an application that
+  # fetches untrusted URLs must verify that the URL doesn't refer to a private resource that only
+  # the application itself is meant to access. However, applications can easily get this wrong.
+  # Meanwhile, by using bindings, we can make this class of problem go away.
+  #
+  # When global_fetch_strictly_public is enabled, the global `fetch()` function (when invoked on
+  # Cloudflare Workers) will strictly route requests as if they were made on the public internet.
+  # Thus, requests to a Worker's own zone will loop back to the "front door" of Cloudflare and
+  # will be treated like a request from the internet, possibly even looping back to the same Worker
+  # again. If an application wishes to send requests to its origin, it must configure an "origin
+  # binding". An origin binding behaves like a service binding (it has a `fetch()` method) but
+  # sends requests to the zone's origin servers, bypassing Cloudflare. E.g. the Worker would write
+  # `env.ORIGIN.fetch(req)` to send a request to its origin.
+  #
+  # Note: This flag only impacts behavior on Cloudflare. It has no effect when using workerd.
+  # Under workerd, the config file can control where global `fetch()` goes by configuring the
+  # worker's `globalOutbound` implicit binding. By default, under workerd, global `fetch()` has
+  # always been configured to accept publicly-routable internet hosts only; hostnames which map
+  # to private IP addresses (as defined in e.g. RFC 1918) will be rejected. Thus, workerd has
+  # always been SSRF-safe by default.
+
+  newModuleRegistry @52 :Bool
+      $compatEnableFlag("new_module_registry")
+      $compatDisableFlag("legacy_module_registry")
+      $experimental;
+  # Enables of the new module registry implementation.
+
+  cacheOptionEnabled @53 :Bool
+    $compatEnableFlag("cache_option_enabled")
+    $compatDisableFlag("cache_option_disabled")
+    $experimental;
+  # Enables the use of no-cache and no-store headers from requests
+
+  kvDirectBinding @54 :Bool
+      $compatEnableFlag("kv_direct_binding")
+      $experimental;
+  # Enables bypassing FL by translating pipeline tunnel configuration to subpipeline.
+  # This flag is used only by the internal repo and not directly by workerd.
+
+  allowCustomPorts @55 :Bool
+      $compatEnableFlag("allow_custom_ports")
+      $compatDisableFlag("ignore_custom_ports")
+      $compatEnableDate("2024-09-02")
+      $neededByFl;
+  # Enables fetching hosts with a custom port from workers.
+  # For orange clouded sites only standard ports are allowed (https://developers.cloudflare.com/fundamentals/reference/network-ports/#network-ports-compatible-with-cloudflares-proxy).
+  # For grey clouded sites all ports are allowed.
+
+  increaseWebsocketMessageSize @56 :Bool
+      $compatEnableFlag("increase_websocket_message_size")
+      $experimental;
+  # For local development purposes only, increase the message size limit to 128MB.
+  # This is not expected ever to be made available in production, as large messages are inefficient.
+
+  internalWritableStreamAbortClearsQueue @57 :Bool
+      $compatEnableFlag("internal_writable_stream_abort_clears_queue")
+      $compatDisableFlag("internal_writable_stream_abort_does_not_clear_queue")
+      $compatEnableDate("2024-09-02");
+  # When using the original WritableStream implementation ("internal" streams), the
+  # abort() operation would be handled lazily, meaning that the queue of pending writes
+  # would not be cleared until the next time the queue was processed. This behavior leads
+  # to a situtation where the stream can hang if the consumer stops consuming. When set,
+  # this flag changes the behavior to clear the queue immediately upon abort.
 }

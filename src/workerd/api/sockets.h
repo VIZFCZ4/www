@@ -6,6 +6,8 @@
 
 #include <workerd/jsg/jsg.h>
 #include <workerd/jsg/modules.h>
+#include <workerd/jsg/modules-new.h>
+#include <workerd/jsg/url.h>
 #include "streams.h"
 
 namespace workerd::api {
@@ -29,6 +31,9 @@ struct SocketAddress {
 
 struct SocketInfo {
   jsg::Optional<kj::String> remoteAddress;
+
+  // The local address is specified by the spec but we don't implement it.
+  // It will always remain empty.
   jsg::Optional<kj::String> localAddress;
   JSG_STRUCT(remoteAddress, localAddress);
 };
@@ -38,7 +43,8 @@ typedef kj::OneOf<SocketAddress, kj::String> AnySocketAddress;
 struct SocketOptions {
   jsg::Optional<kj::String> secureTransport;
   bool allowHalfOpen = false;
-  JSG_STRUCT(secureTransport, allowHalfOpen);
+  jsg::Optional<uint64_t> highWaterMark;
+  JSG_STRUCT(secureTransport, allowHalfOpen, highWaterMark);
   JSG_MEMORY_INFO(SocketOptions) {
     tracker.trackField("secureTransport", secureTransport);
   }
@@ -53,10 +59,11 @@ class Socket: public jsg::Object {
 public:
   Socket(jsg::Lock& js, IoContext& context,
       kj::Own<kj::RefcountedWrapper<kj::Own<kj::AsyncIoStream>>> connectionStream,
-      jsg::Ref<ReadableStream> readableParam, jsg::Ref<WritableStream> writable,
-      jsg::PromiseResolverPair<void> closedPrPair, kj::Promise<void> watchForDisconnectTask,
-      jsg::Optional<SocketOptions> options, kj::Own<kj::TlsStarterCallback> tlsStarter,
-      bool isSecureSocket, kj::String domain, bool isDefaultFetchPort,
+      kj::String remoteAddress, jsg::Ref<ReadableStream> readableParam,
+      jsg::Ref<WritableStream> writable, jsg::PromiseResolverPair<void> closedPrPair,
+      kj::Promise<void> watchForDisconnectTask, jsg::Optional<SocketOptions> options,
+      kj::Own<kj::TlsStarterCallback> tlsStarter, bool isSecureSocket,
+      kj::String domain, bool isDefaultFetchPort,
       jsg::PromiseResolverPair<SocketInfo> openedPrPair)
       : connectionStream(context.addObject(kj::mv(connectionStream))),
         readable(kj::mv(readableParam)), writable(kj::mv(writable)),
@@ -65,6 +72,7 @@ public:
         closedPromise(kj::mv(closedPrPair.promise)),
         watchForDisconnectTask(context.addObject(kj::heap(kj::mv(watchForDisconnectTask)))),
         options(kj::mv(options)),
+        remoteAddress(kj::mv(remoteAddress)),
         tlsStarter(context.addObject(kj::mv(tlsStarter))),
         isSecureSocket(isSecureSocket),
         domain(kj::mv(domain)),
@@ -154,6 +162,7 @@ private:
   jsg::MemoizedIdentity<jsg::Promise<void>> closedPromise;
   IoOwn<kj::Promise<void>> watchForDisconnectTask;
   jsg::Optional<SocketOptions> options;
+  kj::String remoteAddress;
   // Callback used to upgrade the existing connection to a secure one.
   IoOwn<kj::TlsStarterCallback> tlsStarter;
   // Set to true on sockets created with `useSecureTransport` set to true or a socket returned by
@@ -202,6 +211,7 @@ private:
 
 jsg::Ref<Socket> setupSocket(
     jsg::Lock& js, kj::Own<kj::AsyncIoStream> connection,
+    kj::String remoteAddress,
     jsg::Optional<SocketOptions> options, kj::Own<kj::TlsStarterCallback> tlsStarter,
     bool isSecureSocket, kj::String domain, bool isDefaultFetchPort);
 
@@ -215,6 +225,9 @@ jsg::Ref<Socket> connectImpl(
 
 class SocketsModule final: public jsg::Object {
 public:
+  SocketsModule() = default;
+  SocketsModule(jsg::Lock&, const jsg::Url&) {}
+
   jsg::Ref<Socket> connect(jsg::Lock& js, AnySocketAddress address,
     jsg::Optional<SocketOptions> options) {
     return connectImpl(js, kj::none, kj::mv(address), kj::mv(options));
@@ -230,7 +243,15 @@ void registerSocketsModule(
     Registry& registry, auto featureFlags) {
   registry.template addBuiltinModule<SocketsModule>("cloudflare-internal:sockets",
     workerd::jsg::ModuleRegistry::Type::INTERNAL);
+}
 
+template <typename TypeWrapper>
+kj::Own<jsg::modules::ModuleBundle> getInternalSocketModuleBundle(auto featureFlags) {
+  jsg::modules::ModuleBundle::BuiltinBuilder builder(
+      jsg::modules::ModuleBundle::BuiltinBuilder::Type::BUILTIN_ONLY);
+  static const auto kSpecifier = "cloudflare-internal:sockets"_url;
+  builder.addObject<SocketsModule, TypeWrapper>(kSpecifier);
+  return builder.finish();
 }
 
 #define EW_SOCKETS_ISOLATE_TYPES     \

@@ -1,7 +1,13 @@
+// Copyright (c) 2017-2022 Cloudflare, Inc.
+// Licensed under the Apache 2.0 license found in the LICENSE file or at:
+//     https://opensource.org/licenses/Apache-2.0
 #pragma once
 
 #include <workerd/jsg/jsg.h>
-#include <workerd/api/crypto.h>
+#include <workerd/api/crypto/crypto.h>
+#include <workerd/api/crypto/digest.h>
+#include <workerd/api/crypto/dh.h>
+#include <workerd/api/crypto/x509.h>
 #include <openssl/evp.h>
 
 namespace workerd::api::node {
@@ -11,13 +17,12 @@ public:
   // DH
   class DiffieHellmanHandle final: public jsg::Object {
     public:
-      DiffieHellmanHandle(kj::OneOf<kj::Array<kj::byte>, int>& sizeOrKey,
-                          kj::OneOf<kj::Array<kj::byte>, int>& generator);
-      DiffieHellmanHandle(kj::String& name);
+      DiffieHellmanHandle(DiffieHellman dh);
 
-      static jsg::Ref<DiffieHellmanHandle> constructor(jsg::Lock& js,
-                                            kj::OneOf<kj::Array<kj::byte>, int> sizeOrKey,
-                                            kj::OneOf<kj::Array<kj::byte>, int> generator);
+      static jsg::Ref<DiffieHellmanHandle> constructor(
+          jsg::Lock& js,
+          kj::OneOf<kj::Array<kj::byte>, int> sizeOrKey,
+          kj::OneOf<kj::Array<kj::byte>, int> generator);
 
       void setPrivateKey(kj::Array<kj::byte> key);
       void setPublicKey(kj::Array<kj::byte> key);
@@ -42,13 +47,8 @@ public:
       };
 
     private:
-      kj::Own<DH> dh;
+      DiffieHellman dh;
       int verifyError;
-
-      bool VerifyContext();
-      bool Init(kj::OneOf<kj::Array<kj::byte>, int>& sizeOrKey, kj::OneOf<kj::Array<kj::byte>,
-                int>& generator);
-      bool InitGroup(kj::String& name);
   };
 
   jsg::Ref<DiffieHellmanHandle> DiffieHellmanGroupHandle(kj::String name);
@@ -61,69 +61,82 @@ public:
   // Hash
   class HashHandle final: public jsg::Object {
     public:
-      HashHandle(kj::String& algorithm, kj::Maybe<uint32_t> xofLen);
-      HashHandle(EVP_MD_CTX* in_ctx, kj::Maybe<uint32_t> xofLen);
+      HashHandle(HashContext ctx) : ctx(kj::mv(ctx)) {}
 
-      jsg::Ref<HashHandle> copy(jsg::Lock& js, kj::Maybe<uint32_t> xofLen);
-      int update(jsg::Lock& js, kj::Array<kj::byte> data);
-      kj::Array<kj::byte> digest(jsg::Lock& js);
-      static jsg::Ref<HashHandle> constructor(jsg::Lock& js, kj::String algorithm,
-                                              kj::Maybe<uint32_t> xofLen);
+      static jsg::Ref<HashHandle> constructor(kj::String algorithm, kj::Maybe<uint32_t> xofLen);
+      static kj::Array<kj::byte> oneshot(kj::String algorithm, kj::Array<kj::byte> data,
+                                         kj::Maybe<uint32_t> xofLen);
+
+      jsg::Ref<HashHandle> copy(kj::Maybe<uint32_t> xofLen);
+      int update(kj::Array<kj::byte> data);
+      kj::ArrayPtr<kj::byte> digest();
 
       JSG_RESOURCE_TYPE(HashHandle) {
         JSG_METHOD(update);
         JSG_METHOD(digest);
         JSG_METHOD(copy);
+        JSG_STATIC_METHOD(oneshot);
       };
 
-      void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
-        tracker.trackField("digest", _digest);
-      }
+      void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
     private:
-      void checkDigestLength(const EVP_MD* md, kj::Maybe<uint32_t> xofLen);
-
-      jsg::Optional<kj::Array<kj::byte>> _digest;
-      kj::Own<EVP_MD_CTX> md_ctx;
-      unsigned md_len;
+      HashContext ctx;
   };
 
   // Hmac
   class HmacHandle final: public jsg::Object {
     public:
-      HmacHandle(jsg::Lock& js, kj::String& algorithm, kj::OneOf<kj::Array<kj::byte>,
-                 jsg::Ref<CryptoKey>>&_key);
+      using KeyParam = kj::OneOf<kj::Array<kj::byte>, jsg::Ref<CryptoKey>>;
 
-      int update(jsg::Lock& js, kj::Array<kj::byte> data);
-      kj::Array<kj::byte> digest(jsg::Lock& js);
-      static jsg::Ref<HmacHandle> constructor(jsg::Lock& js,
-          kj::String algorithm, kj::OneOf<kj::Array<kj::byte>, jsg::Ref<CryptoKey>> key);
+      HmacHandle(HmacContext ctx) : ctx(kj::mv(ctx)) {};
+
+      static jsg::Ref<HmacHandle> constructor(kj::String algorithm, KeyParam key);
+
+      // Efficiently implement one-shot hmac that avoids multiple calls
+      // across the C++/JS boundary.
+      static kj::Array<kj::byte> oneshot(kj::String algorithm, KeyParam key,
+                                         kj::Array<kj::byte> data);
+
+      int update(kj::Array<kj::byte> data);
+      kj::ArrayPtr<kj::byte> digest();
 
       JSG_RESOURCE_TYPE(HmacHandle) {
         JSG_METHOD(update);
         JSG_METHOD(digest);
+        JSG_STATIC_METHOD(oneshot);
       };
 
-      void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
-        tracker.trackField("digest", _digest);
-      }
+      void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
     private:
-      jsg::Optional<kj::Array<kj::byte>> _digest;
-      kj::Own<HMAC_CTX> hmac_ctx;
+      HmacContext ctx;
   };
 
   // Hkdf
-  kj::Array<kj::byte> getHkdf(kj::String hash, kj::Array<kj::byte> key, kj::Array<kj::byte> salt,
-                              kj::Array<kj::byte> info, uint32_t length);
+  kj::Array<kj::byte> getHkdf(kj::String hash,
+                              kj::Array<const kj::byte> key,
+                              kj::Array<const kj::byte> salt,
+                              kj::Array<const kj::byte> info,
+                              uint32_t length);
 
   // Pbkdf2
   kj::Array<kj::byte> getPbkdf(jsg::Lock& js,
-                               kj::Array<kj::byte> password,
-                               kj::Array<kj::byte> salt,
+                               kj::Array<const kj::byte> password,
+                               kj::Array<const kj::byte> salt,
                                uint32_t num_iterations,
                                uint32_t keylen,
                                kj::String name);
+
+  // Scrypt
+  kj::Array<kj::byte> getScrypt(jsg::Lock& js,
+                                kj::Array<const kj::byte> password,
+                                kj::Array<const kj::byte> salt,
+                                uint32_t N,
+                                uint32_t r,
+                                uint32_t p,
+                                uint32_t maxmem,
+                                uint32_t keylen);
 
   // Keys
   struct KeyExportOptions {
@@ -179,6 +192,9 @@ public:
     JSG_STRUCT(key, format, type, passphrase);
   };
 
+  CryptoImpl() = default;
+  CryptoImpl(jsg::Lock&, const jsg::Url&) {}
+
   kj::OneOf<kj::String, kj::Array<kj::byte>, SubtleCrypto::JsonWebKey> exportKey(
       jsg::Lock& js,
       jsg::Ref<CryptoKey> key,
@@ -192,6 +208,10 @@ public:
   jsg::Ref<CryptoKey> createSecretKey(jsg::Lock& js, kj::Array<kj::byte>);
   jsg::Ref<CryptoKey> createPrivateKey(jsg::Lock& js, CreateAsymmetricKeyOptions options);
   jsg::Ref<CryptoKey> createPublicKey(jsg::Lock& js, CreateAsymmetricKeyOptions options);
+
+  bool verifySpkac(kj::Array<const kj::byte> input);
+  kj::Maybe<kj::Array<kj::byte>> exportPublicKey(kj::Array<const kj::byte> input);
+  kj::Maybe<kj::Array<kj::byte>> exportChallenge(kj::Array<const kj::byte> input);
 
   JSG_RESOURCE_TYPE(CryptoImpl) {
     // DH
@@ -207,6 +227,8 @@ public:
     JSG_METHOD(getHkdf);
     // Pbkdf2
     JSG_METHOD(getPbkdf);
+    // Scrypt
+    JSG_METHOD(getScrypt);
     // Keys
     JSG_METHOD(exportKey);
     JSG_METHOD(equals);
@@ -215,6 +237,12 @@ public:
     JSG_METHOD(createSecretKey);
     JSG_METHOD(createPrivateKey);
     JSG_METHOD(createPublicKey);
+    // Spkac
+    JSG_METHOD(verifySpkac);
+    JSG_METHOD(exportPublicKey);
+    JSG_METHOD(exportChallenge);
+    // X509
+    JSG_NESTED_TYPE(X509Certificate);
   }
 };
 
@@ -225,6 +253,7 @@ public:
     api::node::CryptoImpl::HmacHandle,                 \
     api::node::CryptoImpl::KeyExportOptions,           \
     api::node::CryptoImpl::GenerateKeyPairOptions,     \
-    api::node::CryptoImpl::CreateAsymmetricKeyOptions
+    api::node::CryptoImpl::CreateAsymmetricKeyOptions, \
+    EW_CRYPTO_X509_ISOLATE_TYPES
 }  // namespace workerd::api::node
 

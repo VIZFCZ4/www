@@ -18,9 +18,6 @@ ReaderImpl::ReaderImpl(ReadableStreamController::Reader& reader) :
 
 ReaderImpl::~ReaderImpl() noexcept(false) {
   KJ_IF_SOME(stream, state.tryGet<Attached>()) {
-    // There's a very good likelihood that this is called during GC or other
-    // cleanup so we have to make sure that releasing the reader does not also
-    // trigger resolution of the close promise.
     stream->getController().releaseReader(reader, kj::none);
   }
 }
@@ -61,6 +58,11 @@ jsg::Promise<void> ReaderImpl::cancel(
       KJ_FAIL_ASSERT("this reader was never attached");
     }
     KJ_CASE_ONEOF(stream, Attached) {
+      // In some edge cases, this reader is the last thing holding a strong
+      // reference to the stream. Calling cancel might cause the readers strong
+      // reference to be cleared, so let's make sure we keep a reference to
+      // the stream at least until the call to cancel completes.
+      auto ref = stream.addRef();
       return stream->getController().cancel(js, maybeReason);
     }
     KJ_CASE_ONEOF(r, Released) {
@@ -141,6 +143,11 @@ void ReaderImpl::releaseLock(jsg::Lock& js) {
       KJ_FAIL_ASSERT("this reader was never attached");
     }
     KJ_CASE_ONEOF(stream, Attached) {
+      // In some edge cases, this reader is the last thing holding a strong
+      // reference to the stream. Calling releaseLock might cause the readers strong
+      // reference to be cleared, so let's make sure we keep a reference to
+      // the stream at least until the call to releaseLock completes.
+      auto ref = stream.addRef();
       stream->getController().releaseReader(reader, js);
       state.init<Released>();
       return;
@@ -539,8 +546,8 @@ public:
                                kj::Own<kj::RefcountedWrapper<bool>> ended)
       : inner(kj::mv(inner)), ended(kj::mv(ended)) {}
 
-  kj::Promise<void> write(const void* buffer, size_t size) override {
-    return KJ_REQUIRE_NONNULL(inner)->write(buffer, size);
+  kj::Promise<void> write(kj::ArrayPtr<const byte> buffer) override {
+    return KJ_REQUIRE_NONNULL(inner)->write(buffer);
   }
   kj::Promise<void> write(kj::ArrayPtr<const kj::ArrayPtr<const byte>> pieces) override {
     return KJ_REQUIRE_NONNULL(inner)->write(pieces);
@@ -617,7 +624,7 @@ private:
 //
 // TODO(someday): Devise a better way for RPC streams to extend the lifetime of the RPC session
 //   beyond the destruction of the IoContext, if it is being used for deferred proxying.
-class NoDeferredProxyReadableStream: public ReadableStreamSource {
+class NoDeferredProxyReadableStream final: public ReadableStreamSource {
 public:
   NoDeferredProxyReadableStream(kj::Own<ReadableStreamSource> inner, IoContext& ioctx)
       : inner(kj::mv(inner)), ioctx(ioctx) {}

@@ -2,7 +2,7 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-import { strictEqual } from 'node:assert';
+import { strictEqual, throws } from 'node:assert';
 import { inspect } from 'node:util';
 
 export const test1 = {
@@ -122,9 +122,29 @@ export default {
 export const testInspect = {
   async test(ctrl, env, ctx) {
     const blob = new Blob(["abc"], { type: "text/plain" });
-    strictEqual(inspect(blob), "Blob { type: 'text/plain', size: 3 }");
+    strictEqual(inspect(blob), "Blob { size: 3, type: 'text/plain' }");
 
     const file = new File(["1"], "file.txt", { type: "text/plain", lastModified: 1000 });
-    strictEqual(inspect(file), "File { lastModified: 1000, name: 'file.txt', type: 'text/plain', size: 1 }");
+    strictEqual(inspect(file), "File { name: 'file.txt', lastModified: 1000, size: 1, type: 'text/plain' }");
+  }
+};
+
+export const overLarge = {
+  test() {
+    const blob1 = new Blob([new ArrayBuffer(128 * 1024 * 1024)]);
+
+    throws(() => {
+      new Blob([new ArrayBuffer((128 * 1024 * 1024) + 1)]);
+    }, {
+      message: 'Blob size 134217729 exceeds limit 134217728',
+      name: 'RangeError',
+    });
+
+    throws(() => {
+      new Blob([' ', blob1]);
+    }, {
+      message: 'Blob size 134217729 exceeds limit 134217728',
+      name: 'RangeError',
+    });
   }
 };

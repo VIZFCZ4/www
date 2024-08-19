@@ -4,12 +4,15 @@
 #pragma once
 
 #include <workerd/jsg/jsg.h>
+#include "i18n.h"
 
 namespace workerd::api::node {
 
 // Implements utilities in support of the Node.js Buffer
 class BufferUtil final: public jsg::Object {
 public:
+  BufferUtil() = default;
+  BufferUtil(jsg::Lock&, const jsg::Url&) {}
 
   uint32_t byteLength(jsg::Lock& js, jsg::JsString str);
 
@@ -33,20 +36,20 @@ public:
 
   kj::Array<kj::byte> decodeString(jsg::Lock& js,
                                    jsg::JsString string,
-                                   kj::String encoding);
+                                   EncodingValue encoding);
 
   void fillImpl(jsg::Lock& js,
                 kj::Array<kj::byte> buffer,
                 kj::OneOf<jsg::JsString, jsg::BufferSource> value,
                 uint32_t start,
                 uint32_t end,
-                jsg::Optional<kj::String> encoding);
+                jsg::Optional<EncodingValue> encoding);
 
   jsg::Optional<uint32_t> indexOf(jsg::Lock& js,
                                   kj::Array<kj::byte> buffer,
                                   kj::OneOf<jsg::JsString, jsg::BufferSource> value,
                                   int32_t byteOffset,
-                                  kj::String encoding,
+                                  EncodingValue encoding,
                                   bool isForward);
 
   void swap(jsg::Lock& js, kj::Array<kj::byte> buffer, int size);
@@ -55,14 +58,14 @@ public:
                          kj::Array<kj::byte> bytes,
                          uint32_t start,
                          uint32_t end,
-                         kj::String encoding);
+                         EncodingValue encoding);
 
   uint32_t write(jsg::Lock& js,
                  kj::Array<kj::byte> buffer,
                  jsg::JsString string,
                  uint32_t offset,
                  uint32_t length,
-                 kj::String encoding);
+                 EncodingValue encoding);
 
   enum NativeDecoderFields {
     kIncompleteCharactersStart = 0,
@@ -77,6 +80,11 @@ public:
                         kj::Array<kj::byte> bytes,
                         kj::Array<kj::byte> state);
   jsg::JsString flush(jsg::Lock& js, kj::Array<kj::byte> state);
+  bool isAscii(kj::Array<kj::byte> bytes);
+  bool isUtf8(kj::Array<kj::byte> bytes);
+  kj::Array<kj::byte> transcode(kj::Array<kj::byte> source,
+                                EncodingValue rawFromEncoding,
+                                EncodingValue rawToEncoding);
 
   JSG_RESOURCE_TYPE(BufferUtil) {
     JSG_METHOD(byteLength);
@@ -88,10 +96,21 @@ public:
     JSG_METHOD(swap);
     JSG_METHOD(toString);
     JSG_METHOD(write);
+    JSG_METHOD(isAscii);
+    JSG_METHOD(isUtf8);
+    JSG_METHOD(transcode);
 
     // For StringDecoder
     JSG_METHOD(decode);
     JSG_METHOD(flush);
+
+    JSG_STATIC_CONSTANT_NAMED(ASCII, static_cast<EncodingValue>(Encoding::ASCII));
+    JSG_STATIC_CONSTANT_NAMED(LATIN1, static_cast<EncodingValue>(Encoding::LATIN1));
+    JSG_STATIC_CONSTANT_NAMED(UTF8, static_cast<EncodingValue>(Encoding::UTF8));
+    JSG_STATIC_CONSTANT_NAMED(UTF16LE, static_cast<EncodingValue>(Encoding::UTF16LE));
+    JSG_STATIC_CONSTANT_NAMED(BASE64, static_cast<EncodingValue>(Encoding::BASE64));
+    JSG_STATIC_CONSTANT_NAMED(BASE64URL, static_cast<EncodingValue>(Encoding::BASE64URL));
+    JSG_STATIC_CONSTANT_NAMED(HEX, static_cast<EncodingValue>(Encoding::HEX));
   }
 };
 

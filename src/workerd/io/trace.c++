@@ -5,7 +5,6 @@
 #include <workerd/io/trace.h>
 #include <capnp/message.h>
 #include <capnp/schema.h>
-#include <kj/compat/http.h>
 #include <kj/debug.h>
 #include <cstdlib>
 
@@ -243,12 +242,13 @@ Trace::Exception::Exception(kj::Date timestamp, kj::String name, kj::String mess
 
 Trace::Trace(kj::Maybe<kj::String> stableId, kj::Maybe<kj::String> scriptName,
     kj::Maybe<kj::Own<ScriptVersion::Reader>> scriptVersion,
-    kj::Maybe<kj::String> dispatchNamespace, kj::Array<kj::String> scriptTags,
-    kj::Maybe<kj::String> entrypoint)
+    kj::Maybe<kj::String> dispatchNamespace, kj::Maybe<kj::String> scriptId,
+    kj::Array<kj::String> scriptTags, kj::Maybe<kj::String> entrypoint)
     : stableId(kj::mv(stableId)),
       scriptName(kj::mv(scriptName)),
       scriptVersion(kj::mv(scriptVersion)),
       dispatchNamespace(kj::mv(dispatchNamespace)),
+      scriptId(kj::mv(scriptId)),
       scriptTags(kj::mv(scriptTags)),
       entrypoint(kj::mv(entrypoint)) {}
 Trace::Trace(rpc::Trace::Reader reader) {
@@ -272,6 +272,7 @@ void Trace::copyTo(rpc::Trace::Builder builder) {
     }
   }
 
+  builder.setTruncated(truncated);
   builder.setOutcome(outcome);
   builder.setCpuTime(cpuTime / kj::MILLISECONDS);
   builder.setWallTime(wallTime / kj::MILLISECONDS);
@@ -280,6 +281,9 @@ void Trace::copyTo(rpc::Trace::Builder builder) {
   }
   KJ_IF_SOME(version, scriptVersion) {
     builder.setScriptVersion(*version);
+  }
+  KJ_IF_SOME(id, scriptId) {
+    builder.setScriptId(id);
   }
   KJ_IF_SOME(ns, dispatchNamespace) {
     builder.setDispatchNamespace(ns);
@@ -371,6 +375,7 @@ void Trace::mergeFrom(rpc::Trace::Reader reader, PipelineLogLevel pipelineLogLev
     diagnosticChannelEvents.addAll(reader.getDiagnosticChannelEvents());
   }
 
+  truncated = reader.getTruncated();
   outcome = reader.getOutcome();
   cpuTime = reader.getCpuTime() * kj::MILLISECONDS;
   wallTime = reader.getWallTime() * kj::MILLISECONDS;
@@ -386,6 +391,10 @@ void Trace::mergeFrom(rpc::Trace::Reader reader, PipelineLogLevel pipelineLogLev
 
   if (reader.hasScriptVersion()) {
     scriptVersion = capnp::clone(reader.getScriptVersion());
+  }
+
+  if (reader.hasScriptId()) {
+    scriptId = kj::str(reader.getScriptId());
   }
 
   if (reader.hasDispatchNamespace()) {
@@ -536,12 +545,12 @@ kj::Promise<kj::Array<kj::Own<Trace>>> PipelineTracer::onComplete() {
 }
 
 kj::Own<WorkerTracer> PipelineTracer::makeWorkerTracer(
-    PipelineLogLevel pipelineLogLevel, kj::Maybe<kj::String> stableId,
+    PipelineLogLevel pipelineLogLevel, kj::Maybe<kj::String> scriptId, kj::Maybe<kj::String> stableId,
     kj::Maybe<kj::String> scriptName, kj::Maybe<kj::Own<ScriptVersion::Reader>> scriptVersion,
     kj::Maybe<kj::String> dispatchNamespace, kj::Array<kj::String> scriptTags,
     kj::Maybe<kj::String> entrypoint) {
   auto trace = kj::refcounted<Trace>(kj::mv(stableId), kj::mv(scriptName), kj::mv(scriptVersion),
-      kj::mv(dispatchNamespace), kj::mv(scriptTags), kj::mv(entrypoint));
+      kj::mv(dispatchNamespace), kj::mv(scriptId), kj::mv(scriptTags), kj::mv(entrypoint));
   traces.add(kj::addRef(*trace));
   return kj::refcounted<WorkerTracer>(kj::addRef(*this), kj::mv(trace), pipelineLogLevel);
 }
@@ -552,7 +561,7 @@ WorkerTracer::WorkerTracer(kj::Own<PipelineTracer> parentPipeline,
       parentPipeline(kj::mv(parentPipeline)) {}
 WorkerTracer::WorkerTracer(PipelineLogLevel pipelineLogLevel)
     : pipelineLogLevel(pipelineLogLevel),
-      trace(kj::refcounted<Trace>(kj::none, kj::none, kj::none, kj::none, nullptr, kj::none)) {}
+      trace(kj::refcounted<Trace>(kj::none, kj::none, kj::none, kj::none, kj::none, nullptr, kj::none)) {}
 
 void WorkerTracer::log(kj::Date timestamp, LogLevel logLevel, kj::String message) {
   if (trace->exceededLogLimit) {
@@ -564,6 +573,7 @@ void WorkerTracer::log(kj::Date timestamp, LogLevel logLevel, kj::String message
   size_t newSize = trace->bytesUsed + sizeof(Trace::Log) + message.size();
   if (newSize > MAX_TRACE_BYTES) {
     trace->exceededLogLimit = true;
+    trace->truncated = true;
     // We use a JSON encoded array/string to match other console.log() recordings:
     trace->logs.add(
         timestamp, LogLevel::WARN,
@@ -591,6 +601,7 @@ void WorkerTracer::addException(kj::Date timestamp, kj::String name, kj::String 
   }
   if (newSize > MAX_TRACE_BYTES) {
     trace->exceededExceptionLimit = true;
+    trace->truncated = true;
     trace->exceptions.add(
         timestamp, kj::str("Error"),
         kj::str("Trace resource limit exceeded; subsequent exceptions not recorded."),
@@ -614,6 +625,7 @@ void WorkerTracer::addDiagnosticChannelEvent(kj::Date timestamp,
                    message.size();
   if (newSize > MAX_TRACE_BYTES) {
     trace->exceededDiagnosticChannelEventLimit = true;
+    trace->truncated = true;
     trace->diagnosticChannelEvents.add(timestamp, kj::str("workerd.LimitExceeded"),
                                        kj::Array<kj::byte>());
     return;
@@ -645,6 +657,7 @@ void WorkerTracer::setEventInfo(kj::Date timestamp, Trace::EventInfo&& info) {
       }
       newSize += fetch.cfJson.size();
       if (newSize > MAX_TRACE_BYTES) {
+        trace->truncated = true;
         trace->logs.add(
             timestamp, LogLevel::WARN,
             kj::str("[\"Trace resource limit exceeded; could not capture event info.\"]"));

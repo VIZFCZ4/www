@@ -6,8 +6,9 @@
 #include "r2-bucket.h"
 #include "r2-rpc.h"
 #include <array>
-#include <math.h>
+#include <cmath>
 #include <kj/compat/http.h>
+#include <capnp/message.h>
 #include <capnp/compat/json.h>
 #include <workerd/util/http-util.h>
 #include <workerd/api/r2-api.capnp.h>

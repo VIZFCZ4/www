@@ -88,19 +88,19 @@ export const inspect = {
     // Check URL with duplicate search param keys
     const url = new URL("http://user:pass@placeholder:8787/path?a=1&a=2&b=3");
     assert.strictEqual(util.inspect(url),
-`URL {
-  searchParams: URLSearchParams(3) { 'a' => '1', 'a' => '2', 'b' => '3' },
-  hash: '',
-  search: '?a=1&a=2&b=3',
-  pathname: '/path',
-  port: '8787',
-  hostname: 'placeholder',
-  host: 'placeholder:8787',
-  password: 'pass',
-  username: 'user',
-  protocol: 'http:',
+      `URL {
+  origin: 'http://placeholder:8787',
   href: 'http://user:pass@placeholder:8787/path?a=1&a=2&b=3',
-  origin: 'http://placeholder:8787'
+  protocol: 'http:',
+  username: 'user',
+  password: 'pass',
+  host: 'placeholder:8787',
+  hostname: 'placeholder',
+  port: '8787',
+  pathname: '/path',
+  search: '?a=1&a=2&b=3',
+  hash: '',
+  searchParams: URLSearchParams(3) { 'a' => '1', 'a' => '2', 'b' => '3' }
 }`
     );
 
@@ -115,7 +115,7 @@ export const inspect = {
       lastModified: 1000
     }));
     assert.strictEqual(util.inspect(formData, { depth: 0 }),
-`FormData(3) { 'string' => 'hello', 'blob' => [File], 'file' => [File] }`
+      `FormData(3) { 'string' => 'hello', 'blob' => [File], 'file' => [File] }`
     );
 
     // Check request with mutable headers
@@ -125,45 +125,45 @@ export const inspect = {
       headers: { "Content-Type": "text/plain" }
     });
     assert.strictEqual(util.inspect(request),
-`Request {
-  keepalive: false,
-  integrity: '',
-  cf: undefined,
-  signal: AbortSignal { onabort: null, reason: undefined, aborted: false },
-  fetcher: null,
-  redirect: 'follow',
-  headers: Headers(1) { 'content-type' => 'text/plain', [immutable]: false },
-  url: 'http://placeholder',
+      `Request {
   method: 'POST',
-  bodyUsed: false,
+  url: 'http://placeholder',
+  headers: Headers(1) { 'content-type' => 'text/plain', [immutable]: false },
+  redirect: 'follow',
+  fetcher: null,
+  signal: AbortSignal { aborted: false, reason: undefined, onabort: null },
+  cf: undefined,
+  integrity: '',
+  keepalive: false,
   body: ReadableStream {
     locked: false,
     [state]: 'readable',
     [supportsBYOB]: true,
     [length]: 7n
-  }
+  },
+  bodyUsed: false
 }`
     );
 
     // Check response with immutable headers
     const response = await env.SERVICE.fetch("http://placeholder/not-found");
     assert.strictEqual(util.inspect(response),
-`Response {
-  cf: undefined,
-  webSocket: null,
-  url: 'http://placeholder/not-found',
-  redirected: false,
-  ok: false,
-  headers: Headers(0) { [immutable]: true },
-  statusText: 'Not Found',
+      `Response {
   status: 404,
-  bodyUsed: false,
+  statusText: 'Not Found',
+  headers: Headers(0) { [immutable]: true },
+  ok: false,
+  redirected: false,
+  url: 'http://placeholder/not-found',
+  webSocket: null,
+  cf: undefined,
   body: ReadableStream {
     locked: false,
     [state]: 'readable',
     [supportsBYOB]: true,
     [length]: 0n
-  }
+  },
+  bodyUsed: false
 }`
     );
 
@@ -176,20 +176,20 @@ export const inspect = {
     const messagePromise = new Promise((resolve) => {
       webSocket.addEventListener("message", (event) => {
         assert.strictEqual(event.data,
-`MessageEvent {
+          `MessageEvent {
   data: 'data',
-  cancelBubble: false,
-  isTrusted: true,
-  timeStamp: 0,
-  srcElement: WebSocket { extensions: '', protocol: '', url: null, readyState: 1 },
-  currentTarget: WebSocket { extensions: '', protocol: '', url: null, readyState: 1 },
-  returnValue: true,
-  defaultPrevented: false,
-  cancelable: false,
-  bubbles: false,
-  composed: false,
-  eventPhase: 2,
   type: 'message',
+  eventPhase: 2,
+  composed: false,
+  bubbles: false,
+  cancelable: false,
+  defaultPrevented: false,
+  returnValue: true,
+  currentTarget: WebSocket { readyState: 1, url: null, protocol: '', extensions: '' },
+  srcElement: WebSocket { readyState: 1, url: null, protocol: '', extensions: '' },
+  timeStamp: 0,
+  isTrusted: true,
+  cancelBubble: false,
   NONE: 0,
   CAPTURING_PHASE: 1,
   AT_TARGET: 2,
@@ -205,3 +205,44 @@ export const inspect = {
     await messagePromise;
   }
 };
+
+async function assertRequestCacheThrowsError(cacheHeader,
+  errorName = 'Error',
+  errorMessage = "The 'cache' field on 'RequestInitializerDict' is not implemented.") {
+  assert.throws(() => {
+    new Request('https://example.org', { cache: cacheHeader });
+  }, {
+    name: errorName,
+    message: errorMessage,
+  });
+}
+
+async function assertFetchCacheRejectsError(cacheHeader,
+  errorName = 'Error',
+  errorMessage = "The 'cache' field on 'RequestInitializerDict' is not implemented.") {
+  await assert.rejects((async () => {
+    await fetch('http://example.org', { cache: cacheHeader });
+  })(), {
+    name: errorName,
+    message: errorMessage,
+  });
+}
+
+export const cacheMode = {
+
+  async test() {
+    assert.strictEqual("cache" in Request.prototype, false);
+    {
+      const req = new Request('https://example.org', {});
+      assert.strictEqual(req.cache, undefined);
+    }
+    await assertRequestCacheThrowsError('no-store');
+    await assertRequestCacheThrowsError('no-cache');
+    await assertRequestCacheThrowsError('no-transform');
+    await assertRequestCacheThrowsError('unsupported');
+    await assertFetchCacheRejectsError('no-store');
+    await assertFetchCacheRejectsError('no-cache');
+    await assertFetchCacheRejectsError('no-transform');
+    await assertFetchCacheRejectsError('unsupported');
+  }
+}

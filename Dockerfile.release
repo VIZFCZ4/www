@@ -1,20 +1,23 @@
-# TODO(later): llvm-toolchain-16 is expected to be backported to Bullseye with the 11.9 point
-# release (https://tracker.debian.org/pkg/llvm-toolchain-16). Switch to using the regular packages
-# instead of packages from LLVM's APT repo once 11.9 is available and we have upgraded to LLVM 16.
+# TODO(later): llvm-toolchain-16 has been backported to Bullseye with the 11.9 point release –
+# switch to using the regular packages instead of LLVM's APT repo here.
 FROM node:bullseye AS builder
 
 WORKDIR /workerd
 
+# Replacing build-essential with dpkg-dev here, no need to install gcc.
 RUN apt-get update
-RUN apt-get install -y curl build-essential git lsb-release wget software-properties-common gnupg
+RUN apt-get install -y --no-install-recommends curl dpkg-dev git lsb-release wget software-properties-common gnupg tcl
 
 RUN wget https://apt.llvm.org/llvm.sh
+# Drop the install step here so we can install just the packages we need.
+RUN sed -i '/apt-get install/d' llvm.sh
 RUN chmod +x llvm.sh
-RUN ./llvm.sh 15 all
+RUN ./llvm.sh 16
+RUN apt-get install -y --no-install-recommends clang-16 lld-16 libunwind-16 libc++abi1-16 libc++1-16 libc++-16-dev libclang-rt-16-dev
 COPY . .
 
-RUN echo "build:linux --action_env=CC=/usr/lib/llvm-15/bin/clang --action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
-RUN echo "build:linux --host_action_env=CC=/usr/lib/llvm-15/bin/clang --host_action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
+RUN echo "build:linux --action_env=CC=/usr/lib/llvm-16/bin/clang --action_env=CXX=/usr/lib/llvm-16/bin/clang++" >> .bazelrc
+RUN echo "build:linux --host_action_env=CC=/usr/lib/llvm-16/bin/clang --host_action_env=CXX=/usr/lib/llvm-16/bin/clang++" >> .bazelrc
 COPY .bazel-cache /bazel-disk-cache
 RUN npm install -g pnpm@latest-7
 RUN pnpm install

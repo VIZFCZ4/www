@@ -894,8 +894,14 @@ public:
     //   Array<T> this way, and it might not want to, as this could make it impossible to support
     //   unifying Array<T> and Vector<T> in the future (i.e. making all Array<T>s growable). So
     //   it may be best to stick with allocating an Array<byte> on the heap after all...
-    byte* begin = value.begin();
     size_t size = value.size();
+    if (size == 0) {
+      // BackingStore doesn't call custom deleter if begin is null, which it often is for empty
+      // arrays.
+      return  v8::ArrayBuffer::New(isolate, 0);
+    }
+    byte* begin = value.begin();
+    
     auto ownerPtr = new kj::Array<byte>(kj::mv(value));
 
     std::unique_ptr<v8::BackingStore> backing =
@@ -1286,6 +1292,22 @@ public:
     auto& js = Lock::from(context->GetIsolate());
     auto& wrapper = TypeWrapper::from(js.v8Isolate);
     kj::Exception result = [&]() {
+
+      kj::Exception::Type excType = [&]() {
+        // Use .retryable and .overloaded properties as hints for what kj exception type to use.
+        if (handle->IsObject()) {
+          auto object = handle.As<v8::Object>();
+
+          if (js.toBool(check(object->Get(context, v8StrIntern(js.v8Isolate, "overloaded"_kj))))) {
+            return kj::Exception::Type::OVERLOADED;
+          }
+          if (js.toBool(check(object->Get(context, v8StrIntern(js.v8Isolate, "retryable"_kj))))) {
+            return kj::Exception::Type::DISCONNECTED;
+          }
+        }
+        return kj::Exception::Type::FAILED;
+      }();
+
       KJ_IF_SOME(domException, wrapper.tryUnwrap(context, handle,
                                                   (DOMException*)nullptr,
                                                   parentObject)) {
@@ -1330,8 +1352,7 @@ public:
             reason = kj::str(JSG_EXCEPTION(Error) ": ", reason);
           }
         }
-        return kj::Exception(kj::Exception::Type::FAILED, __FILE__, __LINE__,
-                            kj::mv(reason));
+        return kj::Exception(excType, __FILE__, __LINE__, kj::mv(reason));
       }
     }();
 

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <kj/debug.h>
 #include <kj/async.h>
 #include <workerd/io/actor-storage.h>
 #include <kj/one-of.h>
@@ -156,7 +157,7 @@ public:
       kj::Array<Key> keys, WriteOptions options) = 0;
 };
 
-// Abstract interface that is implemneted by ActorCache as well as ActorSqlite.
+// Abstract interface that is implemented by ActorCache as well as ActorSqlite.
 //
 // This extends ActorCacheOps and adds some methods that don't make sense as part of
 // ActorCache::Transaction.
@@ -304,7 +305,7 @@ private:
   class DeferredAlarmDeleter: public kj::Disposer {
   public:
     // The `Own<void>` returned by `armAlarmHandler()` is actually set up to point to the
-    // `ActorCache` itself, but with an alterante disposer that deletes the alarm rather than
+    // `ActorCache` itself, but with an alternate disposer that deletes the alarm rather than
     // the whole object.
     void disposeImpl(void* pointer) const {
       auto p = reinterpret_cast<ActorCache*>(pointer);
@@ -319,22 +320,9 @@ private:
     // The value was set by the app via put() or delete(), and we have not yet initiated a write
     // to disk. The entry is appended to `dirtyList` whenever entering this state.
     //
-    // Next state: FLUSHING (if we begin flushing to disk) or NOT_IN_CACHE (if a new put()/delete()
+    // Next state: CLEAN (if the flush succeeds) or NOT_IN_CACHE (if a new put()/delete()
     // overwrites this entry first).
     DIRTY,
-
-    // The value is dirty but an RPC is in-flight to write this value to disk. If the value is
-    // overwritten in the meantime, or the write fails, then the state needs to change back to
-    // DIRTY. If the write completes successfully and the state is still FLUSHING, then the state
-    // can progress to CLEAN.
-    //
-    // The entry remains in `dirtyList` while in this state. Since newly-dirty entries are always
-    // appended to `dirtyList`, it's guaranteed that all `FLUSHING` entries in `dirtyList` come
-    // before all `DIRTY` entries.
-    //
-    // Next state: CLEAN (if the flush completes) or NOT_IN_CACHE (if a new put()/delete()
-    // overwrites the entry first).
-    FLUSHING,
 
     // The entry matches what is currently on disk. The entry is currently present in the LRU
     // queue.
@@ -406,8 +394,19 @@ private:
     // from cache and needs to remember the original cached values even if they are overwritten
     // before the read completes.
     const Value value;
-  public:
     EntryValueStatus valueStatus;
+
+    // This enum indicates how synchronized this entry is with storage.
+    EntrySyncStatus syncStatus = EntrySyncStatus::NOT_IN_CACHE;
+  public:
+    EntryValueStatus getValueStatus() const {
+      return valueStatus;
+    }
+
+    inline EntrySyncStatus getSyncStatus() const {
+      return syncStatus;
+    }
+
     kj::Maybe<ValuePtr> getValuePtr() const {
       if (valueStatus == EntryValueStatus::PRESENT) {
         return value.asPtr();
@@ -423,13 +422,24 @@ private:
       }
     }
 
-    // This enum indicates how synchronized this entry is with storage.
-    EntrySyncStatus syncStatus = EntrySyncStatus::NOT_IN_CACHE;
+    void setNotInCache() {
+      syncStatus = EntrySyncStatus::NOT_IN_CACHE;
+    }
+
+    // Avoid using setClean() and setDirty() directly. If you want to set the status to CLEAN or
+    // DIRTY, consider using the addToCleanList() and addToDirtyList() methods. This helps us keep
+    // the state transitions manageable.
+    void setClean() {
+      syncStatus = EntrySyncStatus::CLEAN;
+    }
+
+    void setDirty() {
+      syncStatus = EntrySyncStatus::DIRTY;
+    }
 
     bool isDirty() const {
-      switch(syncStatus) {
-        case EntrySyncStatus::DIRTY:
-        case EntrySyncStatus::FLUSHING: {
+      switch(getSyncStatus()) {
+        case EntrySyncStatus::DIRTY: {
           return true;
         }
         case EntrySyncStatus::CLEAN: {
@@ -442,34 +452,33 @@ private:
     }
 
     bool isStale = false;
+    bool flushStarted = false;
 
     // If true, then a past list() operation covered the space between this entry and the following
     // entry, meaning that we know for sure that there are no other keys on disk between them.
     bool gapIsKnownEmpty = false;
 
     // If true, then this entry should be evicted from cache immediately when it becomes CLEAN.
-    // The entry still needs to reside in cache while DIRTY/FLUSHING since we need to store it
+    // The entry still needs to reside in cache while DIRTY since we need to store it
     // somewhere, and so we might as well serve cache hits based on it in the meantime.
     bool noCache = false;
 
-    // In the DIRTY or FLUSHING state, if this entry was originally created as the result of a
+    // In the DIRTY state, if this entry was originally created as the result of a
     // `delete()` call, and as such the caller needs to receive a count of deletions, then this
     // tracks that need. Note that only one caller could ever be waiting on this, because
-    // subsequent delete() calls can be counted based on the cache content. This can be null
+    // subsequent delete() calls can be counted based on the cache content. This can be false
     // if no delete operations need a count from this entry.
-    //
-    // If an entry is overwritten, `countedDelete` needs to be inherited by the replacement entry,
-    // so that the delete is still counted upon `flushImpl()`. (If the entry being replaced is
-    // already flushing, and that flush succeeds, then countedDelete->fulfiller will be fulfilled.
-    // In that case, it's no longer relevant to have `countedDelete` on the replacement entry,
-    // because it's already fulfilled and so will be ignored anyway. However, in the unlikely case
-    // that the flush failed, then it is actually important that the `countedDelete` has been moved
-    // to the replacement entry, so that it can be retried.)
-    kj::Maybe<kj::Own<CountedDelete>> countedDelete;
+    bool isCountedDelete = false;
+
+    // This Entry is part of a CountedDelete, but has since been overwritten via a put().
+    // This is really only useful in determining if we need to retry the deletion of this entry from
+    // storage, since we're interested in the number of deleted records. If we already got the count,
+    // we won't include this entry as part of our retried delete.
+    bool overwritingCountedDelete = false;
 
     // If CLEAN, the entry will be in the SharedLru's `cleanList`.
     //
-    // If DIRTY or FLUSHING, the entry will be in `dirtyList`.
+    // If DIRTY, the entry will be in `dirtyList`.
     kj::ListLink<Entry> link;
 
     size_t size() const {
@@ -498,18 +507,68 @@ private:
   // This object can only be manipulated in the thread that owns the specific actor that made
   // the request. That works out fine since CountedDelete only ever exists for dirty entries,
   // which won't be touched cross-thread by the LRU.
-  struct CountedDelete: public kj::Refcounted {
+  struct CountedDelete final: public kj::Refcounted {
+    CountedDelete() = default;
+    KJ_DISALLOW_COPY_AND_MOVE(CountedDelete);
+
+    kj::Promise<void> forgiveIfFinished(kj::Promise<void> promise) {
+      try {
+        co_await promise;
+      } catch (...) {
+        if (isFinished) {
+          // We already flushed, so it's okay that the promise threw.
+          co_return;
+        } else {
+          throw;
+        }
+      }
+    }
+
     // Running count of entries that existed before the delete.
     uint countDeleted = 0;
 
-    // When `countOutstanding` reaches zero, fulfill this with `countDeleted`.
-    kj::Own<kj::PromiseFulfiller<uint>> resultFulfiller;
+    // Did this particular counted delete succeed within a transaction? In other words, did we
+    // already get the count? Even if we got the count, we may need to retry if the transaction
+    // itself failed, though we won't need to get the count again.
+    bool completedInTransaction = false;
 
-    // During `flushImpl()`, when this CountedDelete is first encountered, `flushIndex` will be set
-    // to track this delete batch. It will be set back to `kj::none` before `flushImpl()` returns.
-    // This field exists here to avoid the need for a HashMap<CountedDelete*, ...> in `flushImpl()`.
-    kj::Maybe<size_t> flushIndex;
+    // Did this particular counted delete succeed? Note that this can be true even if the flush
+    // failed on a different batch of operations.
+    bool isFinished = false;
+
+    // The entries are associated with this counted delete.
+    kj::Vector<kj::Own<Entry>> entries;
   };
+
+  class CountedDeleteWaiter {
+  public:
+    explicit CountedDeleteWaiter(ActorCache& cache, kj::Own<CountedDelete> state)
+      : cache(cache), state(kj::mv(state)) {
+      // Register this operation so that we can batch it properly during flush.
+      cache.countedDeletes.insert(this->state.get());
+    }
+    KJ_DISALLOW_COPY_AND_MOVE(CountedDeleteWaiter);
+    ~CountedDeleteWaiter() noexcept(false) {
+      for (auto& entry : state->entries) {
+        // Let each entry associated with this counted delete know that we aren't waiting anymore.
+        entry->isCountedDelete = false;
+      }
+
+      // Since the count of deleted pairs is no longer required, we don't need to batch the ops.
+      // Note that we're doing eraseMatch since the pointer is a temporary literal.
+      cache.countedDeletes.eraseMatch(state.get());
+    }
+
+    const CountedDelete& getCountedDelete() const {
+      return *state;
+    }
+
+  private:
+    ActorCache& cache;
+    kj::Own<CountedDelete> state;
+  };
+
+  kj::HashSet<CountedDelete*> countedDeletes;
 
   rpc::ActorStorage::Stage::Client storage;
   const SharedLru& lru;
@@ -542,8 +601,8 @@ private:
     size_t innerSize = 0;
   };
 
-  // List of entries in DIRTY or FLUSHING state. New dirty entries are added to the end. If any
-  // FLUSHING entries are present, they always appear strictly before DIRTY entries.
+  // List of entries in DIRTY state. New dirty entries are added to the end. If any
+  // flushing entries are present, they always appear strictly before non-flushing entries.
   DirtyList dirtyList;
 
   // Map of current known values for keys. Searchable by key, including ordered iteration.
@@ -626,9 +685,23 @@ private:
   // Type of a lock on `SharedLru::cleanList`. We use the same lock to protect `currentValues`.
   typedef kj::Locked<kj::List<Entry, &Entry::link>> Lock;
 
+  // Add this entry to the clean list and set its status to CLEAN.
+  // This doesn't do much, but it makes it easier to track what's going on.
+  void addToCleanList(Lock& listLock, Entry& entryRef) {
+    entryRef.setClean();
+    listLock->add(entryRef);
+  }
+
+  // Add this entry to the dirty list and set its status to DIRTY.
+  // This doesn't do much, but it makes it easier to track what's going on.
+  void addToDirtyList(Entry& entryRef) {
+    entryRef.setDirty();
+    dirtyList.add(entryRef);
+  }
+
   // Indicate that an entry was observed by a read operation and so should be moved to the end of
-  // the LRU queue (unless the options say otherwise).
-  void touchEntry(Lock& lock, Entry& entry, const ReadOptions& options);
+  // the LRU queue.
+  void touchEntry(Lock& lock, Entry& entry);
 
   // TODO(soon) This function mostly belongs on the SharedLru, not the ActorCache. Notably,
   // `removeEntry()` has to do with the shared clean list but `evictEntry()` has to do with
@@ -692,19 +765,19 @@ private:
     size_t wordCount = 0;
   };
   struct PutFlush {
-    kj::Vector<Entry*> entries;
+    kj::Vector<kj::Own<Entry>> entries;
     kj::Vector<FlushBatch> batches;
   };
   struct MutedDeleteFlush {
-    kj::Vector<Entry*> entries;
+    kj::Vector<kj::Own<Entry>> entries;
     kj::Vector<FlushBatch> batches;
   };
   struct CountedDeleteFlush {
     kj::Own<CountedDelete> countedDelete;
-    kj::Vector<Entry*> entries;
     kj::Vector<FlushBatch> batches;
   };
   using CountedDeleteFlushes = kj::Array<CountedDeleteFlush>;
+  kj::Promise<void> startFlushTransaction();
   kj::Promise<void> flushImplUsingSinglePut(PutFlush putFlush);
   kj::Promise<void> flushImplUsingSingleMutedDelete(MutedDeleteFlush mutedFlush);
   kj::Promise<void> flushImplUsingSingleCountedDelete(CountedDeleteFlush countedFlush);
@@ -742,7 +815,7 @@ public:
   class Iterator {
   public:
     KeyValuePtrPairWithCache operator*() {
-      KJ_IREQUIRE(ptr->get()->valueStatus == ActorCache::EntryValueStatus::PRESENT);
+      KJ_IREQUIRE(ptr->get()->getValueStatus() == ActorCache::EntryValueStatus::PRESENT);
       return { ptr->get()->key, ptr->get()->getValuePtr().orDefault({}), *statusPtr };
     }
     Iterator& operator++() {
@@ -847,13 +920,13 @@ public:
   size_t currentSize() const { return size.load(std::memory_order_relaxed); }
 
 private:
-  Options options;
+  const Options options;
 
   // List of clean values, across all caches, ordered from least-recently-used to
   // most-recently-used.
   kj::MutexGuarded<kj::List<Entry, &Entry::link>> cleanList;
 
-  // Total byte size of everything that is cached, including dirty values that are not in `list`.
+  // Total byte size of everything that is cached, including dirty values that aren't in `cleanList`.
   mutable std::atomic<size_t> size = 0;
 
   // TimePoint when we should next evict stale entries. Represented as an int64_t of nanoseconds

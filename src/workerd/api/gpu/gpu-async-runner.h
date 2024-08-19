@@ -5,22 +5,23 @@
 
 #pragma once
 
-#include <workerd/io/io-timers.h>
 #include <kj/timer.h>
 #include <webgpu/webgpu_cpp.h>
+#include <workerd/io/io-context.h>
+#include <workerd/io/io-timers.h>
 
 namespace workerd::api::gpu {
 
-// AsyncRunner is used to poll a wgpu::Device with calls to Tick() while there
+// AsyncRunner is used to poll a wgpu::Instance with calls to ProcessEvents() while there
 // are asynchronous tasks in flight.
 class AsyncRunner : public kj::Refcounted {
 public:
-  AsyncRunner(wgpu::Device device) : device_(device){};
+  AsyncRunner(wgpu::Instance instance) : instance_(instance){};
 
   // Begin() should be called when a new asynchronous task is started.
   // If the number of executing asynchronous tasks transitions from 0 to 1, then
   // a function will be scheduled on the main JavaScript thread to call
-  // wgpu::Device::Tick() whenever the thread is idle. This will be repeatedly
+  // wgpu::Instance::ProcessEvents() whenever the thread is idle. This will be repeatedly
   // called until the number of executing asynchronous tasks reaches 0 again.
   void Begin();
 
@@ -30,32 +31,42 @@ public:
 
 private:
   void QueueTick();
-  wgpu::Device const device_;
+  wgpu::Instance const instance_;
   uint64_t count_ = 0;
   bool tick_queued_ = false;
   TimeoutId::Generator timeoutIdGenerator;
 };
 
 // AsyncTask is a RAII helper for calling AsyncRunner::Begin() on construction,
-// and AsyncRunner::End() on destruction.
-class AsyncTask {
+// and AsyncRunner::End() on destruction, that also encapsulates the promise generally
+// associated with any async task.
+template <typename T> class AsyncContext : public kj::Refcounted {
 public:
-  inline AsyncTask(AsyncTask&&) = default;
+  inline AsyncContext(AsyncContext&&) = default;
 
   // Constructor.
   // Calls AsyncRunner::Begin()
-  explicit inline AsyncTask(kj::Own<AsyncRunner> runner) : runner_(std::move(runner)) {
+  explicit inline AsyncContext(jsg::Lock& js, kj::Own<AsyncRunner> runner)
+      : promise_(nullptr), runner_(kj::mv(runner)) {
+    auto& context = IoContext::current();
+    auto paf = kj::newPromiseAndFulfiller<T>();
+    fulfiller_ = kj::mv(paf.fulfiller);
+    promise_ = context.awaitIo(js, kj::mv(paf.promise));
+
     runner_->Begin();
   }
 
   // Destructor.
   // Calls AsyncRunner::End()
-  inline ~AsyncTask() {
+  inline ~AsyncContext() {
     runner_->End();
   }
 
+  kj::Own<kj::PromiseFulfiller<T>> fulfiller_;
+  jsg::Promise<T> promise_;
+
 private:
-  KJ_DISALLOW_COPY(AsyncTask);
+  KJ_DISALLOW_COPY(AsyncContext);
   kj::Own<AsyncRunner> runner_;
 };
 

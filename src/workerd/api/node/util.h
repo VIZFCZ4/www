@@ -121,6 +121,7 @@ private:
   V(BooleanObject) \
   V(DataView) \
   V(Date) \
+  V(External) \
   V(Float32Array) \
   V(Float64Array) \
   V(GeneratorFunction) \
@@ -151,6 +152,9 @@ private:
 
 class UtilModule final: public jsg::Object {
 public:
+  UtilModule() = default;
+  UtilModule(jsg::Lock&, const jsg::Url&) {}
+
   jsg::Name getResourceTypeInspect(jsg::Lock& js);
 
   // `getOwnNonIndexProperties()` `filter`s
@@ -196,6 +200,8 @@ public:
   bool isAnyArrayBuffer(jsg::JsValue value);
   bool isBoxedPrimitive(jsg::JsValue value);
 
+  jsg::JsValue getBuiltinModule(jsg::Lock& js, kj::String specifier);
+
   JSG_RESOURCE_TYPE(UtilModule) {
     JSG_NESTED_TYPE(MIMEType);
     JSG_NESTED_TYPE(MIMEParams);
@@ -220,6 +226,8 @@ public:
   #undef V
     JSG_METHOD(isAnyArrayBuffer);
     JSG_METHOD(isBoxedPrimitive);
+
+    JSG_METHOD(getBuiltinModule);
   }
 };
 

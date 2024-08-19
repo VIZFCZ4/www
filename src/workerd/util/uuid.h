@@ -4,9 +4,13 @@
 
 #pragma once
 
-#include <kj/compat/http.h>
+#include <cstdint>
 #include <kj/string.h>
 #include <kj/hash.h>
+
+namespace kj {
+  class EntropySource;
+}
 
 namespace workerd {
 
@@ -18,7 +22,7 @@ kj::String randomUUID(kj::Maybe<kj::EntropySource&> optionalEntropySource);
 // A 128-bit universally unique identifier (UUID).
 //
 // A UUID can be created from and converted between between two formats:
-// 1. Upper/lower format: an "upper" field representing the most signficant bits and "lower" field
+// 1. Upper/lower format: an "upper" field representing the most significant bits and "lower" field
 //    representings the least significant bits.
 // 2. Stringified 8-4-4-4-12 hex format.
 //

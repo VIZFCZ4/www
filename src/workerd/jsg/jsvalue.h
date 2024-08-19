@@ -207,6 +207,7 @@ public:
   operator JsObject() const;
   uint32_t size() const KJ_WARN_UNUSED_RESULT;
   JsValue get(Lock& js, uint32_t i) const KJ_WARN_UNUSED_RESULT;
+  void add(Lock& js, const JsValue& value);
 
   using JsBase<v8::Array, JsArray>::JsBase;
 };
@@ -358,7 +359,7 @@ public:
   // Note that when called on a class constructor, this does NOT return `.prototype`, it still
   // returns `.__proto__`. Usefully, though, a class constructor's `__proto__` is always the
   // parent class's constructor.
-  inline JsValue getPrototype() { return JsValue(inner->GetPrototype()); }
+  JsValue getPrototype(Lock& js) KJ_WARN_UNUSED_RESULT;
 
   using JsBase<v8::Object, JsObject>::JsBase;
 

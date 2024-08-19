@@ -211,17 +211,21 @@ private:
 };
 JSG_DECLARE_ISOLATE_TYPE(ProtoIsolate, ProtoContext, NumberBox, BoxBox, ExtendedNumberBox);
 
+const auto kIllegalInvocation =
+    "TypeError: Illegal invocation: function called with incorrect `this` reference. "
+    "See https://developers.cloudflare.com/workers/observability/errors/#illegal-invocation-errors for details."_kj;
+
 KJ_TEST("can't invoke builtin methods with alternative 'this'") {
   Evaluator<ProtoContext, ProtoIsolate> e(v8System);
   e.expectEval(
       "NumberBox.prototype.getValue.call(123)",
-      "throws", "TypeError: Illegal invocation");
+      "throws", kIllegalInvocation);
   e.expectEval(
       "NumberBox.prototype.getValue.call(new BoxBox(new NumberBox(123), 123))",
-      "throws", "TypeError: Illegal invocation");
+      "throws", kIllegalInvocation);
   e.expectEval(
       "getContextProperty.call(new NumberBox(123))",
-      "throws", "TypeError: Illegal invocation");
+      "throws", kIllegalInvocation);
 }
 
 KJ_TEST("can't use builtin as prototype") {
@@ -230,27 +234,27 @@ KJ_TEST("can't use builtin as prototype") {
       "function JsType() {}\n"
       "JsType.prototype = new NumberBox(123);\n"
       "new JsType().getValue()",
-      "throws", "TypeError: Illegal invocation");
+      "throws", kIllegalInvocation);
   e.expectEval(
       "function JsType() {}\n"
       "JsType.prototype = new ExtendedNumberBox(123, 'foo');\n"
       "new JsType().getValue()",
-      "throws", "TypeError: Illegal invocation");
+      "throws", kIllegalInvocation);
   e.expectEval(
       "function JsType() {}\n"
       "JsType.prototype = new NumberBox(123);\n"
       "new JsType().value",
-      "throws", "TypeError: Illegal invocation");
+      "throws", kIllegalInvocation);
   e.expectEval(
       "function JsType() {}\n"
       "JsType.prototype = new ExtendedNumberBox(123, 'foo');\n"
       "new JsType().value",
-      "throws", "TypeError: Illegal invocation");
+      "throws", kIllegalInvocation);
   e.expectEval(
       "function JsType() {}\n"
       "JsType.prototype = this;\n"
       "new JsType().getContextProperty()",
-      "throws", "TypeError: Illegal invocation");
+      "throws", kIllegalInvocation);
 
   // For historical reasons, we allow using the global object as a prototype and accessing
   // properties through a derived object. Our accessor implementations for global object properties
@@ -420,6 +424,42 @@ KJ_TEST("jsg::Lock getUuid") {
     called = true;
   });
   KJ_ASSERT(called);
+}
+
+KJ_TEST("External memory adjustment") {
+  IsolateUuidIsolate isolate(v8System, kj::heap<IsolateObserver>());
+  isolate.runInLockScope([&](IsolateUuidIsolate::Lock& lock) {
+    // Creating with a specific amount works as expected
+    auto adjuster = lock.getExternalMemoryAdjustment(100);
+    KJ_ASSERT(adjuster.getAmount() == 100);
+
+    // Adjusting up works as expected
+    adjuster.adjust(lock, 10);
+    KJ_ASSERT(adjuster.getAmount() == 110);
+
+    // Adjusting down works as expected
+    adjuster.adjust(lock, -10);
+    KJ_ASSERT(adjuster.getAmount() == 100);
+
+    // Setting an explicit value just works
+    adjuster.set(lock, 50);
+    KJ_ASSERT(adjuster.getAmount() == 50);
+
+    // Decrementing by more than the amount just sets to 0
+    adjuster.adjust(lock, -200);
+    KJ_ASSERT(adjuster.getAmount() == 0);
+
+    adjuster.set(lock, 100);
+    auto adjuster2 = kj::mv(adjuster);
+    KJ_ASSERT(adjuster2.getAmount() == 100);
+    KJ_ASSERT(adjuster.getAmount() == 0);
+
+    // Note that we are not testing the actual effect on the isolate itself here.
+    // While we have added a getExternalMemory() API to the isolate via a patch in
+    // the internal repo, we have not added that patch to workerd so testing the
+    // specific external memory reported by the isolate is possible but a bit
+    // more cumbersome here.
+  });
 }
 
 }  // namespace

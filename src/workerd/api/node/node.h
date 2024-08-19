@@ -5,8 +5,11 @@
 #include "crypto.h"
 #include "diagnostics-channel.h"
 #include "util.h"
+#include "zlib-util.h"
 #include <workerd/jsg/jsg.h>
+#include <workerd/jsg/url.h>
 #include <workerd/jsg/modules.h>
+#include <workerd/jsg/modules-new.h>
 #include <capnp/dynamic.h>
 #include <node/node.capnp.h>
 
@@ -17,6 +20,9 @@ namespace workerd::api::node {
 // built-ins
 class CompatibilityFlags : public jsg::Object {
 public:
+  CompatibilityFlags() = default;
+  CompatibilityFlags(jsg::Lock&, const jsg::Url&) {}
+
   JSG_RESOURCE_TYPE(CompatibilityFlags, workerd::CompatibilityFlags::Reader flags) {
     // Not your typical JSG_RESOURCE_TYPE definition.. here we are iterating
     // through all of the compatibility flags and registering each as read-only
@@ -31,23 +37,27 @@ public:
   }
 };
 
-template <class Registry>
-void registerNodeJsCompatModules(
-    Registry& registry, auto featureFlags) {
-
 #define NODEJS_MODULES(V)                                                       \
   V(CompatibilityFlags, "workerd:compatibility-flags")                          \
   V(AsyncHooksModule, "node-internal:async_hooks")                              \
   V(BufferUtil, "node-internal:buffer")                                         \
   V(CryptoImpl, "node-internal:crypto")                                         \
   V(UtilModule, "node-internal:util")                                           \
-  V(DiagnosticsChannelModule, "node-internal:diagnostics_channel")
+  V(DiagnosticsChannelModule, "node-internal:diagnostics_channel")              \
+  V(ZlibUtil, "node-internal:zlib")
 
 // Add to the NODEJS_MODULES_EXPERIMENTAL list any currently in-development
 // node.js compat C++ modules that should be guarded by the experimental compat
 // flag. Once they are ready to ship, move them up to the NODEJS_MODULES list.
 #define NODEJS_MODULES_EXPERIMENTAL(V)
 
+bool isNodeJsCompatEnabled(auto featureFlags) {
+  return featureFlags.getNodeJsCompat() || featureFlags.getNodeJsCompatV2();
+}
+
+template <class Registry>
+void registerNodeJsCompatModules(
+    Registry& registry, auto featureFlags) {
 #define V(T, N)                                                                 \
   registry.template addBuiltinModule<T>(N, workerd::jsg::ModuleRegistry::Type::INTERNAL);
 
@@ -58,18 +68,19 @@ void registerNodeJsCompatModules(
   }
 
 #undef V
-#undef NODEJS_MODULES
+
+  bool nodeJsCompatEnabled = isNodeJsCompatEnabled(featureFlags);
 
   // If the `nodejs_compat` flag isn't enabled, only register internal modules.
   // We need these for `console.log()`ing when running `workerd` locally.
   kj::Maybe<jsg::ModuleType> maybeFilter;
-  if (!featureFlags.getNodeJsCompat()) maybeFilter = jsg::ModuleType::INTERNAL;
+  if (!nodeJsCompatEnabled) maybeFilter = jsg::ModuleType::INTERNAL;
 
   registry.addBuiltinBundle(NODE_BUNDLE, maybeFilter);
 
   // If the `nodejs_compat` flag is off, but the `nodejs_als` flag is on, we
   // need to register the `node:async_hooks` module from the bundle.
-  if (!featureFlags.getNodeJsCompat() && featureFlags.getNodeJsAls()) {
+  if (!nodeJsCompatEnabled && featureFlags.getNodeJsAls()) {
     jsg::Bundle::Reader reader = NODE_BUNDLE;
     for (auto module : reader.getModules()) {
       auto specifier = module.getName();
@@ -81,12 +92,52 @@ void registerNodeJsCompatModules(
   }
 }
 
+template <class TypeWrapper>
+kj::Own<jsg::modules::ModuleBundle> getInternalNodeJsCompatModuleBundle(auto featureFlags) {
+  jsg::modules::ModuleBundle::BuiltinBuilder builder(
+      jsg::modules::ModuleBundle::BuiltinBuilder::Type::BUILTIN_ONLY);
+#define V(M, N) static const auto k##M##Specifier = N##_url;        \
+                builder.addObject<M, TypeWrapper>(k##M##Specifier);
+  NODEJS_MODULES(V)
+  if (featureFlags.getWorkerdExperimental()) {
+    NODEJS_MODULES_EXPERIMENTAL(V)
+  }
+#undef V
+  jsg::modules::ModuleBundle::getBuiltInBundleFromCapnp(builder, NODE_BUNDLE);
+  return builder.finish();
+}
+
+kj::Own<jsg::modules::ModuleBundle> getExternalNodeJsCompatModuleBundle(auto featureFlags) {
+  jsg::modules::ModuleBundle::BuiltinBuilder builder(
+      jsg::modules::ModuleBundle::BuiltinBuilder::Type::BUILTIN);
+  if (isNodeJsCompatEnabled(featureFlags)) {
+    jsg::modules::ModuleBundle::getBuiltInBundleFromCapnp(builder, NODE_BUNDLE);
+  } else if (featureFlags.getNodeJsAls()) {
+    // The AsyncLocalStorage API can be enabled independently of the rest
+    // of the nodejs_compat layer.
+    jsg::Bundle::Reader reader = NODE_BUNDLE;
+    for (auto module : reader.getModules()) {
+      auto specifier = module.getName();
+      if (specifier == "node:async_hooks") {
+        KJ_DASSERT(module.getType() == jsg::ModuleType::BUILTIN);
+        KJ_DASSERT(module.which() == workerd::jsg::Module::SRC);
+        auto specifier = KJ_ASSERT_NONNULL(jsg::Url::tryParse(module.getName()));
+        builder.addEsm(specifier, module.getSrc().asChars());
+      }
+    }
+  }
+  return builder.finish();
+}
+
+#undef NODEJS_MODULES
+}  // namespace workerd::api::node
+
 #define EW_NODE_ISOLATE_TYPES              \
   api::node::CompatibilityFlags,           \
   EW_NODE_BUFFER_ISOLATE_TYPES,            \
   EW_NODE_CRYPTO_ISOLATE_TYPES,            \
   EW_NODE_DIAGNOSTICCHANNEL_ISOLATE_TYPES, \
   EW_NODE_ASYNCHOOKS_ISOLATE_TYPES,        \
-  EW_NODE_UTIL_ISOLATE_TYPES
+  EW_NODE_UTIL_ISOLATE_TYPES,              \
+  EW_NODE_ZLIB_ISOLATE_TYPES
 
-}  // namespace workerd::api::node

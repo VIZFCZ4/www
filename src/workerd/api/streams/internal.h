@@ -168,17 +168,23 @@ private:
 
 class WritableStreamInternalController: public WritableStreamController {
 public:
-  using Writable = IoOwn<WritableStreamSink>;
+  struct Writable {
+    kj::Own<WritableStreamSink> sink;
+    kj::Canceler canceler;
+    Writable(kj::Own<WritableStreamSink> sink) : sink(kj::mv(sink)) {}
+    void abort(kj::Exception&& ex);
+  };
 
   explicit WritableStreamInternalController(StreamStates::Closed closed)
       : state(closed) {}
   explicit WritableStreamInternalController(StreamStates::Errored errored)
       : state(kj::mv(errored)) {}
-  explicit WritableStreamInternalController(Writable writable,
+  explicit WritableStreamInternalController(kj::Own<WritableStreamSink> writable,
       kj::Maybe<uint64_t> maybeHighWaterMark = kj::none,
-      kj::Maybe<jsg::Promise<void>> maybeClosureWaitable = kj::none) : state(kj::mv(writable)),
-          maybeHighWaterMark(maybeHighWaterMark),
-          maybeClosureWaitable(kj::mv(maybeClosureWaitable)) {
+      kj::Maybe<jsg::Promise<void>> maybeClosureWaitable = kj::none)
+      : state(IoContext::current().addObject(kj::heap<Writable>(kj::mv(writable)))),
+        maybeHighWaterMark(maybeHighWaterMark),
+        maybeClosureWaitable(kj::mv(maybeClosureWaitable)) {
 }
 
   WritableStreamInternalController(WritableStreamInternalController&& other) = default;
@@ -206,6 +212,7 @@ public:
       PipeToOptions options) override;
 
   kj::Maybe<kj::Own<WritableStreamSink>> removeSink(jsg::Lock& js) override;
+  void detach(jsg::Lock& js) override;
 
   kj::Maybe<int> getDesiredSize() override;
 
@@ -268,12 +275,14 @@ private:
   };
 
   kj::Maybe<WritableStream&> owner;
-  kj::OneOf<StreamStates::Closed, StreamStates::Errored, Writable> state;
+  kj::OneOf<StreamStates::Closed, StreamStates::Errored, IoOwn<Writable>> state;
   kj::OneOf<Unlocked, Locked, PipeLocked, WriterLocked> writeState = Unlocked();
 
   kj::Maybe<PendingAbort> maybePendingAbort;
 
   uint64_t currentWriteBufferSize = 0;
+  bool warnAboutExcessiveBackpressure = true;
+  size_t excessiveBackpressureWarningCount = 0;
 
   // The highWaterMark is the total amount of data currently buffered in
   // the controller waiting to be flushed out to the underlying WritableStreamSink.
@@ -296,13 +305,14 @@ private:
 
   struct Write {
     kj::Maybe<jsg::Promise<void>::Resolver> promise;
-    std::shared_ptr<v8::BackingStore> ownBytes;
+    size_t totalBytes;
+    jsg::V8Ref<v8::ArrayBuffer> ownBytes;
     kj::ArrayPtr<const kj::byte> bytes;
 
     JSG_MEMORY_INFO(Write) {
       tracker.trackField("resolver", promise);
       if (ownBytes != nullptr) {
-        tracker.trackFieldWithSize("backing", ownBytes->ByteLength());
+        tracker.trackFieldWithSize("backing", totalBytes);
       }
     }
   };
@@ -395,7 +405,7 @@ public:
 
   // WritableStreamSink implementation ---------------------------------------------------
 
-  kj::Promise<void> write(const void* buffer, size_t size) override;
+  kj::Promise<void> write(kj::ArrayPtr<const byte> buffer) override;
 
   kj::Promise<void> write(kj::ArrayPtr<const kj::ArrayPtr<const kj::byte>> pieces) override;
 

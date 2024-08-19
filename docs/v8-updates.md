@@ -43,6 +43,10 @@ To update the version of V8 used by workerd, the steps are:
    git rebase --onto 11.4.183.8 HEAD~8
    ```
 
+   Note that `HEAD~8`, here and elsewhere, could be replaced with
+   `$(git describe --tags --abbrev=0)`, which prints the name of the tag on which the
+   branch is based.
+
    There is usually some minor patch editing required during a rebase.
 
    Ideally at this stage, you should be able to build and test the local V8 with the
@@ -77,7 +81,7 @@ from the V8 directory.
     You can find the commit versions for V8's dependencies under `v8/DEPS` and the ones
     that are carried through to workerd in the `workerd/WORKSPACE` file.
 
-    These currently include `abseil`, `com_google_chromium_icu` and `trace_event_common`.
+    These currently include `abseil` and `com_googlesource_chromium_icu`.
     Typically you'll get a build failure if the projects are out of sync. Copy the
     commit versions from `v8/DEPS` to the `WORKSPACE` file.
 

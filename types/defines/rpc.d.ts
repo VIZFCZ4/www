@@ -6,10 +6,11 @@ declare namespace Rpc {
   // TypeScript uses *structural* typing meaning anything with the same shape as type `T` is a `T`.
   // For the classes exported by `cloudflare:workers` we want *nominal* typing (i.e. we only want to
   // accept `WorkerEntrypoint` from `cloudflare:workers`, not any other class with the same shape)
-  export const __RPC_STUB_BRAND: unique symbol;
-  export const __RPC_TARGET_BRAND: unique symbol;
-  export const __WORKER_ENTRYPOINT_BRAND: unique symbol;
-  export const __DURABLE_OBJECT_BRAND: unique symbol;
+  export const __RPC_STUB_BRAND: "__RPC_STUB_BRAND";
+  export const __RPC_TARGET_BRAND: "__RPC_TARGET_BRAND";
+  export const __WORKER_ENTRYPOINT_BRAND: "__WORKER_ENTRYPOINT_BRAND";
+  export const __DURABLE_OBJECT_BRAND: "__DURABLE_OBJECT_BRAND";
+  export const __WORKFLOW_BRAND: "__WORKFLOW_BRAND";
   export interface RpcTargetBranded {
     [__RPC_TARGET_BRAND]: never;
   }
@@ -19,9 +20,13 @@ declare namespace Rpc {
   export interface DurableObjectBranded {
     [__DURABLE_OBJECT_BRAND]: never;
   }
+  export interface WorkflowBranded {
+    [__WORKFLOW_BRAND]: never;
+  }
   export type EntrypointBranded =
     | WorkerEntrypointBranded
-    | DurableObjectBranded;
+    | DurableObjectBranded
+    | WorkflowBranded;
 
   // Types that can be used through `Stub`s
   export type Stubable = RpcTargetBranded | ((...args: any[]) => any);
@@ -68,7 +73,7 @@ declare namespace Rpc {
   // Recursively rewrite all `Stubable` types with `Stub`s
   // prettier-ignore
   type Stubify<T> =
-      T extends Stubable ? Stub<T>
+    T extends Stubable ? Stub<T>
     : T extends Map<infer K, infer V> ? Map<Stubify<K>, Stubify<V>>
     : T extends Set<infer V> ? Set<Stubify<V>>
     : T extends Array<infer V> ? Array<Stubify<V>>
@@ -81,7 +86,7 @@ declare namespace Rpc {
   // `Stub` depends on `Provider`, which depends on `Unstubify`, which would depend on `Stub`.
   // prettier-ignore
   type Unstubify<T> =
-      T extends StubBase<infer V> ? V
+    T extends StubBase<infer V> ? V
     : T extends Map<infer K, infer V> ? Map<Unstubify<K>, Unstubify<V>>
     : T extends Set<infer V> ? Set<Unstubify<V>>
     : T extends Array<infer V> ? Array<Unstubify<V>>
@@ -104,7 +109,7 @@ declare namespace Rpc {
   // Intersecting with `(Maybe)Provider` allows pipelining.
   // prettier-ignore
   type Result<R> =
-      R extends Stubable ? Promise<Stub<R>> & Provider<R>
+    R extends Stubable ? Promise<Stub<R>> & Provider<R>
     : R extends Serializable ? Promise<Stubify<R> & MaybeDisposable<R>> & MaybeProvider<R>
     : never;
 
@@ -188,5 +193,42 @@ declare module "cloudflare:workers" {
       wasClean: boolean
     ): void | Promise<void>;
     webSocketError?(ws: WebSocket, error: unknown): void | Promise<void>;
+  }
+
+  export type DurationLabel =
+    | "second"
+    | "minute"
+    | "hour"
+    | "day"
+    | "week"
+    | "month"
+    | "year";
+  export type SleepDuration = `${number} ${DurationLabel}${"s" | ""}` | number;
+
+  type WorkflowStep = {
+    do: <T extends Rpc.Serializable>(
+      name: string,
+      callback: () => Promise<T>
+    ) => Promise<T>;
+    sleep: (name: string, duration: SleepDuration) => void | Promise<void>;
+  };
+
+  export abstract class Workflow<
+    Env = unknown,
+    T extends Rpc.Serializable | unknown = unknown,
+  > implements Rpc.WorkflowBranded
+  {
+    [Rpc.__WORKFLOW_BRAND]: never;
+
+    protected ctx: ExecutionContext;
+    protected env: Env;
+
+    run(
+      events: Array<{
+        payload: T;
+        timestamp: Date;
+      }>,
+      step: WorkflowStep
+    ): Promise<unknown>;
   }
 }

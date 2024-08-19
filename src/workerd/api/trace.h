@@ -102,6 +102,7 @@ public:
 
   uint getCpuTime();
   uint getWallTime();
+  bool getTruncated();
 
   JSG_RESOURCE_TYPE(TraceItem) {
     JSG_LAZY_READONLY_INSTANCE_PROPERTY(event, getEvent);
@@ -115,6 +116,7 @@ public:
     JSG_LAZY_READONLY_INSTANCE_PROPERTY(dispatchNamespace, getDispatchNamespace);
     JSG_LAZY_READONLY_INSTANCE_PROPERTY(scriptTags, getScriptTags);
     JSG_LAZY_READONLY_INSTANCE_PROPERTY(outcome, getOutcome);
+    JSG_LAZY_READONLY_INSTANCE_PROPERTY(truncated, getTruncated);
   }
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
@@ -133,6 +135,7 @@ private:
   kj::String outcome;
   uint cpuTime;
   uint wallTime;
+  bool truncated;
 };
 
 // When adding a new TraceItem eventInfo type, it is important not to
@@ -589,7 +592,7 @@ class TraceCustomEventImpl final: public WorkerInterface::CustomEvent {
 public:
   TraceCustomEventImpl(
       uint16_t typeId, kj::TaskSet& waitUntilTasks, kj::Array<kj::Own<Trace>> traces)
-    : typeId(typeId), waitUntilTasks(waitUntilTasks), traces(kj::mv(traces)) {}
+    : typeId(typeId), traces(kj::mv(traces)) {}
 
   kj::Promise<Result> run(
       kj::Own<IoContext::IncomingRequest> incomingRequest,
@@ -608,7 +611,6 @@ public:
 
 private:
   uint16_t typeId;
-  kj::TaskSet& waitUntilTasks;
   kj::Array<kj::Own<workerd::Trace>> traces;
 };
 

@@ -15,6 +15,7 @@
 #include <workerd/jsg/modules.h>
 #include <workerd/server/server.h>
 #include <workerd/server/workerd-api.h>
+#include <workerd/util/autogate.h>
 #include <workerd/util/stream-utils.h>
 
 #include "test-fixture.h"
@@ -131,7 +132,7 @@ struct MockLimitEnforcer final: public LimitEnforcer {
   void newAnalyticsEngineRequest() override {}
   kj::Promise<void> limitDrain() override { return kj::NEVER_DONE; }
   kj::Promise<void> limitScheduled() override { return kj::NEVER_DONE; }
-  kj::Duration getAlarmLimit() override { return 0 * kj::MILLISECONDS; }
+  kj::Duration getAlarmLimit() override { return 15 * kj::MINUTES; }
   size_t getBufferingLimit() override { return kj::maxValue; }
   kj::Maybe<EventOutcome> getLimitsExceeded() override { return kj::none; }
   kj::Promise<void> onLimitsExceeded() override { return kj::NEVER_DONE; }
@@ -154,23 +155,23 @@ struct MockIsolateLimitEnforcer final: public IsolateLimitEnforcer {
       };
     }
     kj::Own<void> enterStartupJs(
-        jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     kj::Own<void> enterStartupPython(
-        jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     kj::Own<void> enterDynamicImportJs(
-        jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     kj::Own<void> enterLoggingJs(
-        jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     kj::Own<void> enterInspectorJs(
-        jsg::Lock& loc, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& loc, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     void completedRequest(kj::StringPtr id) const override {}
@@ -212,9 +213,8 @@ inline server::config::Worker::Reader buildConfig(
 struct MemoryOutputStream final: kj::AsyncOutputStream, public kj::Refcounted  {
   kj::Vector<byte> content;
 
-  kj::Promise<void> write(const void* buffer, size_t size) override {
-    auto ptr = reinterpret_cast<const byte*>(buffer);
-    content.addAll(ptr, ptr + size);
+  kj::Promise<void> write(kj::ArrayPtr<const byte> buffer) override {
+    content.addAll(buffer);
     return kj::READY_NOW;
   }
 
@@ -262,6 +262,9 @@ class MockActorLoopback : public Worker::Actor::Loopback, public kj::Refcounted 
 
 } // namespace
 
+using api::pyodide::PythonConfig;
+
+PythonConfig defaultPythonConfig { .packageDiskCacheRoot = kj::none, .pyodideDiskCacheRoot = kj::none, .createSnapshot = false, .createBaselineSnapshot = false };
 
 TestFixture::TestFixture(SetupParams&& params)
   : waitScope(params.waitScope),
@@ -278,13 +281,13 @@ TestFixture::TestFixture(SetupParams&& params)
     isolateLimitEnforcer(kj::heap<MockIsolateLimitEnforcer>()),
     errorReporter(kj::heap<MockErrorReporter>()),
     memoryCacheProvider(kj::heap<api::MemoryCacheProvider>()),
-    diskCacheRoot(kj::none),
     api(kj::heap<server::WorkerdApi>(
       testV8System,
       params.featureFlags.orDefault(CompatibilityFlags::Reader()),
       *isolateLimitEnforcer,
       kj::atomicRefcounted<IsolateObserver>(),
-      *memoryCacheProvider, diskCacheRoot)),
+      *memoryCacheProvider,
+      defaultPythonConfig, kj::none)),
     workerIsolate(kj::atomicRefcounted<Worker::Isolate>(
       kj::mv(api),
       kj::atomicRefcounted<IsolateObserver>(),

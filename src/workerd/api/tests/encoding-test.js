@@ -5,8 +5,8 @@ import {
   ok,
 } from 'node:assert';
 
-// Test for the Event and EventTarget standard Web API implementations.
-// The implementation for these are in api/basics.{h|c++}
+// Test for the Encoding standard Web API implementation.
+// The implementation for these are in api/encoding.{h|c++}
 
 function decodeStreaming(decoder, input) {
   // Test truncation behavior while streaming by feeding the decoder a single byte at a time.
@@ -577,6 +577,9 @@ export const allTheDecoders = {
       ["utf-16", "utf-16le"],
       ["utf-16le", "utf-16le"],
       ["x-user-defined", undefined],
+      // Test that match is case-insensitive
+      ["UTF-8", "utf-8"],
+      ["UtF-8", "utf-8"],
     ].forEach((pair) => {
       const [label, key] = pair;
       if (key === undefined) {
@@ -593,5 +596,20 @@ export const allTheDecoders = {
         }
       }
     });
+  }
+};
+
+export const textDecoderStream = {
+  test() {
+    const stream = new TextDecoderStream('utf-16', {
+      fatal: true,
+      ignoreBOM: true,
+    });
+    strictEqual(stream.encoding, 'utf-16le');
+    strictEqual(stream.fatal, true);
+    strictEqual(stream.ignoreBOM, true);
+
+    const enc = new TextEncoderStream();
+    strictEqual(enc.encoding, 'utf-8');
   }
 };

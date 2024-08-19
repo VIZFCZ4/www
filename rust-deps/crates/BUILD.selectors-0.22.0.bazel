@@ -11,15 +11,15 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-# licenses([
-#     "TODO",  # MPL-2.0
-# ])
-
 rust_library(
     name = "selectors",
-    srcs = glob(["**/*.rs"]),
+    srcs = glob(
+        include = ["**/*.rs"],
+        allow_empty = False,
+    ),
     compile_data = glob(
         include = ["**"],
+        allow_empty = True,
         exclude = [
             "**/* *",
             ".tmp_git_root/**/*",
@@ -32,7 +32,7 @@ rust_library(
     crate_root = "lib.rs",
     edition = "2015",
     proc_macro_deps = [
-        "@crates_vendor__derive_more-0.99.17//:derive_more",
+        "@crates_vendor__derive_more-0.99.18//:derive_more",
     ],
     rustc_flags = [
         "--cap-lints=allow",
@@ -49,24 +49,28 @@ rust_library(
         "@crates_vendor__bitflags-1.3.2//:bitflags",
         "@crates_vendor__cssparser-0.27.2//:cssparser",
         "@crates_vendor__fxhash-0.2.1//:fxhash",
-        "@crates_vendor__log-0.4.21//:log",
+        "@crates_vendor__log-0.4.22//:log",
         "@crates_vendor__matches-0.1.10//:matches",
         "@crates_vendor__phf-0.8.0//:phf",
         "@crates_vendor__precomputed-hash-0.1.1//:precomputed_hash",
         "@crates_vendor__selectors-0.22.0//:build_script_build",
         "@crates_vendor__servo_arc-0.1.1//:servo_arc",
-        "@crates_vendor__smallvec-1.13.1//:smallvec",
+        "@crates_vendor__smallvec-1.13.2//:smallvec",
         "@crates_vendor__thin-slice-0.1.1//:thin_slice",
     ],
 )
 
 cargo_build_script(
-    name = "selectors_build_script",
-    srcs = glob(["**/*.rs"]),
+    name = "_bs",
+    srcs = glob(
+        include = ["**/*.rs"],
+        allow_empty = False,
+    ),
     crate_name = "build_script_build",
     crate_root = "build.rs",
     data = glob(
         include = ["**"],
+        allow_empty = True,
         exclude = [
             "**/* *",
             ".tmp_git_root/**/*",
@@ -77,6 +81,7 @@ cargo_build_script(
         ],
     ),
     edition = "2015",
+    pkg_name = "selectors",
     rustc_flags = [
         "--cap-lints=allow",
     ],
@@ -96,6 +101,6 @@ cargo_build_script(
 
 alias(
     name = "build_script_build",
-    actual = "selectors_build_script",
+    actual = ":_bs",
     tags = ["manual"],
 )

@@ -1,6 +1,20 @@
 load("//:build/wd_test.bzl", "wd_test")
 
-wd_test(
+load("//src/workerd/server/tests/python:py_wd_test.bzl", "py_wd_test")
+
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+
+# pyodide-dev.capnp.bin represents a custom pyodide version "dev" that is generated
+# at build time using the latest contents of the src/pyodide directory.
+# This is used to run tests to ensure that they are always run against the latest build of
+# the Pyodide bundle.
+copy_file(
+    name = "pyodide-dev.capnp.bin@rule",
+    src = "//src/pyodide:pyodide.capnp.bin",
+    out = "pyodide-bundle-cache/pyodide-dev.capnp.bin"
+)
+
+py_wd_test(
     src = "hello/hello.wd-test",
     args = ["--experimental"],
     data = glob(
@@ -11,7 +25,7 @@ wd_test(
     ),
 )
 
-wd_test(
+py_wd_test(
     src = "env-param/env.wd-test",
     args = ["--experimental"],
     data = glob(
@@ -22,29 +36,18 @@ wd_test(
     ),
 )
 
-# langchain test: disabled for now because it's flaky
-# TODO: reenable this?
-#
-# wd_test(
-#     src = "langchain/langchain.wd-test",
-#     args = ["--experimental"],
-#     data = glob(
-#         [
-#             "langchain/*",
-#         ],
-#         exclude = ["**/*.wd-test"],
-#     ),
-#     # TODO: fails in micropip on windows with:
-#     #
-#     # ValueError: Can't fetch metadata for 'openai'. Please make sure you have entered a correct
-#     # package name and correctly specified index_urls (if you changed them).
-#     target_compatible_with = select({
-#         "@platforms//os:windows": ["@platforms//:incompatible"],
-#         "//conditions:default": [],
-#     }),
-# )
+py_wd_test(
+    src = "random/random.wd-test",
+    args = ["--experimental"],
+    data = glob(
+        [
+            "random/*",
+        ],
+        exclude = ["**/*.wd-test"],
+    ),
+)
 
-wd_test(
+py_wd_test(
     src = "subdirectory/subdirectory.wd-test",
     args = ["--experimental"],
     data = glob(
@@ -54,3 +57,7 @@ wd_test(
         exclude = ["**/*.wd-test"],
     ),
 )
+
+load("//src/workerd/server/tests/python:import_tests.bzl", "gen_import_tests")
+load("//:build/pyodide_bucket.bzl", "PYODIDE_IMPORTS_TO_TEST")
+gen_import_tests(PYODIDE_IMPORTS_TO_TEST)

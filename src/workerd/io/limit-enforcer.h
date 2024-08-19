@@ -32,24 +32,24 @@ public:
   // When the returned scope object is dropped, if a limit was exceeded, then `error` will be
   // filled in to indicate what happened, otherwise it is left null.
   virtual kj::Own<void> enterStartupJs(
-      jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const = 0;
+      jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime) const = 0;
 
   // used to enforce limits on Python script startup.
   virtual kj::Own<void> enterStartupPython(
-      jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const = 0;
+      jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime) const = 0;
 
   // Like enterStartupJs(), but used when compiling a dynamically-imported module.
   virtual kj::Own<void> enterDynamicImportJs(
-      jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const = 0;
+      jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime) const = 0;
 
   // Like enterStartupJs(), but used to enforce tight limits in cases where we just intend
   // to log an error to the inspector or the like.
   virtual kj::Own<void> enterLoggingJs(
-      jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const = 0;
+      jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime) const = 0;
 
   // Like enterStartupJs(), but used when receiving commands via the inspector protocol.
   virtual kj::Own<void> enterInspectorJs(
-      jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const = 0;
+      jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime) const = 0;
 
   // Notifies the enforcer that a request has been completed. The enforcer is more lenient about
   // limits if several requests have been completed, vs. if limits are broken right off the bat.
@@ -77,6 +77,11 @@ public:
     // too low to be safe.
     if (iterations > DEFAULT_MAX_PBKDF2_ITERATIONS) return DEFAULT_MAX_PBKDF2_ITERATIONS;
     return kj::none;
+  }
+
+  // Called when a Blob is being created to determine the maximum allowed size of the Blob.
+  virtual size_t getBlobSizeLimit() const {
+    return 128 * 1024 * 1024;  // 128 MB
   }
 };
 
@@ -136,7 +141,7 @@ public:
   // are exceeded.
   virtual kj::Maybe<EventOutcome> getLimitsExceeded() = 0;
 
-  // Reutrns a promise that will reject if and when a limit is exceeded that prevents further
+  // Returns a promise that will reject if and when a limit is exceeded that prevents further
   // JavaScript execution, such as the CPU or memory limit.
   virtual kj::Promise<void> onLimitsExceeded() = 0;
 

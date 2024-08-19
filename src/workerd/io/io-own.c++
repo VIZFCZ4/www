@@ -32,8 +32,15 @@ void DeleteQueue::scheduleDeletion(OwnedObject* object) const {
   }
 }
 
-void DeleteQueue::checkFarGet(const DeleteQueue* deleteQueue) {
-  IoContext::current().checkFarGet(deleteQueue);
+void DeleteQueue::checkFarGet(const DeleteQueue* deleteQueue, const std::type_info& type) {
+  IoContext::current().checkFarGet(deleteQueue, type);
+}
+
+void DeleteQueue::checkWeakGet(workerd::WeakRef<IoContext>& weak) {
+  if (!weak.isValid()) {
+    JSG_FAIL_REQUIRE(Error,
+        kj::str("Couldn't complete operation because the execution context has ended."));
+  }
 }
 
 OwnedObjectList::~OwnedObjectList() noexcept(false) {

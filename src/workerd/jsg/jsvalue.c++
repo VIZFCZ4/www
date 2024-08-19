@@ -103,7 +103,7 @@ bool JsObject::hasPrivate(Lock& js, kj::StringPtr name) {
 }
 
 int JsObject::hashCode() const {
-  return inner->GetIdentityHash();
+  return kj::hashCode(inner->GetIdentityHash());
 }
 
 kj::String JsObject::getConstructorName() {
@@ -135,6 +135,44 @@ JsObject JsObject::jsonClone(Lock& js) {
   auto tmp = JsValue(inner).toJson(js);
   auto obj = KJ_ASSERT_NONNULL(JsValue::fromJson(js, tmp).tryCast<jsg::JsObject>());
   return JsObject(obj);
+}
+
+JsValue JsObject::getPrototype(Lock& js) {
+  if (inner->IsProxy()) {
+    // Here we emulate the behavior of v8's GetPrototypeV2() function for proxies.
+    // If the proxy has a getPrototypeOf trap, we call it and return the result.
+    // Otherwise we return the prototype of the target object.
+    // Note that we do not check if the target object is extensible or not, or
+    // if the returned prototype is consistent with the target's prototype if
+    // the target is not extensible. See the comment below for more details.
+    auto proxy = inner.As<v8::Proxy>();
+    JSG_REQUIRE(!proxy->IsRevoked(), TypeError, "Proxy is revoked");
+    auto handler = proxy->GetHandler();
+    JSG_REQUIRE(handler->IsObject(), TypeError, "Proxy handler is not an object");
+    auto jsHandler = JsObject(handler.As<v8::Object>());
+    auto trap = jsHandler.get(js, "getPrototypeOf"_kj);
+    auto target = proxy->GetTarget();
+    if (trap.isUndefined()) {
+      JSG_REQUIRE(target->IsObject(), TypeError, "Proxy target is not an object");
+      // Run this through getPrototype to handle the case where the target is also a proxy.
+      return JsObject(target.As<v8::Object>()).getPrototype(js);
+    }
+    JSG_REQUIRE(trap.isFunction(), TypeError, "Proxy getPrototypeOf trap is not a function");
+    v8::Local<v8::Function> fn = ((v8::Local<v8::Value>)trap).As<v8::Function>();
+    v8::Local<v8::Value> args[] = { target };
+    auto ret = JsValue(check(fn->Call(js.v8Context(), jsHandler.inner, 1, args)));
+    JSG_REQUIRE(ret.isObject() || ret.isNull(), TypeError,
+                "Proxy getPrototypeOf trap did not return an object or null");
+    // TODO(maybe): V8 performs additional checks on the returned value to
+    // see if the proxy and the target are extensible or not, and if the
+    // returned prototype is consistent with the target's prototype if they
+    // are not extensible. To strictly match v8's behavior we should do the
+    // same but (a) v8 does not expose the necessary APIs to do so, and (b)
+    // it is not clear if we actually need to perform the additional check
+    // given how we are currently using this function.
+    return ret;
+  }
+  return JsValue(inner->GetPrototypeV2());
 }
 
 bool JsValue::isTruthy(Lock& js) const {
@@ -183,6 +221,10 @@ JsValue JsArray::get(Lock& js, uint32_t i) const {
   return JsValue(check(inner->Get(js.v8Context(), i)));
 }
 
+void JsArray::add(Lock& js, const JsValue& value) {
+  check(inner->Set(js.v8Context(), size(), value.inner));
+}
+
 JsArray::operator JsObject() const { return JsObject(inner.As<v8::Object>()); }
 
 int JsString::length(jsg::Lock& js) const {
@@ -198,7 +240,7 @@ kj::String JsString::toString(jsg::Lock& js) const {
 }
 
 int JsString::hashCode() const {
-  return inner->GetIdentityHash();
+  return kj::hashCode(inner->GetIdentityHash());
 }
 
 JsString JsString::concat(Lock& js, const JsString& one, const JsString& two) {
@@ -271,14 +313,7 @@ kj::Maybe<JsArray> JsRegExp::operator()(Lock& js, kj::StringPtr input) const {
 }
 
 jsg::ByteString JsDate::toUTCString(jsg::Lock& js) const {
-  // TODO(cleanup): Add a toUTCString method to v8::Date to avoid having to grab
-  // the implementation like this from the JS prototype.
-  const auto stringify = js.v8Get(inner, "toUTCString"_kj);
-  JSG_REQUIRE(stringify->IsFunction(), TypeError, "toUTCString on a Date is not a function");
-  const auto stringified = jsg::check(stringify.template As<v8::Function>()->Call(
-      js.v8Context(), inner, 0, nullptr));
-  JSG_REQUIRE(stringified->IsString(), TypeError, "toUTCString on a Date did not return a string");
-  JsString str(stringified.As<v8::String>());
+  JsString str(inner->ToUTCString());
   return jsg::ByteString(str.toString(js));
 }
 
@@ -466,15 +501,8 @@ JsDate Lock::date(kj::Date date) {
 }
 
 JsDate Lock::date(kj::StringPtr date) {
-  // TODO(cleanup): Add v8::Date::Parse API to avoid having to grab the constructor like this.
-  const auto tmp = jsg::check(v8::Date::New(v8Context(), 0));
-  KJ_REQUIRE(tmp->IsDate());
-  const auto constructor = v8Get(tmp.As<v8::Object>(), "constructor"_kj);
-  JSG_REQUIRE(constructor->IsFunction(), TypeError, "Date.constructor is not a function");
-  v8::Local<v8::Value> argv = str(date);
-  const auto converted = jsg::check(
-      constructor.template As<v8::Function>()->NewInstance(v8Context(), 1, &argv));
-  JSG_REQUIRE(converted->IsDate(), TypeError, "Date.constructor did not return a Date");
+  v8::Local<v8::Value> converted = check(v8::Date::Parse(v8Context(), str(date)));
+  KJ_REQUIRE(converted->IsDate());
   return JsDate(converted.As<v8::Date>());
 }
 

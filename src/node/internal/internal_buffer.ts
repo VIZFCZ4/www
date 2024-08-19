@@ -20,6 +20,7 @@ import {
 } from 'node-internal:internal_errors';
 
 import { default as bufferUtil } from 'node-internal:buffer';
+import type { Encoding } from 'node-internal:buffer';
 
 import {
   isAnyArrayBuffer,
@@ -40,6 +41,8 @@ import {
   InspectOptionsStylized,
   inspect as utilInspect,
 } from 'node-internal:internal_inspect';
+
+const { ASCII, BASE64, BASE64URL, HEX, LATIN1, UTF16LE, UTF8 } = bufferUtil;
 
 // Temporary buffers to convert numbers.
 const float32Array = new Float32Array(1);
@@ -82,7 +85,7 @@ function createBuffer(length: number) : Buffer {
 }
 
 type WithImplicitCoercion<T> = | T | { valueOf(): T; };
-type StringLike = WithImplicitCoercion<string> | { [Symbol.toPrimitive](hint: "string"): string; };
+export type StringLike = WithImplicitCoercion<string> | { [Symbol.toPrimitive](hint: "string"): string; };
 type ArrayBufferLike = WithImplicitCoercion<ArrayBuffer| SharedArrayBuffer>;
 type BufferSource = StringLike|ArrayBufferLike|Uint8Array|ReadonlyArray<number>;
 
@@ -313,11 +316,11 @@ function fromString(string: StringLike, encoding?: string) {
     encoding = "utf8";
   }
   const normalizedEncoding = normalizeEncoding(encoding);
-  if (!Buffer.isEncoding(normalizedEncoding)) {
-    throw new ERR_UNKNOWN_ENCODING(encoding);
+  if (normalizedEncoding === undefined) {
+    throw new ERR_UNKNOWN_ENCODING(`${encoding}`);
   }
 
-  const ab = bufferUtil.decodeString(`${string}`, normalizedEncoding as string);
+  const ab = bufferUtil.decodeString(`${string}`, normalizedEncoding);
   if (ab === undefined) {
     throw new ERR_INVALID_ARG_VALUE('string', string,
       `Unable to decode string using encoding ${encoding}`);
@@ -440,7 +443,7 @@ export function compare(a: Buffer|Uint8Array, b: Buffer|Uint8Array) {
 
 Buffer.compare = compare;
 
-export function isEncoding(encoding: unknown) {
+export function isEncoding(encoding: unknown): encoding is string {
   return typeof encoding === "string" &&
     encoding.length !== 0 &&
     normalizeEncoding(encoding) !== undefined;
@@ -493,25 +496,22 @@ function byteLength(string: string|ArrayBufferView|ArrayBuffer|SharedArrayBuffer
   }
 
   string = `${string}`;
-  let normalizedEncoding = normalizeEncoding(encoding);
-  if (!Buffer.isEncoding(normalizedEncoding)) {
-    normalizedEncoding = "utf8";
-  }
+  const normalizedEncoding = normalizeEncoding(encoding) ?? UTF8;
 
   switch (normalizedEncoding) {
-    case 'ascii':
+    case ASCII:
       // Fall through
-    case 'latin1':
+    case LATIN1:
       return (string as string).length;
-    case 'utf16le':
+    case UTF16LE:
       return (string as string).length * 2;
-    case 'base64':
+    case BASE64:
       // Fall through
-    case 'base64url':
+    case BASE64URL:
       return base64ByteLength(string as string);
-    case 'hex':
+    case HEX:
       return (string as string).length >>> 1;
-    case 'utf8':
+    case UTF8:
       // Fall-through
     default:
       return bufferUtil.byteLength(string as string);
@@ -552,7 +552,7 @@ Buffer.prototype.toString = function toString(
     start?: number,
     end?: number) {
   if (arguments.length === 0) {
-    return bufferUtil.toString(this, 0, this.length, "utf8");
+    return bufferUtil.toString(this, 0, this.length, UTF8);
   }
 
   const len = this.length;
@@ -576,11 +576,11 @@ Buffer.prototype.toString = function toString(
   }
 
   const normalizedEncoding = normalizeEncoding(`${encoding}`);
-  if (!Buffer.isEncoding(normalizedEncoding)) {
-    throw new ERR_UNKNOWN_ENCODING(encoding as string);
+  if (normalizedEncoding === undefined) {
+    throw new ERR_UNKNOWN_ENCODING(`${encoding}`);
   }
 
-  return bufferUtil.toString(this, start as number, end as number, normalizedEncoding as string);
+  return bufferUtil.toString(this, start as number, end as number, normalizedEncoding);
 };
 
 Buffer.prototype.toLocaleString = Buffer.prototype.toString;
@@ -732,9 +732,9 @@ function bidirectionalIndexOf(
     throw new ERR_INVALID_ARG_TYPE('value', ['number', 'string', 'Buffer', 'Uint8Array'], val);
   }
 
-  let normalizedEncoding = normalizeEncoding(encoding);
-  if (!Buffer.isEncoding(normalizedEncoding)) {
-    throw new ERR_UNKNOWN_ENCODING(encoding as string);
+  const normalizedEncoding = normalizeEncoding(encoding);
+  if (normalizedEncoding === undefined) {
+    throw new ERR_UNKNOWN_ENCODING(`${encoding}`);
   }
 
   const result = bufferUtil.indexOf(buffer, val, byteOffset, normalizedEncoding, dir);
@@ -755,47 +755,46 @@ Buffer.prototype.lastIndexOf = function lastIndexOf(
   return bidirectionalIndexOf(this, val, byteOffset, encoding, false);
 };
 
-Buffer.prototype.asciiSlice = function asciiSlice(offset: number, length: number) {
-  validateOffset(offset, "offset", 0, this.length);
-  validateOffset(length, "length", 0, this.length - offset);
-  return bufferUtil.toString(this, offset, offset + length, 'ascii');
+Buffer.prototype.asciiSlice = function asciiSlice(start: number, end: number) {
+  validateOffset(start, "start", 0, this.length);
+  validateOffset(end, "end", 0, this.length);
+  return bufferUtil.toString(this, start, end, ASCII);
 };
 
-Buffer.prototype.base64Slice = function base64Slice(offset: number, length: number) {
-  validateOffset(offset, "offset", 0, this.length);
-  validateOffset(length, "length", 0, this.length - offset);
-  return bufferUtil.toString(this, offset, offset + length, 'base64');
+Buffer.prototype.base64Slice = function base64Slice(start: number, end: number) {
+  validateOffset(start, "start", 0, this.length);
+  validateOffset(end, "end", 0, this.length);
+  return bufferUtil.toString(this, start, end, BASE64);
 };
 
-Buffer.prototype.base64urlSlice = function base64urlSlice(offset: number, length: number) {
-  validateOffset(offset, "offset", 0, this.length);
-  validateOffset(length, "length", 0, this.length - offset);
-  return bufferUtil.toString(this, offset, offset + length, 'base64url');
+Buffer.prototype.base64urlSlice = function base64urlSlice(start: number, end: number) {
+  validateOffset(start, "start", 0, this.length);
+  validateOffset(end, "end", 0, this.length);
+  return bufferUtil.toString(this, start, end, BASE64URL);
 };
 
-Buffer.prototype.hexSlice = function hexSlice(offset: number, length: number) {
-  validateOffset(offset, "offset", 0, this.length);
-  validateOffset(length, "length", 0, this.length - offset);
-  return bufferUtil.toString(this, offset, offset + length, 'hex');
+Buffer.prototype.hexSlice = function hexSlice(start: number, end: number) {
+  validateOffset(start, "start", 0, this.length);
+  validateOffset(end, "end", 0, this.length);
+  return bufferUtil.toString(this, start, end, HEX);
 };
 
-Buffer.prototype.latin1Slice = function latin1Slice(offset: number,
-                                                    length: number) {
-  validateOffset(offset, "offset", 0, this.length);
-  validateOffset(length, "length", 0, this.length - offset);
-  return bufferUtil.toString(this, offset, offset + length, 'latin1');
+Buffer.prototype.latin1Slice = function latin1Slice(start: number, end: number) {
+  validateOffset(start, "start", 0, this.length);
+  validateOffset(end, "end", 0, this.length);
+  return bufferUtil.toString(this, start, end, LATIN1);
 };
 
-Buffer.prototype.ucs2Slice = function ucs2Slice(offset: number, length: number) {
-  validateOffset(offset, "offset", 0, this.length);
-  validateOffset(length, "length", 0, this.length - offset);
-  return bufferUtil.toString(this, offset, offset + length, 'utf16le');
+Buffer.prototype.ucs2Slice = function ucs2Slice(start: number, end: number) {
+  validateOffset(start, "start", 0, this.length);
+  validateOffset(end, "end", 0, this.length);
+  return bufferUtil.toString(this, start, end, UTF16LE);
 };
 
-Buffer.prototype.utf8Slice = function utf8Slice(offset: number, length: number) {
-  validateOffset(offset, "offset", 0, this.length);
-  validateOffset(length, "length", 0, this.length - offset);
-  return bufferUtil.toString(this, offset, offset + length, 'utf8');
+Buffer.prototype.utf8Slice = function utf8Slice(start: number, end: number) {
+  validateOffset(start, "start", 0, this.length);
+  validateOffset(end, "end", 0, this.length);
+  return bufferUtil.toString(this, start, end, UTF8);
 };
 
 Buffer.prototype.asciiWrite = function asciiWrite(string: StringLike,
@@ -805,7 +804,7 @@ Buffer.prototype.asciiWrite = function asciiWrite(string: StringLike,
   length ??= this.length;
   validateOffset(offset as number, "offset", 0, this.length);
   validateOffset(length as number, "length", 0, this.length - offset);
-  return bufferUtil.write(this, `${string}`, offset as number, length as number, 'ascii');
+  return bufferUtil.write(this, `${string}`, offset as number, length as number, ASCII);
 };
 
 Buffer.prototype.base64Write = function base64Write(string: StringLike,
@@ -815,7 +814,7 @@ Buffer.prototype.base64Write = function base64Write(string: StringLike,
   length ??= this.length;
   validateOffset(offset as number, "offset", 0, this.length);
   validateOffset(length as number, "length", 0, this.length - offset);
-  return bufferUtil.write(this, `${string}`, offset as number, length as number, 'base64');
+  return bufferUtil.write(this, `${string}`, offset as number, length as number, BASE64);
 };
 
 Buffer.prototype.base64urlWrite = function base64urlWrite(string: StringLike,
@@ -825,7 +824,7 @@ Buffer.prototype.base64urlWrite = function base64urlWrite(string: StringLike,
   length ??= this.length;
   validateOffset(offset as number, "offset", 0, this.length);
   validateOffset(length as number, "length", 0, this.length - offset);
-  return bufferUtil.write(this, `${string}`, offset as number, length as number, 'base64url');
+  return bufferUtil.write(this, `${string}`, offset as number, length as number, BASE64URL);
 };
 
 Buffer.prototype.hexWrite = function hexWrite(string: StringLike,
@@ -835,7 +834,7 @@ Buffer.prototype.hexWrite = function hexWrite(string: StringLike,
   length ??= this.length;
   validateOffset(offset as number, "offset", 0, this.length);
   validateOffset(length as number, "length", 0, this.length - offset);
-  return bufferUtil.write(this, `${string}`, offset as number, length as number, 'hex');
+  return bufferUtil.write(this, `${string}`, offset as number, length as number, HEX);
 };
 
 Buffer.prototype.latin1Write = function latin1Write(string: StringLike,
@@ -845,7 +844,7 @@ Buffer.prototype.latin1Write = function latin1Write(string: StringLike,
   length ??= this.length;
   validateOffset(offset as number, "offset", 0, this.length);
   validateOffset(length as number, "length", 0, this.length - offset);
-  return bufferUtil.write(this, `${string}`, offset as number, length as number, 'latin1');
+  return bufferUtil.write(this, `${string}`, offset as number, length as number, LATIN1);
 };
 
 Buffer.prototype.ucs2Write = function ucs2Write(string: StringLike,
@@ -855,7 +854,7 @@ Buffer.prototype.ucs2Write = function ucs2Write(string: StringLike,
   length ??= this.length;
   validateOffset(offset as number, "offset", 0, this.length);
   validateOffset(length as number, "length", 0, this.length - offset);
-  return bufferUtil.write(this, `${string}`, offset as number, length as number, 'utf16le');
+  return bufferUtil.write(this, `${string}`, offset as number, length as number, UTF16LE);
 };
 
 Buffer.prototype.utf8Write = function utf8Write(string: StringLike,
@@ -865,7 +864,7 @@ Buffer.prototype.utf8Write = function utf8Write(string: StringLike,
   length ??= this.length;
   validateOffset(offset as number, "offset", 0, this.length);
   validateOffset(length as number, "length", 0, this.length - offset);
-  return bufferUtil.write(this, `${string}`, offset as number, length as number, 'utf8');
+  return bufferUtil.write(this, `${string}`, offset as number, length as number, UTF8);
 };
 
 Buffer.prototype.write = function write(string: StringLike,
@@ -875,7 +874,7 @@ Buffer.prototype.write = function write(string: StringLike,
   string = `${string}`;
   if (offset === undefined) {
     // Buffer#write(string)
-    return bufferUtil.write(this, string as string, 0, this.length, "utf8");
+    return bufferUtil.write(this, string as string, 0, this.length, UTF8);
   }
 
   if (length === undefined && typeof offset === 'string') {
@@ -903,16 +902,16 @@ Buffer.prototype.write = function write(string: StringLike,
   }
 
   if (!encoding) {
-    return bufferUtil.write(this, string as string, offset as number, length as number, "utf8");
+    return bufferUtil.write(this, string as string, offset as number, length as number, UTF8);
   }
 
   const normalizedEncoding = normalizeEncoding(encoding);
-  if (!Buffer.isEncoding(normalizedEncoding)) {
-    throw new ERR_UNKNOWN_ENCODING(encoding as string);
+  if (normalizedEncoding === undefined) {
+    throw new ERR_UNKNOWN_ENCODING(`${encoding}`);
   }
 
   return bufferUtil.write(this, string as string, offset as number, length as number,
-                          normalizedEncoding as string);
+    normalizedEncoding);
 };
 
 Buffer.prototype.toJSON = function toJSON() {
@@ -1520,7 +1519,7 @@ Buffer.prototype.fill = function fill(
     start?: number|string,
     end?: number,
     encoding?: string) {
-  let normalizedEncoding : string | undefined;
+  let normalizedEncoding: Encoding | undefined;
   if (typeof val === "string") {
     if (typeof start === "string") {
       encoding = start;
@@ -1531,8 +1530,8 @@ Buffer.prototype.fill = function fill(
       end = this.length;
     }
     normalizedEncoding = normalizeEncoding(encoding);
-    if (!Buffer.isEncoding(normalizedEncoding)) {
-      throw new ERR_UNKNOWN_ENCODING(encoding as string);
+    if (normalizedEncoding === undefined) {
+      throw new ERR_UNKNOWN_ENCODING(`${encoding}`);
     }
     if (val.length === 1) {
       const code = val.charCodeAt(0);
@@ -2280,10 +2279,41 @@ function writeU_Int24LE(
   return offset;
 }
 
+export function isAscii(value: ArrayBufferView) {
+  if ((value as any)?.detached || (value as any)?.buffer?.detached) {
+    throw new Error('Unable to determine if buffer is ASCII when it is detached');
+  }
+  return bufferUtil.isAscii(value);
+}
+
+export function isUtf8(value: ArrayBufferView) {
+  if ((value as any)?.detached || (value as any)?.buffer?.detached) {
+    throw new Error('Unable to determine if buffer is UTF8 when it is detached');
+  }
+  return bufferUtil.isUtf8(value);
+}
+
+export function transcode(source: ArrayBufferView, fromEncoding: string, toEncoding: string) {
+  if (!isArrayBufferView(source)) {
+    throw new ERR_INVALID_ARG_TYPE('source', 'ArrayBufferView', typeof source);
+  }
+  const normalizedFromEncoding = normalizeEncoding(fromEncoding);
+  if (normalizedFromEncoding === undefined) {
+    throw new ERR_UNKNOWN_ENCODING(fromEncoding);
+  }
+  const normalizedToEncoding = normalizeEncoding(toEncoding);
+  if (normalizedToEncoding === undefined) {
+    throw new ERR_UNKNOWN_ENCODING(toEncoding);
+  }
+  return Buffer.from(bufferUtil.transcode(source, normalizedFromEncoding, normalizedToEncoding));
+}
+
 export default {
   Buffer,
   constants,
   kMaxLength,
   kStringMaxLength,
   SlowBuffer,
+  isAscii,
+  isUtf8,
 };

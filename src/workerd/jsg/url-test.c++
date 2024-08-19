@@ -2,9 +2,9 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include "jsg-test.h"
 #include "url.h"
 #include <kj/table.h>
+#include <kj/test.h>
 #include <regex>
 #include <openssl/rand.h>
 
@@ -1462,7 +1462,7 @@ KJ_TEST("URLPattern - MDN example 3 - pathname: '/books/:id(\\d+)' with base") {
   }
 }
 
-KJ_TEST("URLPattern - MDN example 4 - pathame: '/:type(foo|bar)'") {
+KJ_TEST("URLPattern - MDN example 4 - pathname: '/:type(foo|bar)'") {
   KJ_SWITCH_ONEOF(UrlPattern::tryCompile({
     .pathname = kj::str("/:type(foo|bar)")
   })) {

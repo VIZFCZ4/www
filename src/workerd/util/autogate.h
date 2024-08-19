@@ -3,16 +3,19 @@
 //     https://opensource.org/licenses/Apache-2.0
 #pragma once
 
-#include "kj/debug.h"
-#include <kj/map.h>
-#include <capnp/common.h>
+#include <kj/string.h>
+#include <capnp/blob.h>
 #include <capnp/list.h>
+#include <initializer_list>
 
 namespace workerd::util {
 
 // Workerd-specific list of autogate keys (can also be used in internal repo).
 enum class AutogateKey {
   TEST_WORKERD,
+  PYODIDE_LOAD_EXTERNAL,
+  // Enables reporting of disconnection during deferred proxying as a new status.
+  RESPONSE_STREAM_DISCONNECTED_STATUS,
   NumOfKeys // Reserved for iteration.
 };
 
@@ -39,6 +42,10 @@ public:
   // process before any threads are created.
   static void initAutogate(
       capnp::List<capnp::Text>::Reader autogates);
+
+  // Convenience method for bin-tests to invoke initAutogate() with an appropriate config.
+  static void initAutogateNamesForTest(std::initializer_list<kj::StringPtr> gateNames);
+
   // Destroys an initialised global Autogate instance. Used only for testing.
   static void deinitAutogate();
 private:
@@ -52,4 +59,4 @@ private:
 // When adding a new gate, add it into this method as well.
 kj::StringPtr KJ_STRINGIFY(AutogateKey key);
 
-}  // namespace workerd::server
+}  // namespace workerd::util

@@ -8,7 +8,8 @@
 #include <kj/compat/http.h>
 #include "basics.h"
 #include <workerd/io/io-context.h>
-#include <stdlib.h>
+#include <workerd/util/weak-refs.h>
+#include <cstdlib>
 
 namespace workerd {
   class ActorObserver;
@@ -128,52 +129,24 @@ private:
   bool clean;
 };
 
-class ErrorEvent: public Event {
-public:
-  ErrorEvent(jsg::Lock& js, kj::String&& message, jsg::JsRef<jsg::JsValue> error)
-      : Event("error"), message(kj::mv(message)), error(kj::mv(error)) {}
-
-  static jsg::Ref<ErrorEvent> constructor() = delete;
-
-  // Due to the context in which we use this ErrorEvent class (internal errors), the getters for
-  // filename, lineNo, and colNo are all falsy.
-  kj::String getFilename() { return nullptr; }
-  kj::StringPtr getMessage() { return message; }
-  int getLineno() { return 0; }
-  int getColno() { return 0; }
-  jsg::JsValue getError(jsg::Lock& js) { return error.getHandle(js); }
-
-
-  JSG_RESOURCE_TYPE(ErrorEvent) {
-    JSG_INHERIT(Event);
-
-    JSG_READONLY_INSTANCE_PROPERTY(filename, getFilename);
-    JSG_READONLY_INSTANCE_PROPERTY(message, getMessage);
-    JSG_READONLY_INSTANCE_PROPERTY(lineno, getLineno);
-    JSG_READONLY_INSTANCE_PROPERTY(colno, getColno);
-    JSG_READONLY_INSTANCE_PROPERTY(error, getError);
-
-    JSG_TS_ROOT();
-    // ErrorEvent will be referenced from the `WebSocketEventMap` define
-  }
-
-  void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
-    tracker.trackField("message", message);
-    tracker.trackField("error", error);
-  }
-
-private:
-  kj::String message;
-  jsg::JsRef<jsg::JsValue> error;
-
-  void visitForGc(jsg::GcVisitor& visitor);
-};
-
 // The forward declaration is necessary so we can make some
 // WebSocket methods accessible to WebSocketPair via friend declaration.
 class WebSocket;
 
 class WebSocketPair: public jsg::Object {
+private:
+  struct IteratorState final {
+    jsg::Ref<WebSocketPair> pair;
+    size_t index = 0;
+
+    void visitForGc(jsg::GcVisitor& visitor) {
+      visitor.visit(pair);
+    }
+
+    JSG_MEMORY_INFO(IteratorState) {
+      tracker.trackField("pair", pair);
+    }
+  };
 public:
   WebSocketPair(jsg::Ref<WebSocket> first, jsg::Ref<WebSocket> second)
       : sockets { kj::mv(first), kj::mv(second) } {}
@@ -183,11 +156,14 @@ public:
   jsg::Ref<WebSocket> getFirst() { return sockets[0].addRef(); }
   jsg::Ref<WebSocket> getSecond() { return sockets[1].addRef(); }
 
+  JSG_ITERATOR(PairIterator, entries, jsg::Ref<WebSocket>, IteratorState, iteratorNext);
+
   JSG_RESOURCE_TYPE(WebSocketPair) {
     // TODO(soon): These really should be using an indexed property handler rather
     // than named instance properties but jsg does not yet have support for that.
     JSG_READONLY_INSTANCE_PROPERTY(0, getFirst);
     JSG_READONLY_INSTANCE_PROPERTY(1, getSecond);
+    JSG_ITERABLE(entries);
 
     JSG_TS_OVERRIDE(const WebSocketPair: {
       new (): { 0: WebSocket; 1: WebSocket };
@@ -219,6 +195,13 @@ public:
 private:
   jsg::Ref<WebSocket> sockets[2];
 
+  static kj::Maybe<jsg::Ref<WebSocket>> iteratorNext(jsg::Lock& js, IteratorState& state) {
+    if (state.index >= 2) {
+      return kj::none;
+    }
+    return state.pair->sockets[state.index++].addRef();
+  }
+
   void visitForGc(jsg::GcVisitor& visitor) {
     visitor.visit(sockets[0]);
     visitor.visit(sockets[1]);
@@ -231,15 +214,6 @@ private:
   struct PackedWebSocket;
   struct Native;
 public:
-  enum Locality {
-    // This is one end of a local WebSocketPair. Do not use IoContext::registerPendingEvent()
-    // when waiting on this WebSocket.
-    LOCAL,
-
-    // This is a remote WebSocket. Use IoContext::registerPendingEvent() when waiting.
-    REMOTE
-  };
-
   // WebSocket ready states.
   static constexpr int READY_STATE_CONNECTING = 0;
   static constexpr int READY_STATE_OPEN = 1;
@@ -271,6 +245,10 @@ public:
     bool closedOutgoingConnection = false;
   };
 
+  ~WebSocket() noexcept(false) {
+    weakRef->invalidate();
+  }
+
   // This WebSocket constructor is only used when WebSockets wake up from hibernation.
   // It will immediately set the `state` to `Accepted`, but it limits the behavior by specifying it
   // as `Hibernatable` -- thereby making most api::WebSocket methods inaccessible.
@@ -286,12 +264,12 @@ public:
   // The JS WebSocket constructor needs to initiate a connection, but we need to return the
   // WebSocket object to the caller in Javascript immediately. We will defer the connection logic
   // to the `initConnection` method.
-  WebSocket(kj::Own<kj::WebSocket> native, Locality locality);
+  WebSocket(kj::Own<kj::WebSocket> native);
 
   // The JS WebSocket constructor needs to initiate a connection, but we need to return the
   // WebSocket object to the caller in Javascript immediately. We will defer the connection logic
   // to the `initConnection` method.
-  WebSocket(kj::String url, Locality locality);
+  WebSocket(kj::String url);
 
   // We initiate a `new WebSocket()` connection and set up a continuation that handles the
   // response once it's available. This includes assigning the native websocket and dispatching the
@@ -299,14 +277,15 @@ public:
   void initConnection(jsg::Lock& js, kj::Promise<PackedWebSocket>);
 
   // Pumps messages from this WebSocket to `other`, and from `other` to this, making sure to
-  // register pending events as appropriate. Used to implement FetchEvent.respondWith().
+  // register pending events as appropriate. Used to connect a websocket to a client via an HTTP
+  // response.
   //
   // Only one of this or accept() is allowed to be invoked.
   //
   // As an exception to the usual KJ convention, it is not necessary for the JavaScript `WebSocket`
   // object to be kept live while waiting for the promise returned by couple() to complete. Instead,
   // the promise takes direct ownership of the underlying KJ-native WebSocket (as well as `other`).
-  kj::Promise<DeferredProxy<void>> couple(kj::Own<kj::WebSocket> other);
+  kj::Promise<DeferredProxy<void>> couple(kj::Own<kj::WebSocket> other, RequestObserver& request);
 
   // Extract the kj::WebSocket from this api::WebSocket (if applicable). The kj::WebSocket will be
   // owned elsewhere, but the api::WebSocket will retain a reference.
@@ -336,15 +315,10 @@ public:
 
   bool awaitingHibernatableRelease();
 
-  // Can only be called on one end of a WebSocketPair.
-  // Relevant for WebSocket Hibernation: `couple()` will only allow IoContext to
-  // go away if the end returned in the Response is REMOTE.
-  void setRemoteOnPair();
-
   // Should only be called on one end of a WebSocketPair.
   // Relevant for WebSocket Hibernation: the end we return in the Response must be in the
   // AwaitingAcceptanceOrCoupling state.
-  bool pairIsAwaitingCoupling();
+  bool peerIsAwaitingCoupling();
 
   HibernationPackage buildPackageForHibernation();
 
@@ -450,7 +424,12 @@ public:
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
+  kj::Own<WeakRef<WebSocket>> addWeakRef() {
+    return weakRef->addRef();
+  }
+
 private:
+  kj::Own<WeakRef<WebSocket>> weakRef;
   kj::Maybe<kj::String> url;
   kj::Maybe<kj::String> protocol = kj::String();
   kj::Maybe<kj::String> extensions = kj::String();
@@ -465,6 +444,9 @@ private:
   // cannot be `IoOwn`ed as `farNative` is. This informs the HibernatableWebSocket if we called
   // `close()`, thereby preventing calls to `send()` even after we wake from hibernation.
   bool closedOutgoingForHib = false;
+
+  // Maximum allowed size for WebSocket messages
+  inline static const size_t SUGGESTED_MAX_MESSAGE_SIZE = 1u << 20;
 
   // Maximum size of a WebSocket attachment.
   inline static const size_t MAX_ATTACHMENT_SIZE = 1024 * 2;
@@ -586,8 +568,8 @@ private:
   // The underlying native WebSocket (or a promise that will emplace one).
   //
   // The state transitions look like so:
-  // - Starts as `AwaitingConnection` if the `WebSocket(url, locality, ...)` ctor is used.
-  // - Starts as `AwaitingAcceptanceOrCoupling` if the `WebSocket(native, locality)` ctor is used.
+  // - Starts as `AwaitingConnection` if the `WebSocket(url ...)` ctor is used.
+  // - Starts as `AwaitingAcceptanceOrCoupling` if the `WebSocket(native)` ctor is used.
   // - Transitions from `AwaitingConnection` to `AwaitingAcceptanceOrCoupling` when the native
   //   connection is established and to `Accepted` once the read loop starts.
   // - Transitions from `AwaitingConnection` to `Released` when connection establishment fails.
@@ -630,7 +612,7 @@ private:
 
   AutoResponse autoResponseStatus;
 
-  Locality locality;
+  kj::Maybe<kj::Own<WebSocketObserver>> observer;
 
   // Contains a websocket and possibly some data from the WebSocketResponse headers.
   struct PackedWebSocket {
@@ -639,10 +621,18 @@ private:
     kj::Maybe<kj::String> extensions;
   };
 
-  // So that each end of a WebSocketPair can keep track of its pair.
-  kj::Maybe<jsg::Ref<WebSocket>> maybePair;
+  // So that each end of a WebSocketPair can keep track of its peer.
+  // We use a weak ref to track the peer to avoid having a strong ref cycle
+  // between the two WebSocket instances that would cause them to leak. This
+  // can mean, however, that it's possible for one of the peers to be garbage
+  // collected while the other still exists. This should be fairly unusual tho.
+  kj::Maybe<kj::Own<WeakRef<WebSocket>>> peer;
 
-  void setMaybePair(jsg::Ref<WebSocket> other);
+  void visitForGc(jsg::GcVisitor& visitor) {
+    visitor.visit(error);
+  }
+
+  void setPeer(kj::Own<WeakRef<WebSocket>> peer);
 
   friend jsg::Ref<WebSocketPair> WebSocketPair::constructor();
 
@@ -659,9 +649,9 @@ private:
   // owned by the `IoContext` so it'll be canceled if the `IoContext` is destroyed.
   static kj::Promise<void> pump(
       IoContext& context, OutgoingMessagesMap& outgoingMessages, kj::WebSocket& ws, Native& native,
-      AutoResponse& autoResponse);
+      AutoResponse& autoResponse, kj::Maybe<kj::Own<WebSocketObserver>>& observer);
 
-  kj::Promise<kj::Maybe<kj::Exception>> readLoop(kj::Maybe<kj::Own<InputGate::CriticalSection>> cs);
+  kj::Promise<kj::Maybe<kj::Exception>> readLoop(kj::Maybe<kj::Own<InputGate::CriticalSection>> cs, size_t maxMessageSize);
 
   void reportError(jsg::Lock& js, kj::Exception&& e);
   void reportError(jsg::Lock& js, jsg::JsRef<jsg::JsValue> err);
@@ -669,14 +659,15 @@ private:
   void assertNoError(jsg::Lock& js);
 };
 
-#define EW_WEBSOCKET_ISOLATE_TYPES \
-  api::CloseEvent,                 \
-  api::CloseEvent::Initializer,    \
-  api::MessageEvent,               \
-  api::MessageEvent::Initializer,  \
-  api::ErrorEvent,                 \
-  api::WebSocket,                  \
-  api::WebSocketPair
+#define EW_WEBSOCKET_ISOLATE_TYPES       \
+  api::CloseEvent,                       \
+  api::CloseEvent::Initializer,          \
+  api::MessageEvent,                     \
+  api::MessageEvent::Initializer,        \
+  api::WebSocket,                        \
+  api::WebSocketPair,                    \
+  api::WebSocketPair::PairIterator,      \
+  api::WebSocketPair::PairIterator::Next \
 // The list of websocket.h types that are added to worker.c++'s JSG_DECLARE_ISOLATE_TYPE
 
 }  // namespace workerd::api

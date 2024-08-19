@@ -52,8 +52,8 @@ class Trace final : public kj::Refcounted {
 public:
   explicit Trace(kj::Maybe<kj::String> stableId, kj::Maybe<kj::String> scriptName,
       kj::Maybe<kj::Own<ScriptVersion::Reader>> scriptVersion,
-      kj::Maybe<kj::String> dispatchNamespace, kj::Array<kj::String> scriptTags,
-      kj::Maybe<kj::String> entrypoint);
+      kj::Maybe<kj::String> dispatchNamespace, kj::Maybe<kj::String> scriptId,
+      kj::Array<kj::String> scriptTags, kj::Maybe<kj::String> entrypoint);
   Trace(rpc::Trace::Reader reader);
   ~Trace() noexcept(false);
   KJ_DISALLOW_COPY_AND_MOVE(Trace);
@@ -275,6 +275,7 @@ public:
   kj::Maybe<kj::String> scriptName;
   kj::Maybe<kj::Own<ScriptVersion::Reader>> scriptVersion;
   kj::Maybe<kj::String> dispatchNamespace;
+  kj::Maybe<kj::String> scriptId;
   kj::Array<kj::String> scriptTags;
   kj::Maybe<kj::String> entrypoint;
 
@@ -291,6 +292,7 @@ public:
   kj::Duration cpuTime;
   kj::Duration wallTime;
 
+  bool truncated = false;
   bool exceededLogLimit = false;
   bool exceededExceptionLimit = false;
   bool exceededDiagnosticChannelEventLimit = false;
@@ -334,6 +336,7 @@ public:
   }
 
   kj::Own<WorkerTracer> makeWorkerTracer(PipelineLogLevel pipelineLogLevel,
+                                         kj::Maybe<kj::String> scriptId,
                                          kj::Maybe<kj::String> stableId,
                                          kj::Maybe<kj::String> scriptName,
                                          kj::Maybe<kj::Own<ScriptVersion::Reader>> scriptVersion,

@@ -224,7 +224,7 @@ public:
   KJ_DISALLOW_COPY_AND_MOVE(Rewriter);
 
   // WritableStreamSink implementation. The input body pumpTo() operation calls these.
-  kj::Promise<void> write(const void* buffer, size_t size) override;
+  kj::Promise<void> write(kj::ArrayPtr<const byte> buffer) override;
   kj::Promise<void> write(kj::ArrayPtr<const kj::ArrayPtr<const byte>> pieces) override;
   kj::Promise<void> end() override;
   void abort(kj::Exception reason) override;
@@ -243,7 +243,7 @@ private:
       kj::ArrayPtr<const char> encoding, Rewriter& rewriterWrapper);
 
   static void output(const char* buffer, size_t size, void* userdata);
-  void outputImpl(const char* buffer, size_t size);
+  void outputImpl(kj::ArrayPtr<const byte> buffer);
 
   void tryHandleCancellation(int rc) {
     if (canceled) {
@@ -418,13 +418,13 @@ const kj::FiberPool& getFiberPool() {
 
 } // namespace
 
-kj::Promise<void> Rewriter::write(const void* buffer, size_t size) {
+kj::Promise<void> Rewriter::write(kj::ArrayPtr<const byte> buffer) {
   KJ_ASSERT(maybeWaitScope == kj::none);
-  return getFiberPool().startFiber([this, buffer, size](kj::WaitScope& scope) {
+  return getFiberPool().startFiber([this, buffer](kj::WaitScope& scope) {
     maybeWaitScope = scope;
     if (!isPoisoned()) {
       // Cannot use `check()` because `finishWrite()` implements the error path.
-      auto rc = lol_html_rewriter_write(rewriter, reinterpret_cast<const char*>(buffer), size);
+      auto rc = lol_html_rewriter_write(rewriter, buffer.asChars().begin(), buffer.size());
       tryHandleCancellation(rc);
       if (rc == -1) {
         maybePoison(getLastError());
@@ -605,22 +605,22 @@ void Rewriter::onEndTag(lol_html_element_t *element, ElementCallbackFunction&& c
 
 void Rewriter::output(const char* buffer, size_t size, void* userdata) {
   auto& rewriter = *reinterpret_cast<Rewriter*>(userdata);
-  rewriter.outputImpl(buffer, size);
+  rewriter.outputImpl(kj::arrayPtr(buffer, size).asBytes());
 }
 
-void Rewriter::outputImpl(const char* buffer, size_t size) {
+void Rewriter::outputImpl(kj::ArrayPtr<const byte> buffer) {
   if (isPoisoned()) {
     // Handlers disabled due to exception or running in a destructor.
     return;
   }
 
-  auto bufferCopy = kj::heapArray(buffer, size);
+  auto bufferCopy = kj::heapArray(buffer);
   KJ_IF_SOME(wp, writePromise) {
     writePromise = wp.then([this, bufferCopy = kj::mv(bufferCopy)]() mutable {
-      return inner->write(bufferCopy.begin(), bufferCopy.size()).attach(kj::mv(bufferCopy));
+      return inner->write(bufferCopy.asPtr()).attach(kj::mv(bufferCopy));
     });
   } else {
-    writePromise = inner->write(bufferCopy.begin(), bufferCopy.size()).attach(kj::mv(bufferCopy));
+    writePromise = inner->write(bufferCopy.asPtr()).attach(kj::mv(bufferCopy));
   }
 }
 
@@ -1063,11 +1063,10 @@ jsg::Ref<Response> HTMLRewriter::transform(jsg::Lock& js, jsg::Ref<Response> res
 
   auto& ioContext = IoContext::current();
 
-  // lol-html writes to a pipe, the other end of which is our transformed response body.
-  auto ts = IdentityTransformStream::constructor(js);
-  response = Response::constructor(js, kj::Maybe(ts->getReadable()), kj::mv(response));
-
-  auto outputSink = ts->getWritable()->removeSink(js);
+  auto pipe = newIdentityPipe();
+  response = Response::constructor(js,
+      kj::Maybe(jsg::alloc<ReadableStream>(ioContext, kj::mv(pipe.in))),
+      kj::mv(response));
 
   kj::String ownContentType;
   kj::String encoding = kj::str("utf-8");
@@ -1081,7 +1080,7 @@ jsg::Ref<Response> HTMLRewriter::transform(jsg::Lock& js, jsg::Ref<Response> res
     }
   }
 
-  auto rewriter = kj::heap<Rewriter>(js, impl->unregisteredHandlers, encoding, kj::mv(outputSink));
+  auto rewriter = kj::heap<Rewriter>(js, impl->unregisteredHandlers, encoding, kj::mv(pipe.out));
 
   // NOTE: Avoid throwing any exceptions after initiating the pump below. This makes
   //   the input response object disturbed (response.bodyUsed === true), which should only happen

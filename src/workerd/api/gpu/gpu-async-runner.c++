@@ -3,7 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "gpu-async-runner.h"
-#include "workerd/io/io-context.h"
+#include <workerd/io/io-context.h>
 #include <kj/common.h>
 #include <kj/debug.h>
 
@@ -34,7 +34,7 @@ void AsyncRunner::QueueTick() {
       [this](jsg::Lock& js) mutable {
         this->tick_queued_ = false;
         if (this->count_ > 0) {
-          this->device_.Tick();
+          this->instance_.ProcessEvents();
           QueueTick();
         }
       },

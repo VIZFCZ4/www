@@ -4,11 +4,12 @@
 
 #include "server.h"
 #include <kj/test.h>
+#include <workerd/util/autogate.h>
 #include <workerd/util/capnp-mock.h>
 #include <workerd/jsg/setup.h>
 #include <kj/async-queue.h>
 #include <regex>
-#include <stdlib.h>
+#include <cstdlib>
 
 namespace workerd::server {
 namespace {
@@ -36,6 +37,8 @@ kj::Own<config::Config::Reader> parseConfig(kj::StringPtr text, kj::SourceLocati
   })) {
     KJ_FAIL_REQUIRE_AT(loc, exception);
   }
+
+  util::Autogate::initAutogate(root.asReader().getAutogates());
 
   return capnp::clone(root.asReader());
 }
@@ -87,7 +90,7 @@ public:
       : ws(ws), stream(kj::mv(stream)) {}
 
   void send(kj::StringPtr data, kj::SourceLocation loc = {}) {
-    stream->write(data.begin(), data.size()).wait(ws);
+    stream->write(data.asBytes()).wait(ws);
   }
   void recv(kj::StringPtr expected, kj::SourceLocation loc = {}) {
     auto actual = readAllAvailable();
@@ -412,7 +415,7 @@ private:
   kj::UnwindDetector unwindDetector;
 
   // ---------------------------------------------------------------------------
-  // implements Filesytem
+  // implements Filesystem
 
   const kj::Directory& getRoot() const override {
     return *root;
@@ -533,7 +536,7 @@ private:
   void generate(kj::ArrayPtr<kj::byte> buffer) override {
     kj::byte random = 4;  // chosen by fair die roll by Randall Munroe in 2007.
                           // guaranteed to be random.
-    memset(buffer.begin(), random, buffer.size());
+    buffer.fill(random);
   }
 
   // ---------------------------------------------------------------------------
@@ -1346,6 +1349,13 @@ KJ_TEST("Server: named entrypoints") {
                 `    return new Response("hello from bar entrypoint");
                 `  }
                 `}
+                `
+                `// Also export some symbols that aren't valid entrypoints, but we should still
+                `// be allowed to point sockets at them. (Sending any actual requests to them
+                `// will still fail.)
+                `export let invalidObj = {};  // no handlers
+                `export let invalidArray = [1, 2];
+                `export let invalidMap = new Map();
             )
           ]
         )
@@ -1354,7 +1364,14 @@ KJ_TEST("Server: named entrypoints") {
     sockets = [
       ( name = "main", address = "test-addr", service = "hello" ),
       ( name = "alt1", address = "foo-addr", service = (name = "hello", entrypoint = "foo")),
-      ( name = "alt2", address = "bar-addr", service = (name = "hello", entrypoint = "bar"))
+      ( name = "alt2", address = "bar-addr", service = (name = "hello", entrypoint = "bar")),
+
+      ( name = "invalid1", address = "invalid1-addr",
+        service = (name = "hello", entrypoint = "invalidObj")),
+      ( name = "invalid2", address = "invalid2-addr",
+        service = (name = "hello", entrypoint = "invalidArray")),
+      ( name = "invalid3", address = "invalid3-addr",
+        service = (name = "hello", entrypoint = "invalidMap")),
     ]
   ))"_kj);
 

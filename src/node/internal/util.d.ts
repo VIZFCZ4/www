@@ -78,6 +78,7 @@ export function isBigUint64Array(value: unknown): value is BigUint64Array;
 export function isBooleanObject(value: unknown): value is Boolean;
 export function isDataView(value: unknown): value is DataView;
 export function isDate(value: unknown): value is Date;
+export function isExternal(value: unknown): boolean;
 export function isFloat32Array(value: unknown): value is Float32Array;
 export function isFloat64Array(value: unknown): value is Float64Array;
 export function isGeneratorFunction(value: unknown): value is GeneratorFunction;
@@ -107,3 +108,5 @@ export function isWeakMap(value: unknown): value is WeakMap<any, unknown>;
 export function isWeakSet(value: unknown): value is WeakSet<any>;
 export function isAnyArrayBuffer(value: unknown): value is ArrayBuffer | SharedArrayBuffer;
 export function isBoxedPrimitive(value: unknown): value is Number | String | Boolean | BigInt | Symbol;
+
+export function getBuiltinModule(id: string): any;

@@ -97,13 +97,8 @@ export default {
       ) {
         return Response.json({});
       } else if (request.method === "POST" && pathname.endsWith("/query")) {
-        /** @type {VectorizeQueryOptions & {vector: number[], compat: { queryMetadataOptional: boolean }}} */
+        /** @type {VectorizeQueryOptions & {vector: number[]}} */
         const body = await request.json();
-        // check that the compatibility flags are set
-        if (!body.compat.queryMetadataOptional)
-          throw Error(
-            "expected to get `queryMetadataOptional` compat flag with a value of true"
-          );
         let returnSet = structuredClone(exampleVectorMatches);
         if (
           body?.filter?.["text"] &&
@@ -119,7 +114,7 @@ export default {
           returnSet.forEach((v) => {
             delete v.values;
           });
-        if (!body?.returnMetadata)
+        if (!body?.returnMetadata || body?.returnMetadata === "none")
           returnSet.forEach((v) => {
             delete v.metadata;
           });
@@ -130,7 +125,7 @@ export default {
       } else if (request.method === "POST" && pathname.endsWith("/insert")) {
         /** @type {{vectors: Array<VectorizeVector>}} */
         const data = await request.json();
-        if (data.vectors.find((v) => v.id == "fail-with-test-error")) {
+        if (data.vectors.find((v) => v.id === "fail-with-test-error")) {
           return Response.json(
             {
               code: 9999,
@@ -142,34 +137,34 @@ export default {
           );
         }
 
-        return Response.json({
-          ids: [
-            ...data.vectors.map(({ id }) => id),
-            ...exampleVectors.map(({ id }) => id),
-          ],
-          count: data.vectors.length + exampleVectors.length,
-        });
+        /** @type {VectorizeAsyncMutation} */
+        const res = {
+          // fudge a bit and set the mutation id to some internals so our asserts can check more
+          mutationId: `total vectors: ${data.vectors.length + exampleVectors.length}`,
+        };
+        return Response.json(res);
       } else if (request.method === "POST" && pathname.endsWith("/upsert")) {
         /** @type {{vectors: Array<VectorizeVector>}} */
         let data = await request.json();
         if (data.vectors.length > 1) data.vectors.splice(-1);
-        return Response.json({
-          ids: [
-            ...data.vectors.map(({ id }) => id),
-            ...exampleVectors.map(({ id }) => id),
-          ],
-          count: data.vectors.length + exampleVectors.length,
-        });
+        /** @type {VectorizeAsyncMutation} */
+        const res = {
+          // fudge a bit and set the mutation id to some internals so our asserts can check more
+          mutationId: `total vectors: ${data.vectors.length + exampleVectors.length}`,
+        };
+        return Response.json(res);
       } else if (
         request.method === "POST" &&
         pathname.endsWith("/deleteByIds")
       ) {
         /** @type {{ids: Array<string>}} */
         const body = await request.json();
-        return Response.json({
-          ids: body.ids,
-          count: body.ids.length,
-        });
+        /** @type {VectorizeAsyncMutation} */
+        const res = {
+          // fudge a bit and set the mutation id to some internals so our asserts can check more
+          mutationId: `deleted vectors: ${body.ids.length}`,
+        };
+        return Response.json(res);
       } else if (request.method === "POST" && pathname.endsWith("/getByIds")) {
         /** @type {{ids: Array<string>}} */
         const body = await request.json();

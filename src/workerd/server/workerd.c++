@@ -65,6 +65,7 @@
 #include <workerd/util/use-perfetto-categories.h>
 
 namespace workerd::server {
+namespace {
 
 static kj::StringPtr getVersionString() {
   static const kj::String result = kj::str("workerd ", SUPPORTED_COMPATIBILITY_DATE);
@@ -149,7 +150,7 @@ public:
   }
 
   kj::Promise<void> onChange() {
-    kj::byte buffer[4096];
+    kj::byte buffer[4096]{};
 
     for (;;) {
       ssize_t n;
@@ -202,7 +203,7 @@ private:
 // Class which uses inotify to watch a set of files and alert when they change.
 //
 // This version uses kqueue to watch for changes in files. kqueue typically doesn't scale well
-// to watching whole directory trees, since it must keep a file descriptor opne for each watched
+// to watching whole directory trees, since it must keep a file descriptor open for each watched
 // file. However, for our use case, we don't really want to watch a directory tree anyway, we
 // want to watch the specific set of files which were opened while parsing the config. This is
 // not so bad, probably.
@@ -220,7 +221,7 @@ public:
   void watch(kj::PathPtr path, kj::Maybe<const kj::ReadableFile&> file) {
     KJ_IF_SOME(f, file) {
       KJ_IF_SOME(fd, f.getFd()) {
-        // We need to duplicate the FD becasue the original will probably be closed later and
+        // We need to duplicate the FD because the original will probably be closed later and
         // closing the FD unregisters it from kqueue.
         int duped;
         KJ_SYSCALL(duped = dup(fd));
@@ -360,6 +361,10 @@ public:
   }
 
   kj::Array<const char> readContent() const override {
+    uint64_t size = file->stat().size;
+    if (!size) {
+      return nullptr;
+    }
     return file->mmap(0, file->stat().size).releaseAsChars();
   }
 
@@ -605,11 +610,11 @@ private:
 
 // =======================================================================================
 
-class CliMain: public SchemaFileImpl::ErrorReporter {
+class CliMain final: public SchemaFileImpl::ErrorReporter {
 public:
   CliMain(kj::ProcessContext& context, char** argv)
       : context(context), argv(argv),
-        server(*fs, io.provider->getTimer(), network, entropySource,
+        server(kj::heap<Server>(*fs, io.provider->getTimer(), network, entropySource,
             Worker::ConsoleMode::STDOUT, [&](kj::String error) {
           if (watcher == kj::none) {
             // TODO(someday): Don't just fail on the first error, keep going in order to report
@@ -624,14 +629,14 @@ public:
             hadErrors = true;
             context.error(error);
           }
-        }) {
+        })) {
     KJ_IF_SOME(e, exeInfo) {
       auto& exe = *e.file;
       auto size = exe.stat().size;
       KJ_ASSERT(size > sizeof(COMPILED_MAGIC_SUFFIX) + sizeof(uint64_t));
-      kj::byte magic[sizeof(COMPILED_MAGIC_SUFFIX)];
+      kj::byte magic[sizeof(COMPILED_MAGIC_SUFFIX)]{};
       exe.read(size - sizeof(COMPILED_MAGIC_SUFFIX), magic);
-      if (memcmp(magic, COMPILED_MAGIC_SUFFIX, sizeof(COMPILED_MAGIC_SUFFIX)) == 0) {
+      if (kj::arrayPtr(magic) == kj::arrayPtr(COMPILED_MAGIC_SUFFIX).asBytes()) {
         // Oh! It appears we are running a compiled binary, it has a config appended to the end.
         uint64_t configSize;
         exe.read(size - sizeof(COMPILED_MAGIC_SUFFIX) - sizeof(uint64_t),
@@ -724,11 +729,17 @@ public:
         .addOption({'w', "watch"}, CLI_METHOD(watch),
                    "Watch configuration files (and server binary) and reload if they change. "
                    "Useful for development, but not recommended in production.")
-        .addOption({"experimental"}, [this]() { server.allowExperimental(); return true; },
+        .addOption({"experimental"}, [this]() { server->allowExperimental(); return true; },
                    "Permit the use of experimental features which may break backwards "
                    "compatibility in a future release.")
-        .addOptionWithArg({"disk-cache-dir"}, CLI_METHOD(diskCacheDir), "<path>",
-                  "Use <path> as a disk cache to avoid repeatedly fetching packages from the internet. ");
+        .addOptionWithArg({"pyodide-package-disk-cache-dir"}, CLI_METHOD(setPackageDiskCacheDir), "<path>",
+                  "Use <path> as a disk cache to avoid repeatedly fetching packages from the internet. ")
+        .addOptionWithArg({"pyodide-bundle-disk-cache-dir"}, CLI_METHOD(setPyodideDiskCacheDir), "<path>",
+                  "Use <path> as a disk cache to avoid repeatedly fetching Pyodide bundles from the internet. ")
+        .addOption({"python-save-snapshot"}, [this]() { server->setPythonCreateSnapshot();  return true; },
+                  "Save a dedicated snapshot to the disk cache")
+        .addOption({"python-save-baseline-snapshot"}, [this]() { server->setPythonCreateBaselineSnapshot();  return true; },
+                  "Save a baseline snapshot to the disk cache");
   }
 
   kj::MainFunc addServeOptions(kj::MainBuilder& builder) {
@@ -800,7 +811,7 @@ public:
           "    }\n");
     return addServeOrTestOptions(addConfigParsingOptionsNoConstName(builder))
         .addOption({"no-verbose"}, [this]() { noVerbose = true; return true; },
-            "Disable INFO-level logging for this test. Otherwise, INFO logging is enalbed by "
+            "Disable INFO-level logging for this test. Otherwise, INFO logging is enabled by "
             "default for tests in order to show uncaught exceptions, but it can be noisey.")
         .expectOptionalArg("<filter>", CLI_METHOD(setTestFilter))
         .callAfterParsing(CLI_METHOD(test))
@@ -841,7 +852,7 @@ public:
 
   void overrideSocketAddr(kj::StringPtr param) {
     auto [ name, value ] = parseOverride(param);
-    server.overrideSocket(kj::mv(name), kj::str(value));
+    server->overrideSocket(kj::mv(name), kj::str(value));
   }
 
 #if _WIN32
@@ -897,18 +908,18 @@ public:
     validateSocketFd(fd, name);
 
     inheritedFds.add(fd);
-    server.overrideSocket(kj::mv(name), io.lowLevelProvider->wrapListenSocketFd(
+    server->overrideSocket(kj::mv(name), io.lowLevelProvider->wrapListenSocketFd(
         fd, kj::LowLevelAsyncIoProvider::TAKE_OWNERSHIP));
   }
 
   void overrideDirectory(kj::StringPtr param) {
     auto [ name, value ] = parseOverride(param);
-    server.overrideDirectory(kj::mv(name), kj::str(value));
+    server->overrideDirectory(kj::mv(name), kj::str(value));
   }
 
   void overrideExternal(kj::StringPtr param) {
     auto [ name, value ] = parseOverride(param);
-    server.overrideExternal(kj::mv(name), kj::str(value));
+    server->overrideExternal(kj::mv(name), kj::str(value));
   }
 
 #if defined(WORKERD_USE_PERFETTO)
@@ -920,19 +931,25 @@ public:
 #endif
 
   void enableInspector(kj::StringPtr param) {
-    server.enableInspector(kj::str(param));
+    server->enableInspector(kj::str(param));
   }
 
   void enableControl(kj::StringPtr param) {
     int fd = KJ_UNWRAP_OR(param.tryParseAs<uint>(),
         CLI_ERROR("Output value must be a file descriptor (non-negative integer)."));
-    server.enableControl(fd);
+    server->enableControl(fd);
   }
 
-  void diskCacheDir(kj::StringPtr pathStr) {
+  void setPackageDiskCacheDir(kj::StringPtr pathStr) {
     kj::Path path = fs->getCurrentPath().eval(pathStr);
     kj::Maybe<kj::Own<const kj::Directory>> dir = fs->getRoot().tryOpenSubdir(path, kj::WriteMode::MODIFY);
-    server.setDiskCacheRoot(kj::mv(dir));
+    server->setPackageDiskCacheRoot(kj::mv(dir));
+  }
+
+  void setPyodideDiskCacheDir(kj::StringPtr pathStr) {
+    kj::Path path = fs->getCurrentPath().eval(pathStr);
+    kj::Maybe<kj::Own<const kj::Directory>> dir = fs->getRoot().tryOpenSubdir(path, kj::WriteMode::MODIFY);
+    server->setPyodideDiskCacheRoot(kj::mv(dir));
   }
 
   void watch() {
@@ -1077,7 +1094,7 @@ public:
 
   void compile() {
     if (hadErrors) {
-      // Errors were already reported with context.error(), so contex.exit() will exit with a
+      // Errors were already reported with context.error(), so context.exit() will exit with a
       // non-zero code.
       context.exit();
     }
@@ -1124,13 +1141,13 @@ public:
             "binary with compiled-in config."));
 
         auto mapping = exe.file->mmap(0, exe.file->stat().size);
-        out.write(mapping.begin(), mapping.size());
+        out.write(mapping);
 
         // Pad to a word boundary if necessary.
         size_t n = mapping.size() % sizeof(capnp::word);
         if (n != 0) {
           kj::byte pad[sizeof(capnp::word)] = {0};
-          out.write(pad, sizeof(capnp::word) - n);
+          out.write(kj::arrayPtr(pad).slice(n));
         }
       }
 
@@ -1140,13 +1157,13 @@ public:
         uint64_t size = config.totalSize().wordCount + 1;
         static_assert(sizeof(uint64_t) + sizeof(COMPILED_MAGIC_SUFFIX) == sizeof(capnp::word) * 3);
         auto words = kj::heapArray<capnp::word>(size + 3);
-        memset(words.asBytes().begin(), 0, words.asBytes().size());
+        words.asBytes().fill(0);
         capnp::copyToUnchecked(config, words.slice(0, size));
 
         memcpy(&words[words.size() - 3], &size, sizeof(size));
         memcpy(&words[words.size() - 2], COMPILED_MAGIC_SUFFIX, sizeof(COMPILED_MAGIC_SUFFIX));
 
-        out.write(words.asBytes().begin(), words.asBytes().size());
+        out.write(words.asBytes());
       }
 
 #if !_WIN32
@@ -1171,7 +1188,7 @@ public:
   }
 
   template <typename Func>
-  [[noreturn]] void serveImpl(Func&& func) noexcept {
+  void serveImpl(Func&& func) noexcept {
     if (hadErrors) {
       // Can't start, stuff is broken.
       KJ_IF_SOME(w, watcher) {
@@ -1213,23 +1230,29 @@ public:
         maybePerfettoSession = kj::none;
       }
 #endif
-      context.exit();
+
+      if (getenv("KJ_CLEAN_SHUTDOWN") == nullptr) {
+        context.exit();
+      }
+
+      // Server maintains a reference to the v8 platform. Clean up before destroying the platform.
+      server = nullptr;
     }
   }
 
-  [[noreturn]] void serve() noexcept {
+  void serve() noexcept {
     serveImpl([&](jsg::V8System& v8System, config::Config::Reader config) {
 #if _WIN32
-      return server.run(v8System, config);
+      return server->run(v8System, config);
 #else
-      return server.run(v8System, config,
+      return server->run(v8System, config,
           // Gracefully drain when SIGTERM is received.
           io.unixEventPort.onSignal(SIGTERM).ignoreResult());
 #endif
     });
   }
 
-  [[noreturn]] void test() noexcept {
+  void test() {
     if (!noVerbose) {
       // Always turn on info logging when running tests so that uncaught exceptions are displayed.
       // TODO(beta): This can be removed once we improve our error logging story.
@@ -1240,7 +1263,7 @@ public:
     network.enableLoopback();
 
     serveImpl([&](jsg::V8System& v8System, config::Config::Reader config) {
-      return server.test(v8System, config,
+      return server->test(v8System, config,
           testServicePattern.map([](auto& s) -> kj::StringPtr { return s; }).orDefault("*"_kj),
           testEntrypointPattern.map([](auto& s) -> kj::StringPtr { return s; }).orDefault("*"_kj))
           .then([this](bool result) -> kj::Promise<void> {
@@ -1324,7 +1347,7 @@ private:
   kj::Maybe<kj::String> perfettoTraceCategories;
 #endif
 
-  Server server;
+  kj::Own<Server> server;
 
   // This is a randomly-generated 128-bit number that identifies when a binary has been compiled
   // with a specific config in order to run stand-alone.
@@ -1422,7 +1445,7 @@ private:
           return cnst.getShortDisplayName();
         };
         // TODO: this error message says "you must specify which one to use".
-        // This is not actaully possible? Either fix the error message to say
+        // This is not actually possible? Either fix the error message to say
         // **how** to specify which config object to use or tell user to define
         // exactly one top level Config constant.
         context.exitError(kj::str(
@@ -1466,8 +1489,8 @@ private:
     // We don't include a newline but rather a carriage return so that when the next
     // line is written, this line disappears, to reduce noise.
     // TODO(cleanup): Writing directly to stderr is super-hacky.
-    kj::StringPtr message = "Noticed configuration change, reloading shortly...\r";
-    kj::FdOutputStream(STDERR_FILENO).write(message.begin(), message.size());
+    auto message = "Noticed configuration change, reloading shortly...\r"_kjb;
+    kj::FdOutputStream(STDERR_FILENO).write(message);
 
     static auto const waitForResult = [](kj::Promise<void> promise,
                                          bool result = false) -> kj::Promise<bool> {
@@ -1491,6 +1514,7 @@ private:
 #endif
 };
 
+} // namespace
 }  // namespace workerd::server
 
 int main(int argc, char* argv[]) {

@@ -25,6 +25,10 @@
 using kj::byte;
 using kj::uint;
 
+#if _MSC_VER
+typedef long long ssize_t;
+#endif
+
 namespace workerd::jsg {
   kj::String stringifyHandle(v8::Local<v8::Value> value);
 }
@@ -756,6 +760,9 @@ public:
   inline bool operator==(const Data& other) const {
     return handle == other.handle;
   }
+  inline bool operator==(const v8::Local<v8::Data>& other) const {
+    return handle == other;
+  }
 
 private:
   // The isolate with which the handles below are associated.
@@ -828,6 +835,9 @@ public:
   inline bool operator==(const V8Ref& other) const {
     return Data::operator==(other);
   }
+  inline bool operator==(const v8::Local<T>& other) const {
+    return Data::operator==(other);
+  }
 
   template <typename U>
   V8Ref<U> cast(jsg::Lock& js);
@@ -847,7 +857,12 @@ class HashableV8Ref: public V8Ref<T> {
 public:
   HashableV8Ref(decltype(nullptr)): V8Ref<T>(nullptr), identityHash(0) {}
   HashableV8Ref(v8::Isolate* isolate, v8::Local<T> handle)
-      : V8Ref<T>(isolate, handle), identityHash(handle->GetIdentityHash()) {}
+      // TODO(perf): It's not clear if V8's `GetIdentityHash()` is intended to return uniform
+      //   results as required for KJ hashing, so we pass it to `kj::hashCode()` to further hash
+      //   it. This may be unnecessary. Note that there are several other call sites of
+      //   `GetIdentityHash()` which do the same -- if we decide we don't need this we should fix
+      //   all of them.
+      : V8Ref<T>(isolate, handle), identityHash(kj::hashCode(handle->GetIdentityHash())) {}
   HashableV8Ref(HashableV8Ref&& other) = default;
   HashableV8Ref& operator=(HashableV8Ref&& other) = default;
   KJ_DISALLOW_COPY(HashableV8Ref);
@@ -1461,7 +1476,7 @@ class Constructor;
 //
 // If the type T is GC visitable (i.e. it is a type that you could pass to GcVisitor::visit()),
 // then the system will arrange to correctly visit it when the T is wrapped in a Promise.
-// Additionally, if a continuation function passed to `.then()` is GC-visitable, it will similary
+// Additionally, if a continuation function passed to `.then()` is GC-visitable, it will similarly
 // be visited. JSG_VISITABLE_LAMBDA is a useful in conjunction with `.then()` (see jsg::Function,
 // above).
 //
@@ -1476,13 +1491,13 @@ class Constructor;
 // never resolve). This is a convenience so that method implementations that return promises do
 // not need to carefully capture a reference to `JSG_THIS`.
 //
-// You can construct an immediate Promise value using jsg::resolvedPromise() and
-// jsg::rejectedPromise() (see below).
+// You can construct an immediate Promise value using js.resolvedPromise() and
+// js.rejectedPromise() (see below).
 //
 // You can also create a promise/resolver pair:
 //
 //     auto [promise, resolver] = js.newPromiseAndResolver<kj::String>();
-//     resolver.resolve(kj::str(foo));
+//     resolver.resolve(js, kj::str(foo));
 //
 // The Promise exposes a markAsHandled() API that will mark JavaScript Promise such that rejections
 // are not reported to the isolate's unhandled rejection tracking mechanisms. Importantly, any then
@@ -1557,10 +1572,15 @@ using ReturnType = typename ReturnType_<Func, T, passLock>::Type;
 // Convenience template to produce a promise for the result of calling a function with the given
 // parameter type. This wraps the function's result type in `jsg::Promise` UNLESS the function
 // already returns a `jsg::Promise`, in which case the type is unchanged.
+// TODO(cleanup): The passLock = false variation is currently only used for js.evalNow().
+// It would be nice to refactor that a bit so we can clean up this template and simplify.
 template <typename Func, typename Param, bool passLock>
 using PromiseForResult = Promise<RemovePromise<ReturnType<Func, Param, passLock>>>;
 
 class ModuleRegistry;
+namespace modules {
+class ModuleRegistry;
+};
 
 // All types declared with JSG_RESOURCE_TYPE which are intended to be used as the global object
 // must inherit jsg::ContextGlobal, in addition to inheriting jsg::Object
@@ -1595,9 +1615,11 @@ public:
   static_assert(std::is_base_of_v<ContextGlobal, T>,
       "context global type must extend jsg::ContextGlobal");
 
-  JsContext(v8::Local<v8::Context> handle, Ref<T> object)
+  JsContext(v8::Local<v8::Context> handle, Ref<T> object,
+            kj::Maybe<kj::Own<void>> maybeNewRegistryHandle = kj::none)
       : handle(handle->GetIsolate(), handle),
-        object(kj::mv(object)) {}
+        object(kj::mv(object)),
+        maybeNewRegistryHandle(kj::mv(maybeNewRegistryHandle)) {}
 
   JsContext(JsContext&&) = default;
   KJ_DISALLOW_COPY(JsContext);
@@ -1613,6 +1635,7 @@ public:
 private:
   v8::Global<v8::Context> handle;
   Ref<T> object;
+  kj::Maybe<kj::Own<void>> maybeNewRegistryHandle;
 };
 
 class BufferSource;
@@ -2021,6 +2044,38 @@ class JsMessage;
   JS_TYPE_CLASSES(V)
 #undef V
 
+class DOMException;
+
+// RAII class to adjust the amount of external memory attributed to an isolate.
+// The adjustment will be automatically decremented when the object is destroyed.
+// The allocation amount can be adjusted up or down during the lifetime of an object.
+class ExternalMemoryAdjustment final {
+public:
+  ExternalMemoryAdjustment() = default;
+  ExternalMemoryAdjustment(v8::Isolate* isolate, size_t amount);
+  ExternalMemoryAdjustment(ExternalMemoryAdjustment&& other);
+  ExternalMemoryAdjustment& operator=(ExternalMemoryAdjustment&& other);
+  KJ_DISALLOW_COPY(ExternalMemoryAdjustment);
+  ~ExternalMemoryAdjustment() noexcept(false);
+
+  // Adjust the amount of external memory report up or down.
+  void adjust(Lock&, ssize_t amount);
+
+  // Set a specific amount of external memory to be attributed, overriding
+  // the previous amount.
+  void set(Lock&, size_t amount);
+
+  inline v8::Isolate* getIsolate() const { return isolate; }
+
+  inline size_t getAmount() const { return amount; }
+
+private:
+  size_t amount = 0;
+  v8::Isolate* isolate = nullptr;
+
+  static void maybeDeferAdjustment(v8::Isolate* isolate, size_t amount);
+};
+
 // Represents an isolate lock, which allows the current thread to execute JavaScript code within
 // an isolate. A thread must lock an isolate -- obtaining an instance of `Lock` -- before it can
 // manipulate JavaScript objects or execute JavaScript code inside the isolate.
@@ -2063,6 +2118,15 @@ public:
   static Lock& from(v8::Isolate* v8Isolate) {
     return *reinterpret_cast<Lock*>(v8Isolate->GetData(2));
   }
+
+  // RAII construct that reports amount of external memory to be manually attributed to
+  // the isolate. When the returned ExtrernalMemoryAdjuster is dropped, the amount will
+  // be subtracted from the isolate's external memory accounting. If the adjuster is
+  // dropped while the isolate lock is not being held, the adjustment will be deferred
+  // until the next time the lock is held. The ExternalMemoryAdjustment itself can be
+  // moved and can be used to increment or decrement the amount of external memory
+  // held.
+  ExternalMemoryAdjustment getExternalMemoryAdjustment(int64_t amount);
 
   Value parseJson(kj::ArrayPtr<const char> data);
   Value parseJson(v8::Local<v8::String> text);
@@ -2289,8 +2353,13 @@ public:
   void setCaptureThrowsAsRejections(bool capture);
   void setCommonJsExportDefault(bool exportDefault);
 
+  void setNodeJsCompatEnabled();
+
   using Logger = void(Lock&, kj::StringPtr);
   void setLoggerCallback(kj::Function<Logger>&& logger);
+
+  using ErrorReporter = void(Lock&, kj::String, const JsValue&, const JsMessage&);
+  void setErrorReporterCallback(kj::Function<ErrorReporter>&& errorReporter);
 
   // ---------------------------------------------------------------------------
   // Misc. Stuff
@@ -2321,6 +2390,9 @@ public:
       return fn();
     }
   }
+
+  virtual Ref<DOMException> domException(kj::String name, kj::String message,
+      kj::Maybe<kj::String> stackValue = kj::none) = 0;
 
   // ====================================================================================
   JsObject global() KJ_WARN_UNUSED_RESULT;
@@ -2400,6 +2472,8 @@ public:
   void runMicrotasks();
   void terminateExecution();
 
+  virtual void reportError(const JsValue& value) = 0;
+
 private:
   // Mark the jsg::Lock as being disallowed from being passed as a parameter into
   // a kj promise coroutine. Note that this only blocks directly passing the Lock
@@ -2417,6 +2491,7 @@ private:
   ~Lock() noexcept(false);
 
   v8::Locker locker;
+  v8::Isolate::Scope isolateScope;
 
   void* previousData;
 
@@ -2560,4 +2635,3 @@ inline v8::Local<v8::Context> JsContext<T>::getHandle(Lock& js) {
 #include "function.h"
 #include "iterator.h"
 #include "jsvalue.h"
-#include "url.h"

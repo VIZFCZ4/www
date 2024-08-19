@@ -7,7 +7,8 @@
 #include <kj/encoding.h>
 
 #include <workerd/api/cache.h>
-#include <workerd/api/crypto.h>
+#include <workerd/api/crypto/crypto.h>
+#include <workerd/api/events.h>
 #include <workerd/api/scheduled.h>
 #include <workerd/api/system-streams.h>
 #include <workerd/api/trace.h>
@@ -456,33 +457,78 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(
         outcome = status;
       }
 
+      kj::String actorId;
+      KJ_SWITCH_ONEOF(actor.getId()) {
+        KJ_CASE_ONEOF(f, kj::Own<ActorIdFactory::ActorId>) {
+          actorId = f->toString();
+        }
+        KJ_CASE_ONEOF(s, kj::String) {
+          actorId = kj::str(s);
+        }
+      }
+
+      // We only want to retry against limits if it's a user error. By default let's check if the
+      // output gate is broken.
+      auto shouldRetryCountsAgainstLimits = !context.isOutputGateBroken();
+
       // We want to alert if we aren't going to count this alarm retry against limits
       if (auto desc = e.getDescription();
           !jsg::isTunneledException(desc) && !jsg::isDoNotLogException(desc)
           && context.isOutputGateBroken()) {
-        LOG_NOSENTRY(ERROR, "output lock broke during alarm execution", e);
+        LOG_NOSENTRY(ERROR, "output lock broke during alarm execution", actorId, e);
+      } else if (context.isOutputGateBroken()) {
+        // We don't usually log these messages, but it's useful to know the real reason we failed
+        // to correctly investigate stuck alarms.
+        LOG_NOSENTRY(ERROR, "output lock broke during alarm execution without an interesting error description", actorId, e);
+        if (e.getDetail(jsg::EXCEPTION_IS_USER_ERROR) != kj::none) {
+          // The handler failed because the user overloaded the object. It's their fault, we'll not
+          // retry forever.
+          shouldRetryCountsAgainstLimits = true;
+        }
       }
       return WorkerInterface::AlarmResult {
         .retry = true,
-        .retryCountsAgainstLimit = !context.isOutputGateBroken(),
+        .retryCountsAgainstLimit = shouldRetryCountsAgainstLimits,
         .outcome = outcome
       };
     })
     .then([&context](WorkerInterface::AlarmResult result) -> kj::Promise<WorkerInterface::AlarmResult> {
       return context.waitForOutputLocks().then([result]() {
         return kj::mv(result);
-      }, [](kj::Exception&& e) {
+      }, [&context](kj::Exception&& e) {
+        auto& actor = KJ_ASSERT_NONNULL(context.getActor());
+        kj::String actorId;
+        KJ_SWITCH_ONEOF(actor.getId()) {
+          KJ_CASE_ONEOF(f, kj::Own<ActorIdFactory::ActorId>) {
+            actorId = f->toString();
+          }
+          KJ_CASE_ONEOF(s, kj::String) {
+            actorId = kj::str(s);
+          }
+        }
+        // We only want to retry against limits if it's a user error. By default let's assume it's our
+        // fault.
+        auto shouldRetryCountsAgainstLimits = false;
         if (auto desc = e.getDescription();
             !jsg::isTunneledException(desc) && !jsg::isDoNotLogException(desc)) {
           if (isInterestingException(e)) {
             LOG_EXCEPTION("alarmOutputLock"_kj, e);
           } else {
-            LOG_NOSENTRY(ERROR, "output lock broke after executing alarm", e);
+            LOG_NOSENTRY(ERROR, "output lock broke after executing alarm", actorId, e);
+          }
+        } else {
+          // We don't usually log these messages, but it's useful to know the real reason we failed
+          // to correctly investigate stuck alarms.
+          LOG_NOSENTRY(ERROR, "output lock broke after executing alarm without an interesting error description", actorId, e);
+          if (e.getDetail(jsg::EXCEPTION_IS_USER_ERROR) != kj::none) {
+            // The handler failed because the user overloaded the object. It's their fault, we'll not
+            // retry forever.
+            shouldRetryCountsAgainstLimits = true;
           }
         }
         return WorkerInterface::AlarmResult {
           .retry = true,
-          .retryCountsAgainstLimit = false,
+          .retryCountsAgainstLimit = shouldRetryCountsAgainstLimits,
           .outcome = EventOutcome::EXCEPTION
         };
       });
@@ -758,6 +804,74 @@ jsg::Promise<jsg::Ref<Response>> ServiceWorkerGlobalScope::fetch(
   return fetchImpl(js, kj::none, kj::mv(requestOrUrl), kj::mv(requestInit));
 }
 
+void ServiceWorkerGlobalScope::reportError(jsg::Lock& js, jsg::JsValue error) {
+  // Per the spec, we are going to first emit an error event on the global object.
+  // If that event is not prevented, we will log the error to the console. Note
+  // that we do not throw the error at all.
+  auto message = v8::Exception::CreateMessage(js.v8Isolate, error);
+  auto event = jsg::alloc<ErrorEvent>(kj::str("error"),
+      ErrorEvent::ErrorEventInit {
+        .message = kj::str(message->Get()),
+        .filename = kj::str(message->GetScriptResourceName()),
+        .lineno = jsg::check(message->GetLineNumber(js.v8Context())),
+        .colno = jsg::check(message->GetStartColumn(js.v8Context())),
+        .error = jsg::JsRef(js, error)
+      });
+  if (dispatchEventImpl(js, kj::mv(event))) {
+    js.reportError(error);
+  }
+}
+
+namespace {
+jsg::JsValue resolveFromRegistry(jsg::Lock& js, kj::StringPtr specifier) {
+  auto moduleRegistry = jsg::ModuleRegistry::from(js);
+  if (moduleRegistry == nullptr) {
+    // TODO: Return the known built-in instead? This gets a bit tricky as we currently
+    // have no mechanism defined for accessing and caching the built-in module without
+    // the module registry. Should we even support this case at all? Without the module
+    // registry the user can't access the other importable modules anyway. For now, just
+    // returning undefined in this case seems the most appropriate.
+    return js.undefined();
+  }
+
+  auto spec = kj::Path::parse(specifier);
+  auto& info = JSG_REQUIRE_NONNULL(moduleRegistry->resolve(js, spec), Error,
+                                   kj::str("No such module: ", specifier));
+  auto module = info.module.getHandle(js);
+  jsg::instantiateModule(js, module);
+
+  auto handle = jsg::check(module->Evaluate(js.v8Context()));
+  KJ_ASSERT(handle->IsPromise());
+  auto prom = handle.As<v8::Promise>();
+  KJ_ASSERT(prom->State() != v8::Promise::PromiseState::kPending);
+  if (module->GetStatus() == v8::Module::kErrored) {
+    jsg::throwTunneledException(js.v8Isolate, module->GetException());
+  }
+  return jsg::JsValue(js.v8Get(module->GetModuleNamespace().As<v8::Object>(), "default"_kj));
+}
+}  // namespace
+
+jsg::JsValue ServiceWorkerGlobalScope::getBuffer(jsg::Lock& js) {
+  KJ_ASSERT(FeatureFlags::get(js).getNodeJsCompatV2());
+  auto value = resolveFromRegistry(js, "node:buffer"_kj);
+  auto obj = JSG_REQUIRE_NONNULL(value.tryCast<jsg::JsObject>(), TypeError,
+                                 "Invalid node:buffer implementation");
+  // Unlike the getProcess() case below, this getter is returning an object that
+  // is exported by the node:buffer module and not the module itself, so we need
+  // this additional get to the grab the reference to the thing we're actually
+  // returning.
+  auto buffer = obj.get(js, "Buffer"_kj);
+  JSG_REQUIRE(buffer.isFunction(), TypeError, "Invalid node:buffer implementation");
+  return buffer;
+}
+
+jsg::JsValue ServiceWorkerGlobalScope::getProcess(jsg::Lock& js) {
+  KJ_ASSERT(FeatureFlags::get(js).getNodeJsCompatV2());
+  auto value = resolveFromRegistry(js, "node:process"_kj);
+  JSG_REQUIRE(value.isObject(), TypeError, "Invalid node:process implementation");
+  return value;
+}
+
 double Performance::now() {
   // We define performance.now() for compatibility purposes, but due to spectre concerns it
   // returns exactly what Date.now() returns.
@@ -799,6 +913,57 @@ bool Navigator::sendBeacon(jsg::Lock& js, kj::String url,
 
   // We cannot schedule a beacon to be sent outside of a request context.
   return false;
+}
+
+// ======================================================================================
+
+Immediate::Immediate(IoContext& context, TimeoutId timeoutId)
+    : contextRef(context.getWeakRef()),
+      timeoutId(timeoutId) {}
+
+void Immediate::dispose() {
+  contextRef->runIfAlive([&](IoContext& context) {
+    context.clearTimeoutImpl(timeoutId);
+  });
+}
+
+jsg::Ref<Immediate> ServiceWorkerGlobalScope::setImmediate(
+    jsg::Lock& js,
+    jsg::Function<void(jsg::Arguments<jsg::Value>)> function,
+    jsg::Arguments<jsg::Value> args) {
+
+  // This is an approximation of the Node.js setImmediate global API.
+  // We implement it in terms of setting a 0 ms timeout. This is not
+  // how Node.js does it so there will be some edge cases where the
+  // timing of the callback will differ relative to the equivalent
+  // operations in Node.js. For the vast majority of cases, users
+  // really shouldn't be able to tell a difference. It would likely
+  // only be somewhat pathological edge cases that could be affected
+  // by the differences. Unfortunately, changing this later to match
+  // Node.js would likely be a breaking change for some users that
+  // would require a compat flag... but that's ok for now?
+
+  auto& context = IoContext::current();
+  auto fn = [function=kj::mv(function),
+             args=kj::mv(args),
+             context=jsg::AsyncContextFrame::currentRef(js)](jsg::Lock& js) mutable {
+    jsg::AsyncContextFrame::Scope scope(js, context);
+    function(js, kj::mv(args));
+  };
+  auto timeoutId = context.setTimeoutImpl(
+      timeoutIdGenerator,
+      /* repeats = */ false,
+      [function = kj::mv(fn)](jsg::Lock& js) mutable {
+    function(js);
+  }, 0);
+  return jsg::alloc<Immediate>(context, timeoutId);
+}
+
+void ServiceWorkerGlobalScope::clearImmediate(
+    kj::Maybe<jsg::Ref<Immediate>> maybeImmediate) {
+  KJ_IF_SOME(immediate, maybeImmediate) {
+    immediate->dispose();
+  }
 }
 
 } // namespace workerd::api

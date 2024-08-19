@@ -124,6 +124,8 @@ public:
                                         getSearch().size());
   }
 
+  static kj::Array<kj::byte> percentDecode(kj::ArrayPtr<const kj::byte> input);
+
 private:
   Url(kj::Own<void> inner);
   kj::Own<void> inner;
@@ -350,9 +352,8 @@ private:
 
   static Result<UrlPattern> tryCompileInit(UrlPattern::Init init, const CompileOptions& options);
 };
+}  // namespace workerd::jsg
 
 // Append _url to a string literal to create a parsed URL. An assert will be triggered
 // if the value cannot be parsed successfully.
-const Url operator "" _url(const char* str, size_t size) KJ_WARN_UNUSED_RESULT;
-
-}  // namespace workerd::jsg
+const workerd::jsg::Url operator "" _url(const char* str, size_t size) KJ_WARN_UNUSED_RESULT;

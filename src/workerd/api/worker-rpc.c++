@@ -339,7 +339,7 @@ void JsRpcPromise::resolve(jsg::Lock& js, jsg::JsValue result) {
   if (state.is<Pending>()) {
     state = Resolved {
       .result = jsg::Value(js.v8Isolate, result),
-      .ioCtx = IoContext::current().getWeakRef()
+      .ctxCheck = IoContext::current().addObject(*this),
     };
   } else {
     // We'd better dispose this.
@@ -370,7 +370,9 @@ rpc::JsRpcTarget::Client JsRpcPromise::getClientForOneCall(
       return pending.pipeline->getCallPipeline();
     }
     KJ_CASE_ONEOF(resolved, Resolved) {
-      IoContext::requireCurrentOrThrowJs(*resolved.ioCtx);
+      // Dereference `ctxCheck` just to verify we're running in the correct context. (If not,
+      // this will throw.)
+      *resolved.ctxCheck;
 
       // A value was already returned, and we closed the original RPC pipeline. But the application
       // kept the promise around and is still trying to pipeline on it. What do we do?
@@ -467,6 +469,12 @@ JsRpcPromiseAndPipleine callImpl(
 
       auto& ioContext = IoContext::current();
 
+      KJ_IF_SOME(lock, ioContext.waitForOutputLocksIfNecessary()) {
+        // Replace the client with a promise client that will delay thecall until the output gate
+        // is open.
+        client = lock.then([client = kj::mv(client)]() mutable { return kj::mv(client); });
+      }
+
       auto builder = client.callRequest();
 
       // This code here is slightly overcomplicated in order to avoid pushing anything to the
@@ -519,8 +527,6 @@ JsRpcPromiseAndPipleine callImpl(
         builder.getOperation().setGetProperty();
       }
 
-      StreamSinkFulfiller resultsStreamSinkFulfiller;
-
       // Unfortunately, we always have to send a `resultsStreamSink` because we don't know until
       // after the call completes whether or not it will return any streams. If it's unused,
       // though, it should only be a couple allocations.
@@ -539,6 +545,8 @@ JsRpcPromiseAndPipleine callImpl(
       // here, which is filled in later on to point at the JsRpcPromise, if and when one is created.
       auto weakRef = kj::atomicRefcounted<JsRpcPromise::WeakRef>();
 
+      // RemotePromise lets us consume its pipeline and promise portions independently; we consume
+      // the promise here and we consume the pipeline below, both via kj::mv().
       auto jsPromise = ioContext.awaitIo(js, kj::mv(callResult),
             [weakRef = kj::atomicAddRef(*weakRef), resultStreamSink = kj::mv(resultStreamSink)]
             (jsg::Lock& js, capnp::Response<rpc::JsRpcTarget::CallResults> response) mutable
@@ -939,9 +947,9 @@ public:
     // object's lifetime is that of the RPC call, but in reality they are refcounted under the
     // hood. Since well be executing the call in the JS microtask queue, we have no ability to
     // actually cancel execution if a cancellation arrives over RPC, and at the end of that
-    // execution we're going to accell the call context to write the results. We could invent some
+    // execution we're going to access the call context to write the results. We could invent some
     // complicated way to skip initializing results in the case the call has been canceled, but
-    // it's easier and safer to just grap a refcount on the call context object itself, which
+    // it's easier and safer to just grab a refcount on the call context object itself, which
     // fully protects us. So... do that.
     auto ownCallContext = capnp::CallContextHook::from(callContext).addRef();
 
@@ -1052,7 +1060,13 @@ public:
           js.throwException(kj::mv(error));
         })));
 
-        return result;
+        if (ctx.hasOutputGate()) {
+          return result.then([weakIoContext = weakIoContext->addRef()]() mutable {
+            return KJ_REQUIRE_NONNULL(weakIoContext->tryGet()).waitForOutputLocks();
+          });
+        } else {
+          return result;
+        }
       };
 
       switch (op.which()) {
@@ -1085,6 +1099,17 @@ public:
       }
 
       KJ_FAIL_ASSERT("unknown JsRpcTarget::CallParams::Operation", (uint)op.which());
+    }).catch_([](kj::Exception&& e) {
+      if (jsg::isTunneledException(e.getDescription())) {
+        // Annotate exceptions in RPC worker calls as remote exceptions.
+        auto description = jsg::stripRemoteExceptionPrefix(e.getDescription());
+        if (!description.startsWith("remote.")) {
+          // If we already were annotated as remote from some other worker entrypoint, no point
+          // adding an additional prefix.
+          e.setDescription(kj::str("remote.", description));
+        }
+      }
+      kj::throwFatalException(kj::mv(e));
     });
 
     // We need to make sure this RPC is canceled if the IoContext is destroyed. To accomplish that,
@@ -1139,7 +1164,7 @@ private:
       jsg::JsObject object,
       rpc::JsRpcTarget::CallParams::Reader callParams,
       bool allowInstanceProperties) {
-    auto prototypeOfObject = KJ_ASSERT_NONNULL(js.obj().getPrototype().tryCast<jsg::JsObject>());
+    auto prototypeOfObject = KJ_ASSERT_NONNULL(js.obj().getPrototype(js).tryCast<jsg::JsObject>());
 
     // Get the named property of `object`.
     auto getProperty = [&](kj::StringPtr kjName) {
@@ -1206,7 +1231,7 @@ private:
             }
 
             // Decide whether the new object is a suitable RPC target.
-            if (object.getPrototype() == prototypeOfObject) {
+            if (object.getPrototype(js) == prototypeOfObject) {
               // Yes. It's a simple object.
               allowInstanceProperties = true;
             } else if (object.isInstanceOf<JsRpcTarget>(js)) {
@@ -1376,14 +1401,15 @@ class TransientJsRpcTarget final: public JsRpcTargetBase {
 public:
   TransientJsRpcTarget(jsg::Lock& js, IoContext& ioCtx, jsg::JsObject object,
                        bool allowInstanceProperties = false)
-      : JsRpcTargetBase(ioCtx), object(js, object),
+      : JsRpcTargetBase(ioCtx),
+        handles(ioCtx.addObjectReverse(kj::heap<Handles>(js, object, kj::none))),
         allowInstanceProperties(allowInstanceProperties),
         pendingEvent(ioCtx.registerPendingEvent()) {
     // Check for the existence of a dispose function now so that the destructor doesn't have to
     // take an isolate lock if there isn't one.
     auto getResult = object.get(js, js.symbolDispose());
     if (getResult.isFunction()) {
-      dispose.emplace(js.v8Isolate, v8::Local<v8::Value>(getResult).As<v8::Function>());
+      handles->dispose.emplace(js.v8Isolate, v8::Local<v8::Value>(getResult).As<v8::Function>());
     }
   }
 
@@ -1391,20 +1417,18 @@ public:
   TransientJsRpcTarget(jsg::Lock& js, IoContext& ioCtx, jsg::JsObject object,
                        kj::Maybe<v8::Local<v8::Function>> dispose,
                        bool allowInstanceProperties = false)
-      : JsRpcTargetBase(ioCtx), object(js, object),
-        dispose(dispose.map([&](v8::Local<v8::Function> func) {
-          return jsg::V8Ref<v8::Function>(js.v8Isolate, func);
-        })),
+      : JsRpcTargetBase(ioCtx),
+        handles(ioCtx.addObjectReverse(kj::heap<Handles>(js, object, dispose))),
         allowInstanceProperties(allowInstanceProperties),
         pendingEvent(ioCtx.registerPendingEvent()) {}
 
   ~TransientJsRpcTarget() noexcept(false) {
     // If we have a disposer, and the I/O context is not already destroyed, arrange to call the
     // disposer.
-    KJ_IF_SOME(d, dispose) {
-      KJ_IF_SOME(ctx, weakIoContext->tryGet()) {
+    KJ_IF_SOME(ctx, weakIoContext->tryGet()) {
+      KJ_IF_SOME(d, handles->dispose) {
         ctx.addTask(ctx.run(
-            [dispose = kj::mv(d), object = kj::mv(object)](Worker::Lock& lock) mutable {
+            [dispose = kj::mv(d), object = kj::mv(handles->object)](Worker::Lock& lock) mutable {
           jsg::Lock& js = lock;
           jsg::check(dispose.getHandle(js)->Call(
               js.v8Context(), object.getHandle(js), 0, nullptr));
@@ -1415,15 +1439,30 @@ public:
 
   TargetInfo getTargetInfo(Worker::Lock& lock, IoContext& ioCtx) override {
     return {
-      .target = object.getHandle(lock),
+      .target = handles->object.getHandle(lock),
       .envCtx = kj::none,
       .allowInstanceProperties = allowInstanceProperties,
     };
   }
 
 private:
-  jsg::JsRef<jsg::JsObject> object;
-  kj::Maybe<jsg::V8Ref<v8::Function>> dispose;
+  struct Handles {
+    jsg::JsRef<jsg::JsObject> object;
+    kj::Maybe<jsg::V8Ref<v8::Function>> dispose;
+
+    Handles(jsg::Lock& js, jsg::JsObject object, kj::Maybe<v8::Local<v8::Function>> dispose)
+        : object(js, object),
+          dispose(dispose.map([&](v8::Local<v8::Function> func) {
+            return jsg::V8Ref<v8::Function>(js.v8Isolate, func);
+          })) {}
+  };
+
+  // This object could outlive the IoContext (that's why `JsRpcTargetBase` holds a `WeakRef` to the
+  // context). That means hypothetically it could also outlive the isolate. We therefore need to
+  // place these handles in a `ReverseIoOwn` so that if the `IoContext` dies before we do, they are
+  // dropped at that point.
+  ReverseIoOwn<Handles> handles;
+
   bool allowInstanceProperties;
 
   // An RpcTarget could receive a new call (in the existing IoContext) at any time, therefore
@@ -1467,7 +1506,7 @@ static MakeCallPipeline::Result makeCallPipeline(jsg::Lock& js, jsg::JsValue val
       return MakeCallPipeline::NonPipelinable();
     });
 
-    if (obj.getPrototype() == js.obj().getPrototype()) {
+    if (obj.getPrototype(js) == js.obj().getPrototype(js)) {
       // It's a plain object.
       kj::Maybe<v8::Local<v8::Function>> maybeDispose;
       jsg::JsValue disposeProperty = obj.get(js, js.symbolDispose());
@@ -1727,7 +1766,7 @@ kj::Promise<WorkerInterface::CustomEvent::Result>
   rpc::JsRpcTarget::Client cap = sent.getTopLevel();
 
   cap = capnp::membrane(
-      sent.getTopLevel(),
+      kj::mv(cap),
       kj::refcounted<RevokerMembrane>(kj::mv(revokePaf.promise)));
 
   // When no more capabilities exist on the connection, we want to proactively cancel the RPC.
@@ -1742,7 +1781,7 @@ kj::Promise<WorkerInterface::CustomEvent::Result>
   //   less ugly?
   auto completionPaf = kj::newPromiseAndFulfiller<void>();
   cap = capnp::membrane(
-      sent.getTopLevel(),
+      kj::mv(cap),
       kj::refcounted<CompletionMembrane>(kj::mv(completionPaf.fulfiller)));
 
   this->capFulfiller->fulfill(kj::mv(cap));
@@ -1790,6 +1829,20 @@ jsg::Ref<DurableObjectBase> DurableObjectBase::constructor(
   self.set(js, "ctx", jsg::JsValue(args[0]));
   self.set(js, "env", jsg::JsValue(args[1]));
   return jsg::alloc<DurableObjectBase>();
+}
+
+jsg::Ref<Workflow> Workflow::constructor(
+    const v8::FunctionCallbackInfo<v8::Value>& args,
+    jsg::Ref<ExecutionContext> ctx, jsg::JsObject env) {
+  // HACK: We take `FunctionCallbackInfo` mostly so that we can set properties directly on
+  //   `This()`. There ought to be a better way to get access to `this` in a constructor.
+  //   We *also* declare `ctx` and `env` params more explicitly just for the sake of type checking.
+  jsg::Lock& js = jsg::Lock::from(args.GetIsolate());
+
+  jsg::JsObject self(args.This());
+  self.set(js, "ctx", jsg::JsValue(args[0]));
+  self.set(js, "env", jsg::JsValue(args[1]));
+  return jsg::alloc<Workflow>();
 }
 
 }; // namespace workerd::api

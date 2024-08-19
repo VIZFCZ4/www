@@ -20,7 +20,7 @@
 #include <workerd/io/compatibility-date.h>
 #include <workerd/io/io-context.h>
 #include <workerd/io/worker.h>
-#include <time.h>
+#include <ctime>
 #include <openssl/bio.h>
 #include <openssl/pem.h>
 #include <workerd/io/actor-cache.h>
@@ -33,8 +33,9 @@
 #include <workerd/util/use-perfetto-categories.h>
 #include <workerd/api/worker-rpc.h>
 #include "workerd-api.h"
-#include "workerd/io/hibernation-manager.h"
-#include <stdlib.h>
+#include <workerd/api/pyodide/pyodide.h>
+#include <workerd/io/hibernation-manager.h>
+#include <cstdlib>
 
 namespace workerd::server {
 
@@ -86,7 +87,7 @@ static kj::String httpTime(kj::Date date) {
   struct tm tm;
   KJ_ASSERT(gmtime_r(&time, &tm) == &tm);
 #endif
-  char buf[256];
+  char buf[256]{};
   size_t n = strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm);
   KJ_ASSERT(n > 0);
   return kj::heapString(buf, n);
@@ -120,6 +121,10 @@ static kj::Vector<char> escapeJsonString(kj::StringPtr text) {
 
   return escaped;
 }
+
+// TODO(now): Temporary
+class ServerResolveObserver final : public jsg::ResolveObserver {};
+ServerResolveObserver serverResolveObserver;
 
 }  // namespace
 
@@ -944,7 +949,7 @@ private:
           // (especially with HEAD requests) is quite useful.
           // TODO(cleanup): Arguably the implementation of `fetch()` should be adjusted so that
           //   if no `Content-Length` header is returned, but the body size is known via the KJ
-          //   HTTP API, then the header shoud be filled in automatically. Unclear if this is safe
+          //   HTTP API, then the header should be filled in automatically. Unclear if this is safe
           //   to change without a compat flag.
 
           if (method == kj::HttpMethod::HEAD) {
@@ -1011,7 +1016,7 @@ private:
 
             auto content = kj::str('[', kj::strArray(jsonEntries, ","), ']');
 
-            co_return co_await out->write(content.begin(), content.size());
+            co_return co_await out->write(content.asBytes());
           }
         }
         default:
@@ -1128,7 +1133,7 @@ kj::Own<Server::Service> Server::makeDiskDirectoryService(
 // This class provides a small thread-safe interface to the InspectorService so <name>:<isolate>
 // mappings can be added after the InspectorService has started.
 //
-// The CloudFlare devtools only show the first service in workerd configuration. This service
+// The Cloudflare devtools only show the first service in workerd configuration. This service
 // is always contains a users code. However, in packaging user code wrangler may add
 // additional services that also have code. If using Chrome devtools to inspect a workerd,
 // instance all services are visible and can be debugged.
@@ -1160,10 +1165,12 @@ private:
 class Server::InspectorService final: public kj::HttpService, public kj::HttpServerErrorHandler {
 public:
   InspectorService(
+      ExecutorNotifierPair isolateThreadExecutorNotifierPair,
       kj::Timer& timer,
       kj::HttpHeaderTable::Builder& headerTableBuilder,
       InspectorServiceIsolateRegistrar& registrar)
-      : timer(timer),
+      : isolateThreadExecutorNotifierPair(kj::mv(isolateThreadExecutorNotifierPair)),
+        timer(timer),
         headerTable(headerTableBuilder.getFutureTable()),
         server(timer, headerTable, *this, kj::HttpServerSettings {
           .errorHandler = *this
@@ -1221,13 +1228,14 @@ public:
             auto webSocket = response.acceptWebSocket(responseHeaders);
             kj::Duration timerOffset = 0 * kj::MILLISECONDS;
             try {
-              co_return co_await ref->attachInspector(timer, timerOffset, *webSocket);
+              co_return co_await ref->attachInspector(
+                  isolateThreadExecutorNotifierPair.clone(), timer, timerOffset, *webSocket);
             } catch (...) {
               auto exception = kj::getCaughtExceptionAsKj();
               if (exception.getType() == kj::Exception::Type::DISCONNECTED) {
                 // This likely just means that the inspector client was closed.
                 // Nothing to do here but move along.
-                KJ_LOG(INFO, kj::str("Inspector client detached [", id, "]"));
+                KJ_LOG(INFO, "Inspector client detached"_kj);
                 co_return;
               } else {
                 // If it's any other kind of error, propagate it!
@@ -1260,7 +1268,7 @@ public:
       responseHeaders.set(kj::HttpHeaderId::CONTENT_TYPE, MimeType::JSON.toString());
       auto content = kj::str("{\"Browser\": \"workerd\", \"Protocol-Version\": \"1.3\" }");
       auto out = response.send(200, "OK", responseHeaders, content.size());
-      co_return co_await out->write(content.begin(), content.size());
+      co_return co_await out->write(content.asBytes());
     } else if (url.endsWith("/json") ||
                url.endsWith("/json/list") ||
                url.endsWith("/json/list?for_tab")) {
@@ -1312,8 +1320,7 @@ public:
       auto content = kj::str('[', kj::strArray(entries, ","), ']');
 
       auto out = response.send(200, "OK", responseHeaders, content.size());
-      co_return co_await out->write(content.begin(), content.size()).attach(kj::mv(content),
-                                    kj::mv(out));
+      co_return co_await out->write(content.asBytes()).attach(kj::mv(content), kj::mv(out));
     }
 
     co_return co_await response.sendError(500, "Not yet implemented", responseHeaders);
@@ -1340,6 +1347,7 @@ public:
   }
 
 private:
+  ExecutorNotifierPair isolateThreadExecutorNotifierPair;
   kj::Timer& timer;
   kj::HttpHeaderTable& headerTable;
   kj::HashMap<kj::String, kj::Own<const Worker::Isolate::WeakIsolateRef>> isolates;
@@ -1617,7 +1625,7 @@ public:
           a->shutdown(0, KJ_EXCEPTION(DISCONNECTED,
               "broken.dropped; Actor freed due to inactivity"));
         }
-        // Destory the last strong Worker::Actor reference.
+        // Destroy the last strong Worker::Actor reference.
         actor = kj::none;
       }
 
@@ -1854,6 +1862,10 @@ public:
                 auto db = kj::heap<SqliteDatabase>(*as,
                     kj::Path({d.uniqueKey, kj::str(idPtr, ".sqlite")}),
                     kj::WriteMode::CREATE | kj::WriteMode::MODIFY | kj::WriteMode::CREATE_PARENT);
+
+                // Before we do anything, make sure the database is in WAL mode.
+                db->run("PRAGMA journal_mode=WAL;");
+
                 return kj::heap<ActorSqlite>(kj::mv(db), outputGate,
                     []() -> kj::Promise<void> { return kj::READY_NOW; },
                     *sqliteHooks).attach(kj::mv(sqliteHooks));
@@ -1900,6 +1912,18 @@ public:
             });
             entry.value = onActorBroken(actorRef->onBroken(), *actorContainer)
                 .eagerlyEvaluate([](kj::Exception&& e) { KJ_LOG(ERROR, e); });
+
+            KJ_IF_SOME(ref, actorContainer->getContainerRef()) {
+              // Although we didn't have a Worker::Actor, this ActorContainer _previously_ had one,
+              // and there's still at least one client with an open connection. We should continue
+              // to use our existing ActorContainerRef, otherwise we will have two or more separate
+              // refcounted ActorContainerRef's tracking the same ActorContainer. This would likely
+              // result in memory corruption because the ActorContainer's `containerRef` would
+              // lose access to one of the ActorContainerRef's.
+              return GetActorResult {
+                  .actor = actorRef->addRef(),
+                  .ref = ref.addRef() };
+            }
 
             // `hasClients()` will return true now, preventing cleanupLoop from evicting us.
             return GetActorResult {
@@ -2097,7 +2121,7 @@ private:
     auto rcClient = kj::refcounted<RefcountedWrapper>(kj::mv(client));
     auto request = attachToRequest(kj::mv(innerReq), kj::mv(rcClient));
 
-    co_await request.body->write(requestJson.begin(), requestJson.size())
+    co_await request.body->write(requestJson.asBytes())
           .attach(kj::mv(requestJson), kj::mv(request.body));
     auto response = co_await request.response;
 
@@ -2167,7 +2191,7 @@ private:
   void newAnalyticsEngineRequest() override {}
   kj::Promise<void> limitDrain() override { return kj::NEVER_DONE; }
   kj::Promise<void> limitScheduled() override { return kj::NEVER_DONE; }
-  kj::Duration getAlarmLimit() override { return 0 * kj::MILLISECONDS; }
+  kj::Duration getAlarmLimit() override { return 15 * kj::MINUTES; }
   size_t getBufferingLimit() override { return kj::maxValue; }
   kj::Maybe<EventOutcome> getLimitsExceeded() override { return kj::none; }
   kj::Promise<void> onLimitsExceeded() override { return kj::NEVER_DONE; }
@@ -2580,6 +2604,23 @@ kj::Own<Server::Service> Server::makeWorker(kj::StringPtr name, config::Worker::
       }
       set->insert(kj::str(type));
     }
+
+    void addEmptyExport(kj::Maybe<kj::StringPtr> exportName) override {
+      // Even though the export has no handlers, we want to add it to the namedEntrypoints map,
+      // so that other parts of the config are allowed to refer to this entrypoint. Otherwise,
+      // if anything in the config refers to it, we'll treat the config as invalid. Of course, if
+      // any actual requests are sent to an empty handler, they will fail at runtime.
+      //
+      // The reason we want the config to be considered valid even if it refers to empty
+      // entrypoints is so that it's safe to auto-generate a config that binds every export to
+      // a socket, without checking the types of all the exports. Miniflare does this.
+      KJ_IF_SOME(e, exportName) {
+        namedEntrypoints.findOrCreate(e,
+            [&]() -> decltype(namedEntrypoints)::Entry { return { kj::str(e), {} }; });
+      } else {
+        defaultEntrypoint.emplace();
+      }
+    }
   };
 
   ErrorReporter errorReporter(*this, name);
@@ -2616,23 +2657,23 @@ kj::Own<Server::Service> Server::makeWorker(kj::StringPtr name, config::Worker::
       };
     }
     kj::Own<void> enterStartupJs(
-        jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     kj::Own<void> enterStartupPython(
-        jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     kj::Own<void> enterDynamicImportJs(
-        jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     kj::Own<void> enterLoggingJs(
-        jsg::Lock& lock, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& lock, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     kj::Own<void> enterInspectorJs(
-        jsg::Lock& loc, kj::Maybe<kj::Exception>& error) const override {
+        jsg::Lock& loc, kj::OneOf<kj::Exception, kj::Duration>&) const override {
       return {};
     }
     void completedRequest(kj::StringPtr id) const override {}
@@ -2646,12 +2687,24 @@ kj::Own<Server::Service> Server::makeWorker(kj::StringPtr name, config::Worker::
 
   auto observer = kj::atomicRefcounted<IsolateObserver>();
   auto limitEnforcer = kj::heap<NullIsolateLimitEnforcer>();
+
+  kj::Maybe<kj::Own<jsg::modules::ModuleRegistry>> newModuleRegistry;
+  if (featureFlags.getNewModuleRegistry()) {
+    KJ_REQUIRE(experimental,
+               "The new ModuleRegistry implementation is an experimental feature. "
+               "You must run workerd with `--experimental` to use this feature.");
+    newModuleRegistry = WorkerdApi::initializeBundleModuleRegistry(
+        *observer, conf, featureFlags.asReader(), pythonConfig);
+  }
+
   auto api = kj::heap<WorkerdApi>(globalContext->v8System,
                                   featureFlags.asReader(),
                                   *limitEnforcer,
                                   kj::atomicAddRef(*observer),
                                   *memoryCacheProvider,
-                                  diskCacheRoot);
+                                  pythonConfig,
+                                  kj::mv(newModuleRegistry)
+                                  );
   auto inspectorPolicy = Worker::Isolate::InspectorPolicy::DISALLOW;
   if (inspectorOverride != kj::none) {
     // For workerd, if the inspector is enabled, it is always fully trusted.
@@ -2685,7 +2738,8 @@ kj::Own<Server::Service> Server::makeWorker(kj::StringPtr name, config::Worker::
          kj::StringPtr specifier,
          kj::Maybe<kj::String> referrer,
          jsg::CompilationObserver& observer,
-         jsg::ModuleRegistry::ResolveMethod method) mutable
+         jsg::ModuleRegistry::ResolveMethod method,
+         kj::Maybe<kj::StringPtr> rawSpecifier) mutable
             -> kj::Maybe<kj::OneOf<kj::String, jsg::ModuleRegistry::ModuleInfo>> {
       kj::Maybe<kj::String> jsonPayload;
       bool redirect = false;
@@ -2721,6 +2775,11 @@ kj::Own<Server::Service> Server::makeWorker(kj::StringPtr name, config::Worker::
       KJ_IF_SOME(ref, referrer) {
         url.query.add(
           kj::Url::QueryParam { kj::str("referrer"), kj::mv(ref) }
+        );
+      }
+      KJ_IF_SOME(raw, rawSpecifier) {
+        url.query.add(
+          kj::Url::QueryParam { kj::str("rawSpecifier"), kj::str(raw) }
         );
       }
 
@@ -3143,7 +3202,7 @@ private:
       // TODO(someday): Use cfBlobJson from the connection if there is one, or from RPC params
       //   if we add that? (Note that if a connection-level cf blob exists, it should take
       //   priority; we should only accept a cf blob from the client if we have a cfBlobHeader
-      //   configrued, which hints that this service trusts the client to provide the cf blob.)
+      //   configured, which hints that this service trusts the client to provide the cf blob.)
 
       context.initResults(capnp::MessageSize {4, 1}).setDispatcher(
           kj::heap<EventDispatcherImpl>(parent, parent.service.startRequest({})));
@@ -3382,14 +3441,30 @@ uint startInspector(kj::StringPtr inspectorAddress,
   static constexpr uint DEFAULT_PORT = 9229;
   kj::MutexGuarded<uint> inspectorPort(UNASSIGNED_PORT);
 
-  kj::Thread thread([inspectorAddress, &inspectorPort, &registrar](){
+  // `startInspector()` is called on the Isolate thread. V8 requires CPU profiling to be started and
+  // stopped on the same thread which executes JavaScript -- that is, the Isolate thread -- which
+  // means we need to dispatch inspector messages on this thread. To help make that happen, we
+  // capture this thread's kj::Executor and create an XThreadNotifier tied to this thread here, and
+  // pass it into the InspectorService below. Later, when the InspectorService receives a WebSocket
+  // connection, it calls `Isolate::attachInspector()`, which starts a dispatch loop on the
+  // kj::Executor we create here. The InspectorService reads subsequent WebSocket inspector messages
+  // and feeds them to that dispatch loop via the XThreadNotifier we create here.
+  auto isolateThreadExecutorNotifierPair = ExecutorNotifierPair{};
+
+  // Start the InspectorService thread.
+  kj::Thread thread([inspectorAddress, &inspectorPort, &registrar,
+      isolateThreadExecutorNotifierPair = kj::mv(isolateThreadExecutorNotifierPair)]() mutable {
     kj::AsyncIoContext io = kj::setupAsyncIo();
 
     kj::HttpHeaderTable::Builder headerTableBuilder;
 
     // Create the special inspector service.
     auto inspectorService(
-        kj::heap<Server::InspectorService>(io.provider->getTimer(), headerTableBuilder, registrar));
+        kj::heap<Server::InspectorService>(
+            kj::mv(isolateThreadExecutorNotifierPair),
+            io.provider->getTimer(),
+            headerTableBuilder,
+            registrar));
     auto ownHeaderTable = headerTableBuilder.build();
 
     // Configure and start the inspector socket.
@@ -3501,7 +3576,7 @@ void Server::startServices(jsg::V8System& v8System, config::Config::Reader confi
     KJ_IF_SOME(stream, controlOverride) {
       auto message = kj::str("{\"event\":\"listen-inspector\",\"port\":", port, "}\n");
       try {
-        stream->write(message.begin(), message.size());
+        stream->write(message.asBytes());
       } catch (kj::Exception& e) {
         KJ_LOG(ERROR, e);
       }
@@ -3642,7 +3717,7 @@ kj::Promise<void> Server::listenOnSockets(config::Config::Reader config,
       KJ_IF_SOME(stream, controlOverride) {
         auto message = kj::str("{\"event\":\"listen\",\"socket\":\"", name, "\",\"port\":", listener->getPort(), "}\n");
         try {
-          stream->write(message.begin(), message.size());
+          stream->write(message.asBytes());
         } catch (kj::Exception& e) {
           KJ_LOG(ERROR, e);
         }
@@ -3689,7 +3764,7 @@ kj::Promise<void> Server::listenOnSockets(config::Config::Reader config,
   // TODO(cleanup): A better solution wolud be for `TaskSet` to have a new variant of the
   //   `onEmpty()` method like `onEmptyOrException()`, which propagates any exception thrown by
   //   any task.
-  co_await kj::evalLast([]() {});
+  co_await kj::yieldUntilQueueEmpty();
 }
 
 // =======================================================================================

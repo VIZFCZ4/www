@@ -5,6 +5,7 @@
 #include "sqlite.h"
 #include <kj/debug.h>
 #include <kj/refcount.h>
+#include <kj/string-tree.h>
 #include <workerd/util/sentry.h>
 
 #if _WIN32
@@ -30,6 +31,62 @@
 
 namespace workerd {
 
+namespace {
+
+// SQLite has a function like this in its internals, but it's not exposed to library consumers.
+//
+// These error codes come from https://www.sqlite.org/rescode.html#primary_result_code_list.
+kj::String namedErrorCode(int errorCode) {
+#define LITERAL(name) case name: return kj::str(#name);
+  switch (errorCode) {
+    LITERAL(SQLITE_OK)
+    LITERAL(SQLITE_ERROR)
+    LITERAL(SQLITE_INTERNAL)
+    LITERAL(SQLITE_PERM)
+    LITERAL(SQLITE_ABORT)
+    LITERAL(SQLITE_BUSY)
+    LITERAL(SQLITE_LOCKED)
+    LITERAL(SQLITE_NOMEM)
+    LITERAL(SQLITE_READONLY)
+    LITERAL(SQLITE_INTERRUPT)
+    LITERAL(SQLITE_IOERR)
+    LITERAL(SQLITE_CORRUPT)
+    LITERAL(SQLITE_NOTFOUND)
+    LITERAL(SQLITE_FULL)
+    LITERAL(SQLITE_CANTOPEN)
+    LITERAL(SQLITE_PROTOCOL)
+    LITERAL(SQLITE_EMPTY)
+    LITERAL(SQLITE_SCHEMA)
+    LITERAL(SQLITE_TOOBIG)
+    LITERAL(SQLITE_CONSTRAINT)
+    LITERAL(SQLITE_MISMATCH)
+    LITERAL(SQLITE_MISUSE)
+    LITERAL(SQLITE_NOLFS)
+    LITERAL(SQLITE_AUTH)
+    LITERAL(SQLITE_FORMAT)
+    LITERAL(SQLITE_RANGE)
+    LITERAL(SQLITE_NOTADB)
+    LITERAL(SQLITE_NOTICE)
+    LITERAL(SQLITE_WARNING)
+    LITERAL(SQLITE_ROW)
+    LITERAL(SQLITE_DONE)
+  default:
+    return kj::str("SQLITE_UNKNOWN_ERROR_CODE(", errorCode, ")");
+  }
+#undef LITERAL
+}
+
+kj::String dbErrorMessage(int errorCode, sqlite3* db) {
+  kj::StringTree msg = kj::strTree(sqlite3_errmsg(db));
+  if (int offset = sqlite3_error_offset(db); offset != -1) {
+    msg = kj::strTree(kj::mv(msg), " at offset ", offset);
+  }
+  msg = kj::strTree(kj::mv(msg), ": ", namedErrorCode(errorCode));
+  return msg.flatten();
+}
+
+} // namespace
+
 // Like KJ_REQUIRE() but give the Regulator a chance to report the error. `errorMessage` is either
 // the return value of sqlite3_errmsg() or a string literal containing a similarly
 // application-approriate error message. A reference called `regulator` must be in-scope.
@@ -43,7 +100,8 @@ namespace workerd {
 // associated with an open DB connection.
 #define SQLITE_CALL_NODB(code, ...) do { \
     int _ec = code; \
-    KJ_ASSERT(_ec == SQLITE_OK, sqlite3_errstr(_ec), " " #code, ##__VA_ARGS__); \
+    KJ_ASSERT(_ec == SQLITE_OK, kj::str(sqlite3_errstr(_ec), ": ", namedErrorCode(_ec)), \
+              ##__VA_ARGS__); \
   } while (false)
 
 // This version requires the scope to contain a variable named `db` which is of type sqlite3*, or
@@ -52,24 +110,14 @@ namespace workerd {
     int _ec = code; \
     /* SQLITE_MISUSE doesn't put error info on the database object, so check it separately */ \
     KJ_ASSERT(_ec != SQLITE_MISUSE, "SQLite misused: " #code, ##__VA_ARGS__); \
-    kj::String msg = kj::str(sqlite3_errmsg(db)); \
-    int offset = sqlite3_error_offset(db); \
-    if (offset != -1) { \
-      msg = kj::str(msg, " at offset ", offset); \
-    } \
-    SQLITE_REQUIRE(_ec == SQLITE_OK, msg, " " #code, ##__VA_ARGS__); \
+    SQLITE_REQUIRE(_ec == SQLITE_OK, dbErrorMessage(_ec, db), ##__VA_ARGS__); \
   } while (false)
 
 // Version of `SQLITE_CALL` that can be called after inspecting the error code, in case some codes
 // aren't really errors.
 #define SQLITE_CALL_FAILED(code, error, ...) do { \
     KJ_ASSERT(error != SQLITE_MISUSE, "SQLite misused: " code, ##__VA_ARGS__); \
-    kj::String msg = kj::str(sqlite3_errmsg(db)); \
-    int offset = sqlite3_error_offset(db); \
-    if (offset != -1) { \
-      msg = kj::str(msg, " at offset ", offset); \
-    } \
-    SQLITE_REQUIRE(error == SQLITE_OK, msg, " " code, ##__VA_ARGS__); \
+    SQLITE_REQUIRE(error == SQLITE_OK, dbErrorMessage(error, db), ##__VA_ARGS__); \
   } while (false);
 
 namespace {
@@ -278,6 +326,7 @@ enum class PragmaSignature {
   NO_ARG,
   BOOLEAN,
   OBJECT_NAME,
+  OPTIONAL_OBJECT_NAME,
   NULL_NUMBER_OR_OBJECT_NAME
 };
 struct PragmaInfo {
@@ -297,11 +346,12 @@ static constexpr PragmaInfo ALLOWED_PRAGMAS[] = {
   { "foreign_keys"_kj, PragmaSignature::BOOLEAN },
   { "defer_foreign_keys"_kj, PragmaSignature::BOOLEAN },
   { "ignore_check_constraints"_kj, PragmaSignature::BOOLEAN },
+  { "legacy_alter_table"_kj, PragmaSignature::BOOLEAN },
   { "recursive_triggers"_kj, PragmaSignature::BOOLEAN },
   { "reverse_unordered_selects"_kj, PragmaSignature::BOOLEAN },
 
   // Takes an argument of table name or index name, returns info about it.
-  { "foreign_key_check"_kj, PragmaSignature::OBJECT_NAME },
+  { "foreign_key_check"_kj, PragmaSignature::OPTIONAL_OBJECT_NAME },
   { "foreign_key_list"_kj, PragmaSignature::OBJECT_NAME },
   { "index_info"_kj, PragmaSignature::OBJECT_NAME },
   { "index_list"_kj, PragmaSignature::OBJECT_NAME },
@@ -386,8 +436,8 @@ kj::StringPtr SqliteDatabase::getCurrentQueryForDebug() {
 // statement.
 kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
     Regulator& regulator, kj::StringPtr sqlCode, uint prepFlags, Multi multi) {
-  KJ_ASSERT(currentRegulator == nullptr, "recursive prepareSql()?");
-  KJ_DEFER(currentRegulator = nullptr);
+  KJ_ASSERT(currentRegulator == kj::none, "recursive prepareSql()?");
+  KJ_DEFER(currentRegulator = kj::none);
   currentRegulator = regulator;
 
   for (;;) {
@@ -398,7 +448,7 @@ kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
     SQLITE_REQUIRE(result != nullptr, "SQL code did not contain a statement.", sqlCode);
     auto ownResult = ownSqlite(result);
 
-    while (*tail == ' ' || *tail == '\n') ++tail;
+    while (*tail == ' ' || *tail == '\t' || *tail == '\n' || *tail == '\r' || *tail == '\v' || *tail == '\f') ++tail;
 
     switch (multi) {
       case SINGLE:
@@ -419,7 +469,7 @@ kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
             if (!sqlite3_stmt_readonly(result)) {
               // The callback is allowed to invoke queries of its own, so we have to un-set the
               // regulator while we call it.
-              currentRegulator = nullptr;
+              currentRegulator = kj::none;
               KJ_DEFER(currentRegulator = regulator);
               cb();
             }
@@ -446,7 +496,11 @@ kj::Own<sqlite3_stmt> SqliteDatabase::prepareSql(
   }
 }
 
-kj::StringPtr SqliteDatabase::ingestSql(Regulator& regulator, kj::StringPtr sqlCode) {
+SqliteDatabase::IngestResult SqliteDatabase::ingestSql(Regulator& regulator, kj::StringPtr sqlCode) {
+  uint64_t rowsRead = 0;
+  uint64_t rowsWritten = 0;
+  uint64_t statementCount = 0;
+
   // While there's still some input SQL to process
   while (sqlCode.begin() != sqlCode.end()) {
     // And there are still valid statements:
@@ -456,13 +510,27 @@ kj::StringPtr SqliteDatabase::ingestSql(Regulator& regulator, kj::StringPtr sqlC
     // Slice off the next valid statement SQL
     auto nextStatement = kj::str(sqlCode.slice(0, statementLength));
     // Create a Query object, which will prepare & execute it
-    Query(*this, regulator, nextStatement);
+    auto q = Query(*this, regulator, nextStatement);
 
+    rowsRead += q.getRowsRead();
+    rowsWritten += q.getRowsWritten();
+    statementCount++;
     sqlCode = sqlCode.slice(statementLength);
   }
 
   // Return the leftover buffer
-  return sqlCode;
+  return {.remainder = sqlCode, .rowsRead = rowsRead, .rowsWritten = rowsWritten, .statementCount = statementCount};
+}
+
+void SqliteDatabase::executeWithRegulator(Regulator& regulator, kj::FunctionParam<void()> func) {
+  // currentRegulator would only be set if we're running this method while running something else
+  // with a regulator.  I'm not sure what the ramifications are, so for now, we'll just assume that
+  // we can only call executeWithRegulator when no regulator is currently set.
+  KJ_REQUIRE(currentRegulator == kj::none);
+
+  currentRegulator = regulator;
+  KJ_DEFER(currentRegulator = kj::none);
+  func();
 }
 
 bool SqliteDatabase::isAuthorized(int actionCode,
@@ -636,6 +704,10 @@ bool SqliteDatabase::isAuthorized(int actionCode,
             auto val = KJ_UNWRAP_OR(param2, return false);
             return regulator.isAllowedName(val);
           }
+          case PragmaSignature::OPTIONAL_OBJECT_NAME: {
+            auto val = KJ_UNWRAP_OR(param2, return true);
+            return regulator.isAllowedName(val);
+          }
           case PragmaSignature::NULL_NUMBER_OR_OBJECT_NAME: {
             // Argument is not required
             auto val = KJ_UNWRAP_OR(param2, return true);
@@ -667,10 +739,12 @@ bool SqliteDatabase::isAuthorized(int actionCode,
 
     case SQLITE_CREATE_VTABLE      :   /* Table Name      Module Name     */
     case SQLITE_DROP_VTABLE        :   /* Table Name      Module Name     */
-      // Virtual tables are tables backed by some native-code callbacks. We don't support these except for FTS5 (Full Text Search) https://www.sqlite.org/fts5.html
+      // Virtual tables are tables backed by some native-code callbacks.
+      // We don't support these except for FTS5 (Full Text Search) https://www.sqlite.org/fts5.html
+      // (Which also includes fts5vocab: "[fts5vocab] is available whenever FTS5 is")
       {
         KJ_IF_SOME (moduleName, param2) {
-          if (strcasecmp(moduleName.begin(), "fts5") == 0) {
+          if (strcasecmp(moduleName.begin(), "fts5") == 0 || strcasecmp(moduleName.begin(), "fts5vocab") == 0) {
             return true;
           }
         }
@@ -740,7 +814,9 @@ void SqliteDatabase::setupSecurity() {
   // https://www.sqlite.org/limits.html#max_compound_select
   sqlite3_limit(db, SQLITE_LIMIT_COMPOUND_SELECT, 5);
   sqlite3_limit(db, SQLITE_LIMIT_VDBE_OP, 25000);
-  sqlite3_limit(db, SQLITE_LIMIT_FUNCTION_ARG, 32);
+  // For SQLITE_LIMIT_FUNCTION_ARG we use the default instead of the "security" recommendation
+  // because there are too many valid use cases for large argument lists, especially json_object.
+  sqlite3_limit(db, SQLITE_LIMIT_FUNCTION_ARG, 127);
   sqlite3_limit(db, SQLITE_LIMIT_ATTACHED, 0);
   sqlite3_limit(db, SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 50);
   sqlite3_limit(db, SQLITE_LIMIT_VARIABLE_NUMBER, 100);
@@ -908,13 +984,13 @@ void SqliteDatabase::Query::bind(uint i, decltype(nullptr)) {
 }
 
 void SqliteDatabase::Query::nextRow() {
-  KJ_ASSERT(db.currentStatement == nullptr, "recursive nextRow()?");
-  KJ_DEFER(db.currentStatement = nullptr);
+  KJ_ASSERT(db.currentStatement == kj::none, "recursive nextRow()?");
+  KJ_DEFER(db.currentStatement = kj::none);
   db.currentStatement = *statement;
 
   // The statement could be "re-prepared" during sqlite3_step, so we must set up the regulator.
-  KJ_ASSERT(db.currentRegulator == nullptr, "nextRow() during prepare()?");
-  KJ_DEFER(db.currentRegulator = nullptr);
+  KJ_ASSERT(db.currentRegulator == kj::none, "nextRow() during prepare()?");
+  KJ_DEFER(db.currentRegulator = kj::none);
   db.currentRegulator = regulator;
 
   int err = sqlite3_step(statement);
@@ -1011,7 +1087,7 @@ static thread_local int currentVfsRoot = AT_FDCWD;
 // We will tell SQLite to use alternate implementations of path-oriented syscalls which use the
 // `*at()` versions of the calls with `currentVfsRoot` as the directory descriptor. When the
 // descriptor is `AT_FDCWD`, this will naturally reproduce the behavior of the non-`at()` versions.
-// We temporarily swap this for a real desriptor when our custom VFS wrapper is being invoked.
+// We temporarily swap this for a real descriptor when our custom VFS wrapper is being invoked.
 
 static int replaced_open(const char* path, int flags, int mode) {
   return openat(currentVfsRoot, path, flags, mode);
@@ -1259,7 +1335,7 @@ struct SqliteDatabase::Vfs::FileImpl: public sqlite3_file {
   kj::Maybe<kj::Own<Lock>> lock;
   // Rather complicatedly, SQLite doesn't consider the -shm file to be a separate file that it
   // opens via the VFS, but rather a facet of the database file itself. We implement it using an
-  // entirely different interface anyawy.
+  // entirely different interface anyway.
   //
   // We leave this null if the file is not the main database file.
 
@@ -1304,7 +1380,7 @@ const sqlite3_io_methods SqliteDatabase::Vfs::FileImpl::FILE_METHOD_TABLE = {
       size_t actual = self.file->read(iOfst, bytes);
 
       if (actual < iAmt) {
-        memset(bytes.begin() + actual, 0, iAmt - actual);
+        bytes.slice(actual).fill(0);
         return SQLITE_IOERR_SHORT_READ;
       } else {
         return SQLITE_OK;
@@ -1785,7 +1861,7 @@ private:
 
         while (index >= slock->regions.size()) {
           auto newRegion = kj::heapArray<byte>(size);
-          memset(newRegion.begin(), 0, size);
+          newRegion.asPtr().fill(0);
           slock->regions.add(kj::mv(newRegion));
         }
 

@@ -10,8 +10,8 @@
 #include <kj/refcount.h>
 #include <kj/exception.h>
 #include <kj/time.h>
-#include <kj/compat/http.h>
 #include <workerd/io/trace.h>
+#include <workerd/io/features.capnp.h>
 #include <workerd/jsg/observer.h>
 
 namespace workerd {
@@ -20,11 +20,27 @@ class WorkerInterface;
 class LimitEnforcer;
 class TimerChannel;
 
+class WebSocketObserver: public kj::Refcounted {
+public:
+  // Called when a worker sends a message on this WebSocket (includes close messages).
+  virtual void sentMessage(size_t bytes) { };
+  // Called when a worker receives a message on this WebSocket (includes close messages).
+  virtual void receivedMessage(size_t bytes) { };
+};
+
 // Observes a specific request to a specific worker. Also observes outgoing subrequests.
 //
 // Observing anything is optional. Default implementations of all methods observe nothing.
 class RequestObserver: public kj::Refcounted {
 public:
+  // This is called when the request is converted to a WebSocket connection terminating in a worker.
+  // An optional WebSocket observer may be returned to observe events on the worker's end of the
+  // WebSocket connection.
+  //
+  // This means that, when the returned observer observes a message being sent, the message is being
+  // sent from the worker to the client making the request.
+  virtual kj::Maybe<kj::Own<WebSocketObserver>> tryCreateWebSocketObserver() { return kj::none; };
+
   // Invoked when the request is actually delivered.
   //
   // If, for some reason, this is not invoked before the object is destroyed, this indicate that
@@ -40,11 +56,20 @@ public:
   // the prewarm metric will be incremented.
   virtual void setIsPrewarm() {}
 
+  // Describes the source of a failure
+  enum class FailureSource: uint8_t {
+    // Failure occurred during deferred proxying
+    DEFERRED_PROXY,
+
+    // Failure occurred elsewhere
+    OTHER,
+  };
+
   // Report that the request failed with the given exception. This only needs to be called in
   // cases where the wrapper created with wrapWorkerInterface() wouldn't otherwise see the
   // exception, e.g. because it has been replaced with an HTTP error response or because it
   // occurred asynchronously.
-  virtual void reportFailure(const kj::Exception& e) {}
+  virtual void reportFailure(const kj::Exception& e, FailureSource source = FailureSource::OTHER) {}
 
   // Wrap the given WorkerInterface with a version that collects metrics. This method may only be
   // called once, and only one method call may be made to the returned interface.
@@ -245,6 +270,37 @@ public:
 
 private:
   Observer& ref;
+};
+
+// Provides counters/observers for various features. The intent is to
+// make it possible to collect metrics on which runtime features are
+// used and how often.
+//
+// There is exactly one instance of this class per worker process.
+class FeatureObserver {
+public:
+  static kj::Own<FeatureObserver> createDefault();
+  static void init(kj::Own<FeatureObserver> instance);
+  static kj::Maybe<FeatureObserver&> get();
+
+  // A "Feature" is just an opaque identifier defined in the features.capnp
+  // file.
+  using Feature = workerd::Features;
+
+  // Called to increment the usage counter for a feature.
+  virtual void use(Feature feature) const {}
+
+  using CollectCallback = kj::Function<void(Feature, const uint64_t)>;
+  // This method is called from the internal metrics collection mechanisn to harvest the
+  // current features and counts that have been recorded by the observer.
+  virtual void collect(CollectCallback&& callback) const {}
+
+  // Records the use of the feature if a FeatureObserver is available.
+  static inline void maybeRecordUse(Feature feature) {
+    KJ_IF_SOME(observer, get()) {
+      observer.use(feature);
+    }
+  }
 };
 
 }  // namespace workerd

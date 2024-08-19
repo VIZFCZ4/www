@@ -15,7 +15,7 @@ Hyperdrive::Hyperdrive(uint clientIndex, kj::String database,
                        kj::String user, kj::String password, kj::String scheme)
     : clientIndex(clientIndex), database(kj::mv(database)),
       user(kj::mv(user)), password(kj::mv(password)), scheme(kj::mv(scheme)) {
-        kj::byte randomBytes[16];
+        kj::byte randomBytes[16]{};
         KJ_ASSERT(RAND_bytes(randomBytes, sizeof(randomBytes)) == 1);
         randomHost = kj::str(kj::encodeHex(randomBytes), ".hyperdrive.local");
       }
@@ -37,8 +37,9 @@ jsg::Ref<Socket> Hyperdrive::connect(jsg::Lock& js) {
   // TODO(someday): Support TLS? It's not at all necessary since we're connecting locally, but
   // some users may want it anyway.
   auto nullTlsStarter = kj::heap<kj::TlsStarterCallback>();
-  auto sock = setupSocket(js, kj::mv(conn), kj::none, kj::mv(nullTlsStarter),
-                  false, kj::str(this->randomHost), false);
+  auto sock = setupSocket(js, kj::mv(conn), kj::str(getHost(), ":", getPort()),
+                          kj::none, kj::mv(nullTlsStarter), false,
+                          kj::str(this->randomHost), false);
   sock->handleProxyStatus(js, kj::mv(paf.promise));
   return sock;
 }

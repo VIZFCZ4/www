@@ -11,6 +11,42 @@ export function checkPrimeSync(candidate: ArrayBufferView, num_checks: number): 
 export function randomPrime(size: number, safe: boolean, add?: ArrayBufferView|undefined,
                             rem?: ArrayBufferView|undefined): ArrayBuffer;
 
+// X509Certificate
+export interface CheckOptions {
+  subject?: string;
+  wildcards?: boolean;
+  partialWildcards?: boolean;
+  multiLabelWildcards?: boolean;
+  singleLabelSubdomains?: boolean;
+}
+
+export class X509Certificate {
+  public static parse(data: ArrayBuffer|ArrayBufferView): X509Certificate;
+  public get subject(): string|undefined;
+  public get subjectAltName(): string|undefined;
+  public get infoAccess(): string|undefined;
+  public get issuer(): string|undefined;
+  public get issuerCert(): X509Certificate|undefined;
+  public get validFrom(): string|undefined;
+  public get validTo(): string|undefined;
+  public get fingerprint(): string|undefined;
+  public get fingerprint256(): string|undefined;
+  public get fingerprint512(): string|undefined;
+  public get keyUsage(): string[]|undefined;
+  public get serialNumber(): string|undefined;
+  public get pem(): string|undefined;
+  public get raw(): ArrayBuffer|undefined;
+  public get publicKey(): CryptoKey|undefined;
+  public get isCA(): boolean;
+  public checkHost(host: string, options?: CheckOptions): string|undefined;
+  public checkEmail(email: string, options?: CheckOptions): string|undefined;
+  public checkIp(ip: string, options?: CheckOptions): string|undefined;
+  public checkIssued(cert: X509Certificate): boolean;
+  public checkPrivateKey(key: CryptoKey): boolean;
+  public verify(key: CryptoKey): boolean;
+  public toLegacyObject(): object;
+}
+
 // Hash and Hmac
 export class HashHandle {
   public constructor(algorithm: string, xofLen: number);
@@ -35,6 +71,10 @@ export function getHkdf(hash: string, key: ArrayLike, salt: ArrayLike, info: Arr
 export function getPbkdf(password: ArrayLike, salt: ArrayLike, iterations: number, keylen: number,
                          digest: string): ArrayBuffer;
 
+// scrypt
+export function getScrypt(password: ArrayLike, salt: ArrayLike, N: number, r: number, p: number,
+                          maxmem: number, keylen: number): ArrayBuffer;
+
 // Keys
 export function exportKey(key: CryptoKey, options?: InnerExportOptions): KeyExportResult;
 export function equals(key: CryptoKey, otherKey: CryptoKey): boolean;
@@ -43,6 +83,11 @@ export function getAsymmetricKeyType(key: CryptoKey): AsymmetricKeyType;
 export function createSecretKey(key: ArrayBuffer | ArrayBufferView): CryptoKey;
 export function createPrivateKey(key: InnerCreateAsymmetricKeyOptions): CryptoKey;
 export function createPublicKey(key: InnerCreateAsymmetricKeyOptions): CryptoKey;
+
+// Spkac
+export function verifySpkac(input: ArrayBufferView|ArrayBuffer): boolean;
+export function exportPublicKey(input: ArrayBufferView|ArrayBuffer): null | ArrayBuffer;
+export function exportChallenge(input: ArrayBufferView|ArrayBuffer): null | ArrayBuffer;
 
 export type KeyData = string | ArrayBuffer | ArrayBufferView;
 

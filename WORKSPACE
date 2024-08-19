@@ -8,10 +8,10 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file"
 
 http_archive(
     name = "bazel_skylib",
-    sha256 = "cd55a062e763b9349921f0f5db8c3933288dc8ba4f76dd9416aac68acee3cb94",
+    sha256 = "9f38886a40548c6e96c106b752f242130ee11aaa068a56ba7e56f4511f33e4f2",
     urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/bazel-skylib/releases/download/1.5.0/bazel-skylib-1.5.0.tar.gz",
-        "https://github.com/bazelbuild/bazel-skylib/releases/download/1.5.0/bazel-skylib-1.5.0.tar.gz",
+        "https://mirror.bazel.build/github.com/bazelbuild/bazel-skylib/releases/download/1.6.1/bazel-skylib-1.6.1.tar.gz",
+        "https://github.com/bazelbuild/bazel-skylib/releases/download/1.6.1/bazel-skylib-1.6.1.tar.gz",
     ],
 )
 
@@ -23,8 +23,8 @@ bazel_skylib_workspace()
 
 http_archive(
     name = "build_bazel_apple_support",
-    sha256 = "cf4d63f39c7ba9059f70e995bf5fe1019267d3f77379c2028561a5d7645ef67c",
-    url = "https://github.com/bazelbuild/apple_support/releases/download/1.11.1/apple_support.1.11.1.tar.gz",
+    sha256 = "c31ce8e531b50ef1338392ee29dd3db3689668701ec3237b9c61e26a1937ab07",
+    url = "https://github.com/bazelbuild/apple_support/releases/download/1.16.0/apple_support.1.16.0.tar.gz",
 )
 
 load(
@@ -34,15 +34,20 @@ load(
 
 apple_support_dependencies()
 
+# apple_support now requires bazel_features, pull in its dependencies too.
+load("@bazel_features//:deps.bzl", "bazel_features_deps")
+
+bazel_features_deps()
+
 # ========================================================================================
 # Simple dependencies
 
 http_archive(
     name = "capnp-cpp",
-    sha256 = "21ae72a199a995b72e9bd359d4815539158d93a15cf36e284ef201fde7338c3c",
-    strip_prefix = "capnproto-capnproto-8ba7a6e/c++",
+    integrity = "sha256-u4TajPQnM3yQIcLUghhNnEUslu0o3q0VdY3jRoPq7yM=",
+    strip_prefix = "capnproto-capnproto-6446b72/c++",
     type = "tgz",
-    urls = ["https://github.com/capnproto/capnproto/tarball/8ba7a6ef987eb56e8d41e7f11e080dabcbf2a04f"],
+    urls = ["https://github.com/capnproto/capnproto/tarball/6446b721a9860eebccf9d3c73b27610491359b5a"],
 )
 
 http_archive(
@@ -65,15 +70,14 @@ http_archive(
     ],
     sha256 = "ab9aae38a11b931f35d8d1c6d62826d215579892e6ffbf89f20bdce106a9c8c5",
     strip_prefix = "sqlite-src-3440000",
-    type = "zip",
     url = "https://sqlite.org/2023/sqlite-src-3440000.zip",
 )
 
 http_archive(
     name = "rules_python",
-    sha256 = "c68bdc4fbec25de5b5493b8819cfc877c4ea299c0dcb15c244c5a00208cde311",
-    strip_prefix = "rules_python-0.31.0",
-    url = "https://github.com/bazelbuild/rules_python/releases/download/0.31.0/rules_python-0.31.0.tar.gz",
+    integrity = "sha256-d4quqz5s/VbWgcifXBDXrWv40vGnLeneVbIwgbLTFhg=",
+    strip_prefix = "rules_python-0.34.0",
+    url = "https://github.com/bazelbuild/rules_python/releases/download/0.34.0/rules_python-0.34.0.tar.gz",
 )
 
 load("@rules_python//python:repositories.bzl", "py_repositories", "python_register_toolchains")
@@ -82,9 +86,9 @@ py_repositories()
 
 http_archive(
     name = "com_google_benchmark",
-    sha256 = "2aab2980d0376137f969d92848fbb68216abb07633034534fc8c65cc4e7a0e93",
-    strip_prefix = "benchmark-1.8.2",
-    url = "https://github.com/google/benchmark/archive/refs/tags/v1.8.2.tar.gz",
+    integrity = "sha256-a8GApX0j1NlRVRn5KwyD1hsFtbqxiJYfNqx7BrDZ6c4=",
+    strip_prefix = "benchmark-1.8.3",
+    url = "https://github.com/google/benchmark/archive/refs/tags/v1.8.3.tar.gz",
 )
 
 # These are part of what's needed to get `bazel query 'deps(//...)'`, to work, but this is difficult to support
@@ -96,25 +100,37 @@ http_archive(
     name = "brotli",
     sha256 = "e720a6ca29428b803f4ad165371771f5398faba397edf6778837a18599ea13ff",
     strip_prefix = "brotli-1.1.0",
-    type = "tgz",
     urls = ["https://github.com/google/brotli/archive/refs/tags/v1.1.0.tar.gz"],
 )
 
 http_archive(
     name = "ada-url",
     build_file = "//:build/BUILD.ada-url",
-    patch_args = ["-p1"],
-    patches = [],
-    sha256 = "66603d861bc3804abfca2eff5fd6f9cb70e3d17ea3d03f1168b490a8438e21a5",
+    sha256 = "20b09948cf58362abe4de20b8e709d5041477fb798350fd1a02cde6aad121e08",
     type = "zip",
-    url = "https://github.com/ada-url/ada/releases/download/v2.7.7/singleheader.zip",
+    url = "https://github.com/ada-url/ada/releases/download/v2.9.0/singleheader.zip",
+)
+
+http_archive(
+    name = "nbytes",
+    build_file = "//:build/BUILD.nbytes",
+    sha256 = "34be48071c86add2f8d14fd4a238c47230965fd743a51b8a1dd0b2f0210f0171",
+    strip_prefix = "nbytes-0.1.1",
+    url = "https://github.com/nodejs/nbytes/archive/refs/tags/v0.1.1.tar.gz",
+)
+
+http_archive(
+    name = "simdutf",
+    build_file = "//:build/BUILD.simdutf",
+    sha256 = "7867c118a11bb7ccaea0f999a28684b06040027506b424b706146cc912b80ff6",
+    type = "zip",
+    url = "https://github.com/simdutf/simdutf/releases/download/v5.2.8/singleheader.zip",
 )
 
 http_archive(
     name = "pyodide",
     build_file = "//:build/BUILD.pyodide",
     sha256 = "fbda450a64093a8d246c872bb901ee172a57fe594c9f35bba61f36807c73300d",
-    type = "tar.bz2",
     urls = ["https://github.com/pyodide/pyodide/releases/download/0.26.0a2/pyodide-core-0.26.0a2.tar.bz2"],
 )
 
@@ -122,16 +138,28 @@ http_archive(
     name = "pyodide_packages",
     build_file = "//:build/BUILD.pyodide_packages",
     sha256 = "c4a4e0c1cb658a39abc0435cc07df902e5a2ecffc091e0528b96b0c295e309ea",
-    type = "zip",
     urls = ["https://github.com/dom96/pyodide_packages/releases/download/just-stdlib/pyodide_packages.tar.zip"],
 )
 
-load("//:build/pyodide_bucket.bzl", "PYODIDE_LOCK_SHA256", "PYODIDE_GITHUB_RELEASE_URL")
+load("//:build/pyodide_bucket.bzl", "PYODIDE_LOCK_SHA256", "PYODIDE_GITHUB_RELEASE_URL", "PYODIDE_ALL_WHEELS_ZIP_SHA256")
 
 http_file(
     name = "pyodide-lock.json",
     sha256 = PYODIDE_LOCK_SHA256,
     url = PYODIDE_GITHUB_RELEASE_URL + "pyodide-lock.json",
+)
+
+http_archive(
+    name = "all_pyodide_wheels",
+    sha256 = PYODIDE_ALL_WHEELS_ZIP_SHA256,
+    urls = [PYODIDE_GITHUB_RELEASE_URL + "all_wheels.zip"],
+    build_file_content = """
+filegroup(
+    name = "whls",
+    srcs = glob(["*"]),
+    visibility = ["//visibility:public"]
+)
+    """
 )
 
 # ========================================================================================
@@ -142,7 +170,7 @@ http_file(
 git_repository(
     name = "dawn",
     build_file = "//:build/BUILD.dawn",
-    commit = "c5169ef5b9982e17a8caddd1218aa0ad5e24a4e3",
+    commit = "5a26bdd62d0f809626214c8a3448a988bcd25736",
     remote = "https://dawn.googlesource.com/dawn.git",
     repo_mapping = {
         "@abseil_cpp": "@com_google_absl",
@@ -186,8 +214,15 @@ http_archive(
 #   to confusing compiler errors in tcmalloc in the past.
 git_repository(
     name = "com_google_absl",
-    commit = "0764ad493e54a79c7e3e02fc3412ef55b4835b9e",
+    commit = "9d1552f25c3d9e9114b7d7aed55790570a99bc4d",
     remote = "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git",
+)
+
+git_repository(
+    name = "fp16",
+    commit = "0a92994d729ff76a58f692d3028ca1b64b145d91",
+    build_file_content = "exports_files(glob([\"**\"]))",
+    remote = "https://chromium.googlesource.com/external/github.com/Maratyszcza/FP16.git"
 )
 
 # Bindings for abseil libraries used by V8
@@ -212,10 +247,9 @@ bind(
 # though it is unused for our purposes.
 http_archive(
     name = "rules_fuzzing",
-    sha256 = "4c69bcf4573888be1f676e1ebeb9e4258b8fe19924a5a8f50a57df5cbe3f6d63",
-    strip_prefix = "bazelbuild-rules_fuzzing-1dbcd91",
-    type = "tgz",
-    url = "https://github.com/bazelbuild/rules_fuzzing/tarball/1dbcd9167300ad226d29972f5f9c925d6d81f441",
+    integrity = "sha256-PsDu4FskNVLMSnhLMDI9CIv3PLIXfd2gLIJ+aJgZM/E=",
+    strip_prefix = "rules_fuzzing-0.5.2",
+    url = "https://github.com/bazelbuild/rules_fuzzing/archive/refs/tags/v0.5.2.tar.gz",
 )
 
 load("@rules_fuzzing//fuzzing:repositories.bzl", "rules_fuzzing_dependencies")
@@ -232,10 +266,10 @@ rules_fuzzing_init()
 # OK, now we can bring in tcmalloc itself.
 http_archive(
     name = "com_google_tcmalloc",
-    sha256 = "22b168aefb066b53e940c25503cfa2a840c635763bc86fae90ed98a641978852",
-    strip_prefix = "google-tcmalloc-9b7cd13",
+    sha256 = "81f285cb337f445276f37c308cb90120f8ba4311d1be9daf3b93dccf4bfdba7d",
+    strip_prefix = "google-tcmalloc-69c409c",
     type = "tgz",
-    url = "https://github.com/google/tcmalloc/tarball/9b7cd1327fee6f191ee21b46c014a3a5b17f11ce",
+    url = "https://github.com/google/tcmalloc/tarball/69c409c344bdf894fc7aab83e2d9e280b009b2f3",
 )
 
 # ========================================================================================
@@ -279,36 +313,36 @@ http_archive(
 http_file(
     name = "cargo_bazel_linux_x64",
     executable = True,
-    sha256 = "890c1d631ec39ccdccc4f383e9083a44781f529eb6281a84c209874d5449758f",
+    sha256 = "87a56511eb592f4f118750043e38ad40814f4be20b30f796506de7634aa2d41e",
     urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.36.2/cargo-bazel-x86_64-unknown-linux-gnu",
+        "https://github.com/bazelbuild/rules_rust/releases/download/0.46.0/cargo-bazel-x86_64-unknown-linux-gnu",
     ],
 )
 
 http_file(
     name = "cargo_bazel_linux_arm64",
     executable = True,
-    sha256 = "7e2e9ee08d6e1b33b1f76f2b521a4c7c295db50cda8679afaebe588113d54859",
+    sha256 = "490b52bd8407613c3aa69b9e3f52635a2fe7631ccb5c5bea9d8d0bc0adfa6d0f",
     urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.36.2/cargo-bazel-aarch64-unknown-linux-gnu",
+        "https://github.com/bazelbuild/rules_rust/releases/download/0.42.1/cargo-bazel-aarch64-unknown-linux-gnu",
     ],
 )
 
 http_file(
     name = "cargo_bazel_macos_x64",
     executable = True,
-    sha256 = "a1b2484838291835b65fef49ec373df0579955ef20603836ecd79bf7e903c603",
+    sha256 = "cf873df6f03c94b95af567f5b9a6ff3e1528052cc89cabbee5a330e7c94b75c9",
     urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.36.2/cargo-bazel-x86_64-apple-darwin",
+        "https://github.com/bazelbuild/rules_rust/releases/download/0.42.1/cargo-bazel-x86_64-apple-darwin",
     ],
 )
 
 http_file(
     name = "cargo_bazel_macos_arm64",
     executable = True,
-    sha256 = "308984faa357f94b0ac85c6d9f20b6bf4319cdceca9af301b3d73d77a2d16299",
+    sha256 = "30b01033e7b534c6e1927d9225f52a239a41bad402aac12fb6410683a3daa8b1",
     urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.36.2/cargo-bazel-aarch64-apple-darwin",
+        "https://github.com/bazelbuild/rules_rust/releases/download/0.46.0/cargo-bazel-aarch64-apple-darwin",
     ],
 )
 
@@ -316,17 +350,20 @@ http_file(
     name = "cargo_bazel_win_x64",
     downloaded_file_path = "downloaded.exe",  # .exe extension required for Windows to recognise as executable
     executable = True,
-    sha256 = "8c97381a7f20033104563c808e5530cd76d70c88281b4708ca4c3b834f769246",
+    sha256 = "dea1f912f7c432cd9f84bd2e7b4ad791e7ccfb0c01a6984ccc6498e0cc8be0a7",
     urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.36.2/cargo-bazel-x86_64-pc-windows-msvc.exe",
+        "https://github.com/bazelbuild/rules_rust/releases/download/0.42.1/cargo-bazel-x86_64-pc-windows-msvc.exe",
     ],
 )
 
+# TODO(cleanup): Bring rules_rust and cargo_bazel back in sync – rules_rust was stuck at an older
+# version due to linker errors but has been upgraded since. Some version mismatch is acceptable here
+# since cargo_bazel is only used to generate build files.
 http_archive(
     name = "rules_rust",
-    sha256 = "a761d54e49db06f863468e6bba4a13252b1bd499e8f706da65e279b3bcbc5c52",
+    integrity = "sha256-F8U7+AC5MvMtPKGdLLnorVM84cDXKfDRgwd7/dq3rUY=",
     urls = [
-        "https://github.com/bazelbuild/rules_rust/releases/download/0.36.2/rules_rust-v0.36.2.tar.gz",
+        "https://github.com/bazelbuild/rules_rust/releases/download/0.46.0/rules_rust-v0.46.0.tar.gz",
     ],
 )
 
@@ -336,7 +373,9 @@ rules_rust_dependencies()
 
 rust_register_toolchains(
     edition = "2021",
-    versions = ["1.72.1"],
+    versions = ["1.77.0"], # LLVM 17
+    # Rust registers wasm targets by default which we don't need, workerd is only built for its native platform.
+    extra_target_triples = [],
 )
 
 load("@rules_rust//crate_universe:repositories.bzl", "crate_universe_dependencies")
@@ -359,23 +398,23 @@ rust_analyzer_dependencies()
 # Fetch rules_nodejs before aspect_rules_js, otherwise we'll get an outdated rules_nodejs version.
 http_archive(
     name = "rules_nodejs",
-    sha256 = "a50986c7d2f2dc43a5b9b81a6245fd89bdc4866f1d5e316d9cef2782dd859292",
-    strip_prefix = "rules_nodejs-6.0.5",
-    url = "https://github.com/bazelbuild/rules_nodejs/releases/download/v6.0.5/rules_nodejs-v6.0.5.tar.gz",
+    integrity = "sha256-h8YXHFvntpU41Gldne0priYmxe12qa3u3ON7Y8c772c=",
+    strip_prefix = "rules_nodejs-6.2.0",
+    url = "https://github.com/bazelbuild/rules_nodejs/releases/download/v6.2.0/rules_nodejs-v6.2.0.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_js",
-    sha256 = "46d63efa86b9f87670603022500f3f0a9893b914b401a40183cee59069249052",
-    strip_prefix = "rules_js-1.38.0",
-    url = "https://github.com/aspect-build/rules_js/archive/refs/tags/v1.38.0.tar.gz",
+    integrity = "sha256-/GiHCR7jJDZh+1Mv0yRCMLbhk8IlZqA4yf10jKaPuIA=",
+    strip_prefix = "rules_js-1.42.3",
+    url = "https://github.com/aspect-build/rules_js/archive/refs/tags/v1.42.3.tar.gz",
 )
 
 http_archive(
     name = "aspect_rules_ts",
-    sha256 = "c77f0dfa78c407893806491223c1264c289074feefbf706721743a3556fa7cea",
-    strip_prefix = "rules_ts-2.2.0",
-    url = "https://github.com/aspect-build/rules_ts/archive/refs/tags/v2.2.0.tar.gz",
+    integrity = "sha256-9ppkUrEp052bBfPf+LEFcYW7GVtNrwz/QZmI3nV8bDE=",
+    strip_prefix = "rules_ts-2.4.2",
+    url = "https://github.com/aspect-build/rules_ts/archive/refs/tags/v2.4.2.tar.gz",
 )
 
 load("@aspect_rules_js//js:repositories.bzl", "rules_js_dependencies")
@@ -391,7 +430,7 @@ nodejs_register_toolchains(
         # "WORKERS_MIRROR_URL/https://nodejs.org/dist/v{version}/{filename}",
         "https://nodejs.org/dist/v{version}/{filename}",
     ],
-    node_version = "20.11.1",
+    node_version = "20.14.0",
 )
 
 load("@aspect_rules_ts//ts:repositories.bzl", "rules_ts_dependencies", TS_LATEST_VERSION = "LATEST_TYPESCRIPT_VERSION")
@@ -440,32 +479,37 @@ http_archive(
         "//:patches/v8/0003-Add-ArrayBuffer-MaybeNew.patch",
         "//:patches/v8/0004-Allow-Windows-builds-under-Bazel.patch",
         "//:patches/v8/0005-Disable-bazel-whole-archive-build.patch",
-        "//:patches/v8/0006-Make-v8-Locker-automatically-call-isolate-Enter.patch",
-        "//:patches/v8/0007-Add-an-API-to-capture-and-restore-the-cage-base-poin.patch",
-        "//:patches/v8/0008-Speed-up-V8-bazel-build-by-always-using-target-cfg.patch",
-        "//:patches/v8/0009-Implement-Promise-Context-Tagging.patch",
-        "//:patches/v8/0010-Enable-V8-shared-linkage.patch",
-        "//:patches/v8/0011-Randomize-the-initial-ExecutionContextId-used-by-the.patch",
-        "//:patches/v8/0012-Always-enable-continuation-preserved-data-in-the-bui.patch",
-        "//:patches/v8/0013-Attach-continuation-context-to-Promise-thenable-task.patch",
-        "//:patches/v8/0014-increase-visibility-of-virtual-method.patch",
-        "//:patches/v8/0015-Add-ValueSerializer-SetTreatFunctionsAsHostObjects.patch",
-        "//:patches/v8/0016-wasm-liftoff-arm64-Fix-LoadTaggedPointer.patch",
+        "//:patches/v8/0006-Speed-up-V8-bazel-build-by-always-using-target-cfg.patch",
+        "//:patches/v8/0007-Implement-Promise-Context-Tagging.patch",
+        "//:patches/v8/0008-Enable-V8-shared-linkage.patch",
+        "//:patches/v8/0009-Randomize-the-initial-ExecutionContextId-used-by-the.patch",
+        "//:patches/v8/0010-increase-visibility-of-virtual-method.patch",
+        "//:patches/v8/0011-Add-ValueSerializer-SetTreatFunctionsAsHostObjects.patch",
+        "//:patches/v8/0012-Set-torque-generator-path-to-external-v8.-This-allow.patch",
+        "//:patches/v8/0013-Modify-where-to-look-for-fp16-dependency.-This-depen.patch",
+        "//:patches/v8/0014-Expose-v8-Symbol-GetDispose.patch",
+        "//:patches/v8/0015-Rename-V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE-V8_COMPR.patch",
+        "//:patches/v8/0016-Revert-TracedReference-deref-API-removal.patch",
+        "//:patches/v8/0017-Revert-heap-Add-masm-specific-unwinding-annotations-.patch",
+        "//:patches/v8/0018-Update-illegal-invocation-error-message-in-v8.patch",
+        # TODO(cleanup): Patches backported from V8 12.9 – adding these fixes a race condition
+        # leading to a segfault in several wasm-related tests under ASan. These are already included
+        # in 12.9 so remove the patches when updating to that version.
+        "//:patches/v8/0019-wasm-Fix-more-code-logging-races.patch",
+        "//:patches/v8/0020-wasm-Remove-destructor-of-LogCodesTask.patch",
     ],
-    integrity = "sha256-QphdaJn35eZeo+qoayNFIgm02hX5WHjKf+pr3WXCiEs=",
-    strip_prefix = "v8-12.3.219.10",
-    type = "tgz",
-    url = "https://github.com/v8/v8/archive/refs/tags/12.3.219.10.tar.gz",
+    integrity = "sha256-yoLczQj1XEZL4EHVRjAwpVjgr9/q0YlRGnNX47Ke2ws=",
+    strip_prefix = "v8-12.8.374.10",
+    url = "https://github.com/v8/v8/archive/refs/tags/12.8.374.10.tar.gz",
 )
 
 git_repository(
     name = "com_googlesource_chromium_icu",
     build_file = "@v8//:bazel/BUILD.icu",
-    commit = "a622de35ac311c5ad390a7af80724634e5dc61ed",
+    commit = "9408c6fd4a39e6fef0e1c4077602e1c83b15f3fb",
     patch_cmds = ["find source -name BUILD.bazel | xargs rm"],
     patch_cmds_win = ["Get-ChildItem -Path source -File -Include BUILD.bazel -Recurse | Remove-Item"],
     remote = "https://chromium.googlesource.com/chromium/deps/icu.git",
-    shallow_since = "1697047535 +0000",
 )
 
 http_archive(
@@ -477,17 +521,15 @@ http_archive(
     repo_mapping = {"@perfetto_dep_zlib": "@zlib"},
     sha256 = "241cbaddc9ff4e5d1de2d28497fef40b5510e9ca60808815bf4944d0d2f026db",
     strip_prefix = "perfetto-39.0",
-    type = "tgz",
     url = "https://github.com/google/perfetto/archive/refs/tags/v39.0.tar.gz",
 )
 
 # For use with perfetto
 http_archive(
     name = "com_google_protobuf",
-    sha256 = "2ee9dcec820352671eb83e081295ba43f7a4157181dad549024d7070d079cf65",
-    strip_prefix = "protobuf-3.9.0",
-    type = "tgz",
-    url = "https://github.com/protocolbuffers/protobuf/archive/refs/tags/v3.9.0.tar.gz",
+    sha256 = "6adf73fd7f90409e479d6ac86529ade2d45f50494c5c10f539226693cb8fe4f7",
+    strip_prefix = "protobuf-3.10.1",
+    url = "https://github.com/protocolbuffers/protobuf/archive/refs/tags/v3.10.1.tar.gz",
 )
 
 # For use with perfetto
@@ -495,13 +537,6 @@ new_local_repository(
     name = "perfetto_cfg",
     build_file_content = "",
     path = "build/perfetto",
-)
-
-git_repository(
-    name = "com_googlesource_chromium_base_trace_event_common",
-    build_file = "@v8//:bazel/BUILD.trace_event_common",
-    commit = "29ac73db520575590c3aceb0a6f1f58dda8934f6",
-    remote = "https://chromium.googlesource.com/chromium/src/base/trace_event/common.git",
 )
 
 python_register_toolchains(
@@ -538,11 +573,6 @@ py_deps_install()
 bind(
     name = "icu",
     actual = "@com_googlesource_chromium_icu//:icu",
-)
-
-bind(
-    name = "base_trace_event_common",
-    actual = "@com_googlesource_chromium_base_trace_event_common//:trace_event_common",
 )
 
 # Tell workerd code where to find v8.

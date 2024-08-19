@@ -7,10 +7,11 @@
 // Sentry integration will end up treating the logs.
 
 #include <kj/common.h>
+#include <kj/debug.h>
 #include <kj/string.h>
 #include <kj/exception.h>
 #include <kj/time.h>
-#include <stdint.h>
+#include <cstdint>
 
 namespace workerd {
 

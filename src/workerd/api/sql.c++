@@ -4,7 +4,7 @@
 
 #include "sql.h"
 #include "actor-state.h"
-#include "workerd/io/io-context.h"
+#include <workerd/io/io-context.h>
 
 namespace workerd::api {
 
@@ -19,9 +19,10 @@ jsg::Ref<SqlStorage::Cursor> SqlStorage::exec(jsg::Lock& js, kj::String querySql
   return jsg::alloc<Cursor>(*sqlite, regulator, querySql, kj::mv(bindings));
 }
 
-kj::String SqlStorage::ingest(jsg::Lock& js, kj::String querySql) {
+SqlStorage::IngestResult SqlStorage::ingest(jsg::Lock& js, kj::String querySql) {
   SqliteDatabase::Regulator& regulator = *this;
-  return kj::str(sqlite->ingestSql(regulator, querySql));
+  auto result = sqlite->ingestSql(regulator, querySql);
+  return IngestResult(kj::str(result.remainder), result.rowsRead, result.rowsWritten, result.statementCount);
 }
 
 jsg::Ref<SqlStorage::Statement> SqlStorage::prepare(jsg::Lock& js, kj::String query) {
@@ -77,7 +78,7 @@ SqlStorage::Cursor::~Cursor() noexcept(false) {
   KJ_IF_SOME(s, selfRef) {
     KJ_IF_SOME(p, s) {
       if (&p == this) {
-        s = nullptr;
+        s = kj::none;
       }
     }
   }
