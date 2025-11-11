@@ -23,27 +23,16 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-/* todo: the following is adopted code, enabling linting one day */
-/* eslint-disable */
-
-'use strict';
+import { Buffer } from 'node-internal:internal_buffer';
 
 import {
-  Buffer,
-} from 'node-internal:internal_buffer';
-
-import {
-    isAnyArrayBuffer,
-    isArrayBufferView,
+  isAnyArrayBuffer,
+  isArrayBufferView,
 } from 'node-internal:internal_types';
 
-import {
-    ERR_INVALID_ARG_TYPE,
-} from 'node-internal:internal_errors';
+import { ERR_INVALID_ARG_TYPE } from 'node-internal:internal_errors';
 
-import {
-  validateString,
-} from 'node-internal:validators';
+import { validateString } from 'node-internal:validators';
 
 import { default as cryptoImpl } from 'node-internal:crypto';
 type ArrayLike = cryptoImpl.ArrayLike;
@@ -52,16 +41,21 @@ export const kHandle = Symbol('kHandle');
 export const kFinalized = Symbol('kFinalized');
 export const kState = Symbol('kFinalized');
 
-export function getStringOption(options: any, key: string) {
-  let value;
-  if (options && (value = options[key]) != null)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function getStringOption(options: any, key: string): string | undefined {
+  let value: string | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition,@typescript-eslint/no-unsafe-member-access
+  if (options && (value = options[key] as string) != null)
     validateString(value, `options.${key}`);
   return value;
 }
 
-export function getArrayBufferOrView(buffer: Buffer | ArrayBuffer | ArrayBufferView | string, name: string, encoding?: string): Buffer | ArrayBuffer | ArrayBufferView {
-  if (isAnyArrayBuffer(buffer))
-    return buffer as ArrayBuffer;
+export function getArrayBufferOrView(
+  buffer: CryptoKey | Buffer | ArrayBuffer | ArrayBufferView | string,
+  name: string,
+  encoding?: string
+): Buffer | ArrayBuffer | ArrayBufferView {
+  if (isAnyArrayBuffer(buffer)) return buffer;
   if (typeof buffer === 'string') {
     if (encoding === undefined || encoding === 'buffer') {
       encoding = 'utf8';
@@ -71,14 +65,8 @@ export function getArrayBufferOrView(buffer: Buffer | ArrayBuffer | ArrayBufferV
   if (!isArrayBufferView(buffer)) {
     throw new ERR_INVALID_ARG_TYPE(
       name,
-      [
-        'string',
-        'ArrayBuffer',
-        'Buffer',
-        'TypedArray',
-        'DataView',
-      ],
-      buffer,
+      ['string', 'ArrayBuffer', 'Buffer', 'TypedArray', 'DataView'],
+      buffer
     );
   }
   return buffer;
@@ -90,7 +78,8 @@ export function getArrayBufferOrView(buffer: Buffer | ArrayBuffer | ArrayBufferV
  * @returns {number} corresponding to the ASCII code of the hex representation
  *                   of the parameter.
  */
-export const numberToHexCharCode = (number: number): number => (number < 10 ? 48 : 87) + number;
+export const numberToHexCharCode = (number: number): number =>
+  (number < 10 ? 48 : 87) + number;
 
 /**
  * @param {ArrayBuffer} buf An ArrayBuffer.
@@ -98,7 +87,7 @@ export const numberToHexCharCode = (number: number): number => (number < 10 ? 48
  */
 export function arrayBufferToUnsignedBigInt(buf: ArrayBuffer): bigint {
   const length = buf.byteLength;
-  const chars = Array<number>(length * 2);
+  const chars = new Array<number>(length * 2);
   const view = new DataView(buf);
 
   for (let i = 0; i < length; i++) {
@@ -113,7 +102,10 @@ export function arrayBufferToUnsignedBigInt(buf: ArrayBuffer): bigint {
 // This is here because many functions accepted binary strings without
 // any explicit encoding in older versions of node, and we don't want
 // to break them unnecessarily.
-export function toBuf(val: ArrayLike, encoding?: string): Buffer|ArrayBuffer|ArrayBufferView {
+export function toBuf(
+  val: ArrayLike,
+  encoding?: string
+): Buffer | ArrayBuffer | ArrayBufferView {
   if (typeof val === 'string') {
     if (encoding === 'buffer') {
       encoding = 'utf8';
@@ -123,8 +115,10 @@ export function toBuf(val: ArrayLike, encoding?: string): Buffer|ArrayBuffer|Arr
   return val;
 }
 
-export function validateByteSource(val: ArrayLike,
-                                   name: string): Buffer|ArrayBuffer|ArrayBufferView {
+export function validateByteSource(
+  val: ArrayLike,
+  name: string
+): Buffer | ArrayBuffer | ArrayBufferView {
   val = toBuf(val);
 
   if (isAnyArrayBuffer(val) || isArrayBufferView(val)) {
@@ -133,12 +127,7 @@ export function validateByteSource(val: ArrayLike,
 
   throw new ERR_INVALID_ARG_TYPE(
     name,
-    [
-      'string',
-      'ArrayBuffer',
-      'TypedArray',
-      'DataView',
-      'Buffer',
-    ],
-    val);
+    ['string', 'ArrayBuffer', 'TypedArray', 'DataView', 'Buffer'],
+    val
+  );
 }

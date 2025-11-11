@@ -10,6 +10,36 @@ the same interface on top of different JavaScript engines. However, as of today,
 quite the case. At present application code will still need to use V8 APIs directly in some
 cases. We would like to improve this in the future.
 
+## V8 Fast API
+
+V8 Fast API allows V8 to compile JavaScript code that calls native functions in a way that directly jumps to the C++ implementation without going through the usual JavaScript-to-C++ binding layers. This is accomplished by having V8 generate specialized machine code that knows how to call the C++ function directly, skipping the overhead of value conversion and JavaScript calling conventions.
+
+### Requirements for Fast API compatibility
+
+For a method to be compatible with Fast API, it must adhere to several constraints due to v8 itself, and may change as the fast api mechanism continues to evolve:
+
+1. **Return Type**: Must be one of these primitive types: `void`, `bool`, `int32_t`, `uint32_t`, `float`, or `double`.
+
+2. **Parameter Types**: Can be the primitive types listed above, or V8 handle types like `v8::Local<v8::Value>` or `v8::Local<v8::Object>`, or types that can be unwrapped from a V8 value using the TypeWrapper.
+
+3. **Method Structure**: Can be a regular instance method, a const instance method, or a method that takes `jsg::Lock&` as its first parameter.
+
+### Using Fast API in workerd
+
+By default, any `JSG_METHOD(name)` will execute fast path if the method signature is compatible with Fast API requirements. To explicitly force the function to use v8 Fast API in workerd, you can use `JSG_ASSERT_FASTAPI`.
+
+### How it works
+
+When a method is registered with the v8 fast api, workerd automatically:
+
+1. Checks if the method signature is compatible with Fast API requirements
+2. Registers both a regular (slow path) method handler and a Fast API handler
+3. Let's V8 optimize calls to this method when possible
+
+V8 determines at runtime whether to use the fast or slow path:
+- The fast path is used when the method is called from optimized code
+- The slow path is used when called from unoptimized code or when handling complex cases
+
 ## The Basics
 
 If you haven't done so already, I recommend reading through both the ["KJ Style Guide"][]
@@ -168,6 +198,21 @@ void doSomething(kj::Array<kj::String> strings) {
 
 ```js
 doSomething(['a', 'b', 'c']);
+```
+
+### Set type (`kj::HashSet<T>`)
+
+The `kj::HashSet<T>` type maps to JavaScript sets. The `T` can be any value, though there are
+currently some restrictions. For example, you cannot have a `kj::HashSet<CustomStruct>`.
+
+```cpp
+void doSomething(kj::HashSet<kj::String> strings) {
+  KJ_DBG(strings.has("a"));
+}
+```
+
+```js
+doSomething(new Set(['a', 'b', 'c']));
 ```
 
 ### Sequence types (`jsg::Sequence<T>`)
@@ -342,7 +387,7 @@ mappings for these structures.
 One choice is to map to and from a `kj::Array<kj::byte>`.
 
 When receiving a `kj::Array<kj::byte>` in C++ *from* a JavaScript `TypedArray` or `ArrayBuffer`,
-it is important to understand that the underlying data is not copied or transfered. Instead, the
+it is important to understand that the underlying data is not copied or transferred. Instead, the
 `kj::Array<kj::byte>` provides a *view* over the same underlying `v8::BackingStore` as the
 `TypedArray` or `ArrayBuffer`.
 
@@ -535,8 +580,8 @@ object. This wrapper is created lazily when the `jsg::Ref<T>` instance is first 
 out to JavaScript via JSG mechanisms.
 
 ```cpp
-// We'll discuss jsg::alloc a bit later as part of the introduction to Resource Types.
-jsg::Ref<Foo> foo = jsg::alloc<Foo>();
+// We'll discuss js.alloc a bit later as part of the introduction to Resource Types.
+jsg::Ref<Foo> foo = js.alloc<Foo>();
 
 jsg::Ref<Foo> foo2 = foo.addRef();
 
@@ -639,6 +684,24 @@ The `JSG_STRUCT` macro adds the necessary boilerplate to allow JSG to perform
 the necessary mapping between the C++ struct and the JavaScript object. Only the
 properties listed in the macro are mapped. (In this case, `onlyInternal` is not
 included in the JavaScript object.)
+
+If the struct has a validate() method, it is called when the struct is unwrapped from v8.
+This is an opportunity for it to throw a TypeError based on some custom logic.
+The signature for this method is `void validate(jsg::Lock&);`
+
+```cpp
+struct ValidatingFoo {
+  kj::String abc;
+
+  void validate(jsg::Lock& lock) {
+    JSG_REQUIRE(abc.size() != 0, TypeError, "Field 'abc' had no length in 'ValidatingFoo'.");
+  }
+
+  JSG_STRUCT(abc);
+};
+```
+
+In this example the validate method would throw a `TypeError` if the size of the `abc` field was zero.
 
 ```cpp
 Foo someFunction(Foo foo) {
@@ -763,7 +826,7 @@ public:
   Foo(int value): value(value) {}
 
   static jsg::Ref<Foo> constructor(jsg::Lock& js, int value) {
-    return jsg::alloc<Foo>(value);
+    return js.alloc<Foo>(value);
   }
 
   JSG_RESOURCE_TYPE(Foo) {}
@@ -1397,11 +1460,11 @@ the following rules are applied:
    modifier will be added if it's not already present. In the special case that the override is a
    `type`-alias to `never`, the generated definition will be deleted.
 
-2. Otherwise, the override will be converted to a TypeScript class as follows: (where `<name>` is the
+2. Otherwise, the override will be converted to a TypeScript class as follows: (where `<n>` is the
    unqualified C++ type name of this resource type)
 
-   1. If an override starts with `extends `, `implements ` or `{`: `class <name> ` will be prepended
-   2. If an override starts with `<`: `class <name>` will be prepended
+   1. If an override starts with `extends `, `implements ` or `{`: `class <n> ` will be prepended
+   2. If an override starts with `<`: `class <n>` will be prepended
    3. Otherwise, `class ` will be prepended
 
    After this, if the override doesn't end with `}`, ` {}` will be appended.
@@ -1664,7 +1727,7 @@ All `jsg::Object` instances provide a basic implementation of these methods.
 Within a `jsg::Object`, your only responsibility would be to implement the
 helper `visitForMemoryInfo(jsg::MemoryTracker& tracker) const` method only
 if the type has additional fields that need to be tracked. This works a
-lot like the `visitForGc(...)` method used for gc tracing:
+lot like the `visitForGc(...)` method used for GC tracing:
 
 ```cpp
 class Foo : public jsg::Object {
@@ -1686,7 +1749,7 @@ This code is only ever called when a heap snapshot is being generated so
 typically it should have very little cost. Heap snapshots are generally
 fairly expensive to create, however, so care should be taken not to make
 things too complicated. Ideally, none of the implementation methods in a
-type should allocate. There is some allocation occuring internally while
+type should allocate. There is some allocation occurring internally while
 building the graph, of course, but the methods for visitation (in particular
 the `jsgGetMemoryInfo(...)` method) should not perform any allocations if it
 can be avoided.

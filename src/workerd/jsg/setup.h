@@ -5,17 +5,25 @@
 #pragma once
 // Public API for setting up JavaScript context. Only high-level code needs to include this file.
 
-#include "jsg.h"
 #include "async-context.h"
-#include "type-wrapper.h"
+#include "jsg.h"
 #include "v8-platform-wrapper.h"
-#include "v8-profiler.h"
+
+#include <workerd/jsg/observer.h>
 #include <workerd/util/batch-queue.h>
+
+#include <v8-profiler.h>
+
 #include <kj/map.h>
 #include <kj/mutex.h>
-#include <workerd/jsg/observer.h>
+#include <kj/vector.h>
+
+#include <typeindex>
 
 namespace workerd::jsg {
+
+class Deserializer;
+class Serializer;
 
 // Construct a default V8 platform, with the given background thread pool size.
 //
@@ -33,49 +41,59 @@ kj::Own<v8::Platform> defaultPlatform(uint backgroundThreadCount);
 // construct one of these per process. This performs process-wide initialization of the V8
 // library.
 class V8System {
-public:
-  // Use the default v8::Platform implementation, as if by:
+  using PumpMsgLoopType = kj::Function<bool(v8::Isolate*)>;
+  using ShutdownIsolateType = kj::Function<void(v8::Isolate*)>;
+
+ public:
+  // Uses the default v8::Platform implementation, as if by:
   //   auto v8Platform = jsg::defaultPlatform();
-  //   auto v8System = V8System(*v8Platform);
-  V8System();
-
-  // `flags` is a list of command-line flags to pass to V8, like "--expose-gc" or
+  //   auto v8System = V8System(*v8Platform, flags);
+  // (Optional) `flags` is a list of command-line flags to pass to V8, like "--expose-gc" or
   // "--single_threaded_gc". An exception will be thrown if any flags are not recognized.
-  explicit V8System(kj::ArrayPtr<const kj::StringPtr> flags);
+  explicit V8System(kj::ArrayPtr<const kj::StringPtr> flags = nullptr);
 
-  // Use a possibly-custom v8::Platform implementation. Use this if you need to override any
-  // functionality provided by the v8::Platform API.
-  explicit V8System(v8::Platform& platform);
+  // Use a possibly-custom v8::Platform wrapper over default v8::Platform, and apply flags.
+  explicit V8System(v8::Platform& platform,
+      kj::ArrayPtr<const kj::StringPtr> flags,
+      v8::Platform* defaultPlatformPtr);
 
-  // Use a possibly-custom v8::Platform implementation, and apply flags.
-  explicit V8System(v8::Platform& platform, kj::ArrayPtr<const kj::StringPtr> flags);
+  // Use a possibly-custom v8::Platform implementation with custom task queue, and apply flags.
+  explicit V8System(v8::Platform& platform,
+      kj::ArrayPtr<const kj::StringPtr> flags,
+      PumpMsgLoopType,
+      ShutdownIsolateType);
 
   ~V8System() noexcept(false);
 
-  typedef void FatalErrorCallback(kj::StringPtr location, kj::StringPtr message);
+  using FatalErrorCallback = void(kj::StringPtr location, kj::StringPtr message);
   static void setFatalErrorCallback(FatalErrorCallback* callback);
 
-private:
+ private:
   kj::Own<v8::Platform> platformInner;
-  V8PlatformWrapper platformWrapper;
+  kj::Own<V8PlatformWrapper> platformWrapper;
+  PumpMsgLoopType pumpMsgLoop;
+  ShutdownIsolateType shutdownIsolate;
   friend class IsolateBase;
 
-  explicit V8System(kj::Own<v8::Platform>, kj::ArrayPtr<const kj::StringPtr>);
+  void init(kj::Own<v8::Platform>,
+      kj::ArrayPtr<const kj::StringPtr>,
+      PumpMsgLoopType,
+      ShutdownIsolateType);
 };
 
 // Base class of Isolate<T> containing parts that don't need to be templated, to avoid code
 // bloat.
 class IsolateBase {
-public:
+ public:
   static IsolateBase& from(v8::Isolate* isolate);
 
   // Unwraps a JavaScript exception as a kj::Exception.
-  virtual kj::Exception unwrapException(v8::Local<v8::Context> context,
-                                        v8::Local<v8::Value> exception) = 0;
+  virtual kj::Exception unwrapException(
+      Lock& js, v8::Local<v8::Context> context, v8::Local<v8::Value> exception) = 0;
 
   // Wraps a kj::Exception as a JavaScript Exception.
-  virtual v8::Local<v8::Value> wrapException(v8::Local<v8::Context> context,
-                                             kj::Exception&& exception) = 0;
+  virtual v8::Local<v8::Value> wrapException(
+      Lock& js, v8::Local<v8::Context> context, kj::Exception&& exception) = 0;
 
   // Used by Serializer/Deserializer implementations, calls into DynamicResourceTypeMap
   // serializerMap and deserializerMap.
@@ -93,13 +111,18 @@ public:
     maybeLogger = kj::mv(logger);
   }
 
-  using ModuleFallbackCallback =
-      kj::Maybe<kj::OneOf<kj::String, jsg::ModuleRegistry::ModuleInfo>>(
-          jsg::Lock&,
-          kj::StringPtr,
-          kj::Maybe<kj::String>,
-          jsg::CompilationObserver&,
-          jsg::ModuleRegistry::ResolveMethod);
+  using ErrorReporter = Lock::ErrorReporter;
+  inline void setErrorReporterCallback(kj::Badge<Lock>, kj::Function<ErrorReporter>&& reporter) {
+    maybeErrorReporter = kj::mv(reporter);
+  }
+
+  using ModuleFallbackCallback = kj::Maybe<kj::OneOf<kj::String, jsg::ModuleRegistry::ModuleInfo>>(
+      jsg::Lock&,
+      kj::StringPtr,
+      kj::Maybe<kj::String>,
+      jsg::CompilationObserver&,
+      jsg::ModuleRegistry::ResolveMethod,
+      kj::Maybe<kj::StringPtr>);
   inline void setModuleFallbackCallback(kj::Function<ModuleFallbackCallback>&& callback) {
     maybeModuleFallbackCallback = kj::mv(callback);
   }
@@ -110,42 +133,147 @@ public:
     return kj::none;
   }
 
-  inline void setAllowEval(kj::Badge<Lock>, bool allow) { evalAllowed = allow; }
+  inline void setAllowEval(kj::Badge<Lock>, bool allow) {
+    if (alwaysAllowEval) return;
+    evalAllowed = allow;
+  }
+
+  inline void setAllowsAllowEval() {
+    alwaysAllowEval = true;
+    evalAllowed = true;
+  }
+
   inline void setCaptureThrowsAsRejections(kj::Badge<Lock>, bool capture) {
     captureThrowsAsRejections = capture;
   }
-  inline void setCommonJsExportDefault(kj::Badge<Lock>, bool exportDefault) {
-    exportCommonJsDefault = exportDefault;
+
+  inline void setNodeJsCompatEnabled(kj::Badge<Lock>, bool enabled) {
+    nodeJsCompatEnabled = enabled;
   }
 
-  inline bool areWarningsLogged() const { return maybeLogger != kj::none; }
+  inline void setNodeJsProcessV2Enabled(kj::Badge<Lock>, bool enabled) {
+    nodeJsProcessV2Enabled = enabled;
+  }
+
+  inline bool areWarningsLogged() const {
+    return maybeLogger != kj::none;
+  }
+  inline bool areErrorsReported() const {
+    return maybeErrorReporter != kj::none;
+  }
+
+  inline bool isNodeJsCompatEnabled() const {
+    return nodeJsCompatEnabled;
+  }
+
+  inline bool isNodeJsProcessV2Enabled() const {
+    return nodeJsProcessV2Enabled;
+  }
+
+  inline bool shouldSetToStringTag() const {
+    return setToStringTag;
+  }
+
+  void enableSetToStringTag() {
+    setToStringTag = true;
+  }
+
+  inline void disableTopLevelAwait() {
+    allowTopLevelAwait = false;
+  }
+
+  inline bool isTopLevelAwaitEnabled() const {
+    return allowTopLevelAwait;
+  }
 
   // The logger will be optionally set by the isolate setup logic if there is anywhere
   // for the log to go (for instance, if debug logging is enabled or the inspector is
   // being used).
   inline void logWarning(Lock& js, kj::StringPtr message) {
-    KJ_IF_SOME(logger, maybeLogger) { logger(js, message); }
+    KJ_IF_SOME(logger, maybeLogger) {
+      logger(js, message);
+    }
   }
 
-  // Returns a random UUID for this isolate instance.
-  kj::StringPtr getUuid();
+  inline void reportError(
+      Lock& js, kj::String desc, const JsValue& error, const JsMessage& message) {
+    KJ_IF_SOME(reporter, maybeErrorReporter) {
+      reporter(js, kj::mv(desc), error, message);
+    }
+  }
 
-  IsolateObserver& getObserver() { return *observer; }
+  IsolateObserver& getObserver() {
+    return *observer;
+  }
 
   // Implementation of MemoryRetainer
   void jsgGetMemoryInfo(MemoryTracker& tracker) const;
-  kj::StringPtr jsgGetMemoryName() const { return "IsolateBase"_kjc; }
-  size_t jsgGetMemorySelfSize() const { return sizeof(IsolateBase); }
-  bool jsgGetMemoryInfoIsRootNode() const { return true; }
-
-  JsSymbol getSymbolDispose() {
-    return JsSymbol(symbolDispose.Get(ptr));
+  kj::StringPtr jsgGetMemoryName() const {
+    return "IsolateBase"_kjc;
   }
-  JsSymbol getSymbolAsyncDispose() {
-    return JsSymbol(symbolAsyncDispose.Get(ptr));
+  size_t jsgGetMemorySelfSize() const {
+    return sizeof(IsolateBase);
+  }
+  bool jsgGetMemoryInfoIsRootNode() const {
+    return true;
   }
 
-private:
+  // Get an object referencing this isolate that can be used to adjust external memory usage later
+  kj::Arc<const ExternalMemoryTarget> getExternalMemoryTarget();
+
+  // Equivalent to getExternalMemoryTarget()->getAdjustment(amount), but saves an atomic refcount
+  // increment and decrement.
+  ExternalMemoryAdjustment getExternalMemoryAdjustment(int64_t amount) {
+    return externalMemoryTarget->getAdjustment(amount);
+  }
+
+  AsyncContextFrame::StorageKey& getEnvAsyncContextKey() {
+    return *envAsyncContextKey;
+  }
+
+  void setUsingNewModuleRegistry() {
+    usingNewModuleRegistry = true;
+  }
+
+  bool isUsingNewModuleRegistry() const {
+    return usingNewModuleRegistry;
+  }
+
+  void setThrowOnUnrecognizedImportAssertion() {
+    throwOnUnrecognizedImportAssertion = true;
+  }
+
+  bool getThrowOnUnrecognizedImportAssertion() const {
+    return throwOnUnrecognizedImportAssertion;
+  }
+
+  void setUsingEnhancedErrorSerialization() {
+    usingEnhancedErrorSerialization = true;
+  }
+
+  bool getUsingEnhancedErrorSerialization() const {
+    return usingEnhancedErrorSerialization;
+  }
+
+  void setUsingFastJsgStruct() {
+    usingFastJsgStruct = true;
+  }
+
+  bool getUsingFastJsgStruct() const {
+    return usingFastJsgStruct;
+  }
+
+  bool pumpMsgLoop() {
+    return v8System.pumpMsgLoop(ptr);
+  }
+
+  // Allows an object to register an that will be dropped when the destroy
+  // queue is drained under the isolate lock.
+  void destroyUnderLock(kj::Own<void> item) {
+    deferDestruction(kj::mv(item));
+  }
+
+ private:
   template <typename TypeWrapper>
   friend class Isolate;
 
@@ -153,9 +281,11 @@ private:
 
   // The internals of a jsg::Ref<T> to be deleted.
   class RefToDelete {
-  public:
+   public:
     RefToDelete(bool strong, kj::Own<void> ownWrappable, Wrappable* wrappable)
-        : strong(strong), ownWrappable(kj::mv(ownWrappable)), wrappable(wrappable) {}
+        : strong(strong),
+          ownWrappable(kj::mv(ownWrappable)),
+          wrappable(wrappable) {}
     ~RefToDelete() noexcept(false) {
       if (ownWrappable.get() != nullptr && strong) {
         wrappable->removeStrongRef();
@@ -166,18 +296,22 @@ private:
     // Default move ctor okay because ownWrappable.get() will be null if moved-from.
     KJ_DISALLOW_COPY(RefToDelete);
 
-  private:
+   private:
     bool strong;
     // Keeps the `wrappable` pointer below valid.
     kj::Own<void> ownWrappable;
     Wrappable* wrappable;
   };
 
-  using Item = kj::OneOf<v8::Global<v8::Data>, RefToDelete>;
+  using Item = kj::OneOf<v8::Global<v8::Data>, RefToDelete, kj::Own<void>>;
 
-  const V8System& system;
+  V8System& v8System;
+  // TODO(cleanup): After v8 13.4 is fully released we can inline this into `newIsolate`
+  //                and remove this member.
+  std::unique_ptr<class v8::CppHeap> cppHeap;
   v8::Isolate* ptr;
-  kj::Maybe<kj::String> uuid;
+  // When true, evalAllowed is true and switching it to false is a no-op.
+  bool alwaysAllowEval = false;
   bool evalAllowed = false;
 
   // The Web Platform API specifications require that any API that returns a JavaScript Promise
@@ -186,19 +320,37 @@ private:
   // and there are a number of async APIs that currently throw. When the captureThrowsAsRejections
   // flag is set, that old behavior is changed to be correct.
   bool captureThrowsAsRejections = false;
-  bool exportCommonJsDefault = false;
   bool asyncContextTrackingEnabled = false;
+  bool nodeJsCompatEnabled = false;
+  bool nodeJsProcessV2Enabled = false;
+  bool setToStringTag = false;
+  bool allowTopLevelAwait = true;
+  bool usingNewModuleRegistry = false;
+  bool usingEnhancedErrorSerialization = false;
+  bool usingFastJsgStruct = false;
+
+  // Only used when the original module registry is used.
+  bool throwOnUnrecognizedImportAssertion = false;
 
   kj::Maybe<kj::Function<Logger>> maybeLogger;
+  kj::Maybe<kj::Function<ErrorReporter>> maybeErrorReporter;
   kj::Maybe<kj::Function<ModuleFallbackCallback>> maybeModuleFallbackCallback;
 
   // FunctionTemplate used by Wrappable::attachOpaqueWrapper(). Just a constructor for an empty
   // object with 2 internal fields.
   v8::Global<v8::FunctionTemplate> opaqueTemplate;
 
-  // Polyfilled Symbol.dispose and Symbol.asyncDispose.
-  v8::Global<v8::Symbol> symbolDispose;
-  v8::Global<v8::Symbol> symbolAsyncDispose;
+  // Object used as the underlying storage for a workers environment.
+  v8::Global<v8::Object> workerEnvObj;
+
+  /* *** External Memory accounting *** */
+  // ExternalMemoryTarget holds a weak reference back to the isolate. ExternalMemoryAjustments
+  // hold references to the ExternalMemoryTarget. This allows the ExternalMemoryAjustments to
+  // outlive the isolate.
+  kj::Arc<const ExternalMemoryTarget> externalMemoryTarget;
+
+  // A shared async context key for accessing env
+  kj::Own<AsyncContextFrame::StorageKey> envAsyncContextKey;
 
   // We expect queues to remain relatively small -- 8 is the largest size I have observed from local
   // testing.
@@ -210,10 +362,11 @@ private:
   // We use a double buffer for our deferred destruction queue. This allows us to avoid any
   // allocations in the general, steady state case, and forces us to clear the vector (a O(n)
   // operation) outside of the queue lock.
-  const kj::MutexGuarded<BatchQueue<Item>> queue {
-    DESTRUCTION_QUEUE_INITIAL_SIZE,
-    DESTRUCTION_QUEUE_MAX_CAPACITY
-  };
+  const kj::MutexGuarded<BatchQueue<Item>> queue{
+    DESTRUCTION_QUEUE_INITIAL_SIZE, DESTRUCTION_QUEUE_MAX_CAPACITY};
+
+  enum QueueState { ACTIVE, DROPPING, DROPPED };
+  QueueState queueState = ACTIVE;
 
   struct CodeBlockInfo {
     size_t size = 0;
@@ -231,22 +384,25 @@ private:
   // Maps instructions to source code locations.
   kj::TreeMap<uintptr_t, CodeBlockInfo> codeMap;
 
-  explicit IsolateBase(const V8System& system, v8::Isolate::CreateParams&& createParams,
-    kj::Own<IsolateObserver> observer);
+  explicit IsolateBase(V8System& system,
+      v8::Isolate::CreateParams&& createParams,
+      kj::Own<IsolateObserver> observer,
+      v8::IsolateGroup group);
   ~IsolateBase() noexcept(false);
   KJ_DISALLOW_COPY_AND_MOVE(IsolateBase);
 
-  void dropWrappers(kj::Own<void> typeWrapperInstance);
+  void dropWrappers(kj::FunctionParam<void()> drop);
 
-  bool getCaptureThrowsAsRejections() const { return captureThrowsAsRejections; }
-
-  bool getCommonJsExportDefault() const { return exportCommonJsDefault; }
+  bool getCaptureThrowsAsRejections() const {
+    return captureThrowsAsRejections;
+  }
 
   // Add an item to the deferred destruction queue. Safe to call from any thread at any time.
   void deferDestruction(Item item);
 
-  // Destroy everything in the deferred destruction queue. Must be called under the isolate lock.
-  void clearDestructionQueue();
+  // Destroy everything in the deferred destruction queue and apply deferred external memory
+  // updates. Called each time a lock is taken. Must be called under the isolate lock.
+  void applyDeferredActions();
 
   static void fatalError(const char* location, const char* message);
   static void oomError(const char* location, const v8::OOMDetails& details);
@@ -254,10 +410,10 @@ private:
   static v8::ModifyCodeGenerationFromStringsResult modifyCodeGenCallback(
       v8::Local<v8::Context> context, v8::Local<v8::Value> source, bool isCodeLike);
   static bool allowWasmCallback(v8::Local<v8::Context> context, v8::Local<v8::String> source);
+  static bool jspiEnabledCallback(v8::Local<v8::Context> context);
 
   static void jitCodeEvent(const v8::JitCodeEvent* event) noexcept;
 
-  friend class IsolateBase;
   friend kj::Maybe<kj::StringPtr> getJsStackTrace(void* ucontext, kj::ArrayPtr<char> scratch);
 
   HeapTracer heapTracer;
@@ -266,13 +422,13 @@ private:
   friend class Data;
   friend class Wrappable;
   friend class HeapTracer;
+  friend class ExternalMemoryTarget;
 
   friend bool getCaptureThrowsAsRejections(v8::Isolate* isolate);
-  friend bool getCommonJsExportDefault(v8::Isolate* isolate);
   friend kj::Maybe<kj::StringPtr> getJsStackTrace(void* ucontext, kj::ArrayPtr<char> scratch);
 
-  friend kj::Exception createTunneledException(v8::Isolate* isolate,
-                                               v8::Local<v8::Value> exception);
+  friend kj::Exception createTunneledException(
+      v8::Isolate* isolate, v8::Local<v8::Value> exception);
 
   // Get a singleton ObjectTemplate used for opaque wrappers (which have an empty-object interface
   // in JavaScript). (Called by Wrappable::attachOpaqueWrapper().)
@@ -288,6 +444,14 @@ private:
 // through it. The trace is built inside `scratch` without performing any allocation. This is
 // intended to be invoked from a signal handler.
 kj::Maybe<kj::StringPtr> getJsStackTrace(void* ucontext, kj::ArrayPtr<char> scratch);
+
+// Set the location of the pointer cage base for the current isolate.  This is only
+// used by getJsCageBase().
+void setJsCageBase(void* cageBase);
+
+// Get the location previously set by setJsCageBase() for the current isolate.  Returns
+// a null pointer if there is no current isolate.
+void* getJsCageBase();
 
 // Class representing a JavaScript execution engine, with the ability to wrap some set of API
 // classes which you specify.
@@ -320,50 +484,96 @@ kj::Maybe<kj::StringPtr> getJsStackTrace(void* ucontext, kj::ArrayPtr<char> scra
 //       v8::Local<v8::Context> context = lock.newContext(lock.isolate, MyContextType());
 //
 //       // Create an instance of MyType.
-//       v8::Local<v8::Object> obj = lock.getTypeHandler<MyType>().wrap(context, MyType());
+//       v8::Local<v8::Object> obj = lock.getTypeHandler<MyType>().wrap(lock, context, MyType());
 //     });
 //
 template <typename TypeWrapper>
 class Isolate: public IsolateBase {
-public:
-
+ public:
   // Construct an isolate that requires configuration. `configuration` is a value that all
   // individual wrappers' configurations must be able to be constructed from. For example, if all
   // wrappers use the same configuration type, then `MetaConfiguration` should just be that type.
   // If different wrappers use different types, then `MetaConfiguration` should be some value that
   // inherits or defines conversion operators to each required type -- or the individual
   // configuration types must declare constructors from `MetaConfiguration`.
+  // If `instantiateTypeWrapper` is false, then the default wrapper will not be instantiated
+  // and should be instantiated with `instantiateTypeWrapper` before `newContext` is called on
+  // a jsg::Lock of this Isolate.
+  //
+  // If using v8 sandboxing, the group argument controls which isolates share a
+  // sandbox, and which are isolated (as much as possible) in the event of a
+  // heap corruption attack. Note: The isolates in a group are limited to at
+  // most 4Gbytes of V8 heap in all.  Groups can be created with
+  // v8::IsolateGroup::Create().  (If using V8 pointer compression, this
+  // requires the enable_pointer_compression_multiple_cages build flag for V8.)
+  // Pass v8::IsolateGroup::Default() as the group to put all isolates in the
+  // same group.
   template <typename MetaConfiguration>
-  explicit Isolate(const V8System& system,
+  explicit Isolate(V8System& system,
+      v8::IsolateGroup group,
       MetaConfiguration&& configuration,
       kj::Own<IsolateObserver> observer,
-      v8::Isolate::CreateParams createParams = {})
-      : IsolateBase(system, kj::mv(createParams), kj::mv(observer)),
-        wrapper(wrapperSpace.construct(ptr, kj::fwd<MetaConfiguration>(configuration))) {
-          wrapper->initTypeWrapper();
-        }
-
-  // Use this constructor when no wrappers have any required configuration.
-  explicit Isolate(const V8System& system,
-      kj::Own<IsolateObserver> observer,
-      v8::Isolate::CreateParams createParams = {})
-      : Isolate(system, nullptr, kj::mv(observer), kj::mv(createParams)) {}
-
-  ~Isolate() noexcept(false) { dropWrappers(kj::mv(wrapper)); }
-
-  kj::Exception unwrapException(v8::Local<v8::Context> context,
-                                v8::Local<v8::Value> exception) override {
-    return wrapper->template unwrap<kj::Exception>(context, exception,
-                                                   jsg::TypeErrorContext::other());
+      v8::Isolate::CreateParams createParams = {},
+      bool instantiateTypeWrapper = true)
+      : IsolateBase(system, kj::mv(createParams), kj::mv(observer), group) {
+    wrappers.resize(1);
+    if (instantiateTypeWrapper) {
+      instantiateDefaultWrapper(kj::fwd<MetaConfiguration>(configuration));
+    }
   }
 
-  v8::Local<v8::Value> wrapException(v8::Local<v8::Context> context,
-                                     kj::Exception&& exception) override {
-    return wrapper->wrap(context, kj::none, kj::fwd<kj::Exception>(exception));
+  // Legacy isolate constructor that creates a new IsolateGroup for the new
+  // Isolate.  Currently used by non-sandboxing edgeworker, but deprecated.
+  template <typename MetaConfiguration>
+  explicit Isolate(V8System& system,
+      MetaConfiguration&& configuration,
+      kj::Own<IsolateObserver> observer,
+      v8::Isolate::CreateParams createParams = {},
+      bool instantiateTypeWrapper = true)
+      : IsolateBase(system, kj::mv(createParams), kj::mv(observer), v8::IsolateGroup::Create()) {
+    wrappers.resize(1);
+    if (instantiateTypeWrapper) {
+      instantiateDefaultWrapper(kj::fwd<MetaConfiguration>(configuration));
+    }
+  }
+
+  // Use this constructor when no wrappers have any required configuration.
+  explicit Isolate(V8System& system,
+      kj::Own<IsolateObserver> observer,
+      v8::Isolate::CreateParams createParams = {})
+      : Isolate(system,
+            v8::IsolateGroup::GetDefault(),
+            nullptr,
+            kj::mv(observer),
+            kj::mv(createParams)) {}
+
+  template <typename MetaConfiguration>
+  void instantiateDefaultWrapper(MetaConfiguration&& configuration) {
+    KJ_DASSERT(wrappers[0].get() == nullptr);
+    auto wrapper = wrapperSpace.construct(ptr, kj::fwd<MetaConfiguration>(configuration));
+    wrapper->initTypeWrapper();
+    wrappers[0] = kj::mv(wrapper);
+  }
+
+  ~Isolate() noexcept(false) {
+    dropWrappers([this]() { wrappers.clear(); });
+  }
+
+  kj::Exception unwrapException(
+      Lock& js, v8::Local<v8::Context> context, v8::Local<v8::Value> exception) override {
+    return getWrapperByContext(context)->template unwrap<kj::Exception>(
+        js, context, exception, jsg::TypeErrorContext::other());
+  }
+
+  v8::Local<v8::Value> wrapException(
+      Lock& js, v8::Local<v8::Context> context, kj::Exception&& exception) override {
+    return getWrapperByContext(context)->wrap(
+        js, context, kj::none, kj::fwd<kj::Exception>(exception));
   }
 
   bool serialize(
       Lock& js, std::type_index type, jsg::Object& instance, Serializer& serializer) override {
+    auto* wrapper = getWrapperByContext(js);
     KJ_IF_SOME(func, wrapper->serializerMap.find(type)) {
       func(*wrapper, js, instance, serializer);
       return true;
@@ -373,6 +583,7 @@ public:
   }
   kj::Maybe<v8::Local<v8::Object>> deserialize(
       Lock& js, uint tag, Deserializer& deserializer) override {
+    auto* wrapper = getWrapperByContext(js);
     KJ_IF_SOME(func, wrapper->deserializerMap.find(tag)) {
       return func(*wrapper, js, tag, deserializer);
     } else {
@@ -384,13 +595,14 @@ public:
   // constructing a `Lock` on the stack.
   class Lock final: public jsg::Lock {
 
-  public:
+   public:
     // `V8StackScope` must be provided to prove that one has been created on the stack before
-    // taking a lock. Any GC'd pointers stored on the stack must be kept within this scope in
+    // taking a lock. Any GC'ed pointers stored on the stack must be kept within this scope in
     // order for V8's stack-scanning GC to find them.
     Lock(const Isolate& isolate, V8StackScope&)
-        : jsg::Lock(isolate.ptr), jsgIsolate(const_cast<Isolate&>(isolate)) {
-      jsgIsolate.clearDestructionQueue();
+        : jsg::Lock(isolate.ptr),
+          jsgIsolate(const_cast<Isolate&>(isolate)) {
+      jsgIsolate.applyDeferredActions();
     }
     KJ_DISALLOW_COPY_AND_MOVE(Lock);
     KJ_DISALLOW_AS_COROUTINE_PARAM;
@@ -406,22 +618,50 @@ public:
     // Wrap a C++ value, returning a v8::Local (possibly of a specific type).
     template <typename T>
     auto wrap(v8::Local<v8::Context> context, T&& value) {
-      return jsgIsolate.wrapper->wrap(context, kj::none, kj::fwd<T>(value));
+      return jsgIsolate.getWrapperByContext(context)->wrap(
+          *this, context, kj::none, kj::fwd<T>(value));
     }
 
     // Wrap a context-independent value. Only a few built-in types, like numbers and strings,
     // can be wrapped without a context.
     template <typename T>
     auto wrapNoContext(T&& value) {
-      return jsgIsolate.wrapper->wrap(v8Isolate, kj::none, kj::fwd<T>(value));
+      return jsgIsolate.getWrapperByContext(*this)->wrap(v8Isolate, kj::none, kj::fwd<T>(value));
     }
 
     // Convert a JavaScript value to a C++ value, or throw a JS exception if the type doesn't
     // match.
     template <typename T>
     auto unwrap(v8::Local<v8::Context> context, v8::Local<v8::Value> handle) {
-      return jsgIsolate.wrapper->template unwrap<T>(
-          context, handle, jsg::TypeErrorContext::other());
+      return jsgIsolate.getWrapperByContext(context)->template unwrap<T>(
+          *this, context, handle, jsg::TypeErrorContext::other());
+    }
+
+    Ref<DOMException> domException(
+        kj::String name, kj::String message, kj::Maybe<kj::String> maybeStack) override {
+      return withinHandleScope([&] {
+        v8::Local<v8::FunctionTemplate> tmpl = jsgIsolate.getWrapperByContext(*this)->getTemplate(
+            v8Isolate, static_cast<DOMException*>(nullptr));
+        KJ_DASSERT(!tmpl.IsEmpty());
+        v8::Local<v8::Object> obj = check(tmpl->InstanceTemplate()->NewInstance(v8Context()));
+        v8::Local<v8::String> stackName = str("stack"_kjc);
+
+        KJ_IF_SOME(stack, maybeStack) {
+          v8::PropertyDescriptor prop(str(stack), true);
+          prop.set_enumerable(true);
+          jsg::check(obj->DefineProperty(v8Context(), stackName, prop));
+        } else {
+          v8::Exception::CaptureStackTrace(v8Context(), obj);
+          v8::PropertyDescriptor prop;
+          prop.set_enumerable(true);
+          jsg::check(obj->DefineProperty(v8Context(), stackName, prop));
+        }
+
+        auto de = alloc<DOMException>(kj::mv(message), kj::mv(name));
+        de.attachWrapper(v8Isolate, obj);
+
+        return kj::mv(de);
+      });
     }
 
     // Returns the constructor function for a given type declared as JSG_RESOURCE_TYPE.
@@ -438,47 +678,76 @@ public:
     jsg::JsObject getConstructor(v8::Local<v8::Context> context) {
       v8::EscapableHandleScope scope(v8Isolate);
       v8::Local<v8::FunctionTemplate> tpl =
-          jsgIsolate.wrapper->template getTemplate(v8Isolate, (T*)nullptr);
+          jsgIsolate.getWrapperByContext(context)->getTemplate(v8Isolate, static_cast<T*>(nullptr));
       v8::Local<v8::Object> prototype = check(tpl->GetFunction(context));
       return jsg::JsObject(scope.Escape(prototype));
     }
 
     v8::Local<v8::ArrayBuffer> wrapBytes(kj::Array<byte> data) override {
-      return jsgIsolate.wrapper->wrap(v8Isolate, kj::none, kj::mv(data));
+      return jsgIsolate.getWrapperByContext(*this)->wrap(v8Isolate, kj::none, kj::mv(data));
     }
     v8::Local<v8::Function> wrapSimpleFunction(v8::Local<v8::Context> context,
-        jsg::Function<void(const v8::FunctionCallbackInfo<v8::Value>& info)>
-            simpleFunction) override {
-      return jsgIsolate.wrapper->wrap(context, kj::none, kj::mv(simpleFunction));
+        jsg::Function<void(const v8::FunctionCallbackInfo<v8::Value>& info)> simpleFunction)
+        override {
+      return jsgIsolate.getWrapperByContext(context)->wrap(
+          *this, context, kj::none, kj::mv(simpleFunction));
     }
     v8::Local<v8::Function> wrapReturningFunction(v8::Local<v8::Context> context,
         jsg::Function<v8::Local<v8::Value>(const v8::FunctionCallbackInfo<v8::Value>& info)>
             returningFunction) override {
-      return jsgIsolate.wrapper->wrap(context, kj::none, kj::mv(returningFunction));
+      return jsgIsolate.getWrapperByContext(context)->wrap(
+          *this, context, kj::none, kj::mv(returningFunction));
     }
     v8::Local<v8::Function> wrapPromiseReturningFunction(v8::Local<v8::Context> context,
-      jsg::Function<jsg::Promise<jsg::Value>(
-          const v8::FunctionCallbackInfo<v8::Value>& info)> returningFunction) override {
-      return jsgIsolate.wrapper->wrap(context, kj::none, kj::mv(returningFunction));
+        jsg::Function<jsg::Promise<jsg::Value>(const v8::FunctionCallbackInfo<v8::Value>& info)>
+            returningFunction) override {
+      return jsgIsolate.getWrapperByContext(context)->wrap(
+          *this, context, kj::none, kj::mv(returningFunction));
     }
     kj::String toString(v8::Local<v8::Value> value) override {
-      return jsgIsolate.wrapper->template unwrap<kj::String>(
-          v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
+      return jsgIsolate.getWrapperByContext(*this)->template unwrap<kj::String>(
+          *this, v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
     }
     jsg::Dict<v8::Local<v8::Value>> toDict(v8::Local<v8::Value> value) override {
-      return jsgIsolate.wrapper->template unwrap<jsg::Dict<v8::Local<v8::Value>>>(
-          v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
+      return jsgIsolate.getWrapperByContext(*this)
+          ->template unwrap<jsg::Dict<v8::Local<v8::Value>>>(
+              *this, v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
     }
     jsg::Dict<jsg::JsValue> toDict(const jsg::JsValue& value) override {
-      return jsgIsolate.wrapper->template unwrap<jsg::Dict<jsg::JsValue>>(
-          v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
+      return jsgIsolate.getWrapperByContext(*this)->template unwrap<jsg::Dict<jsg::JsValue>>(
+          *this, v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
     }
     v8::Local<v8::Promise> wrapSimplePromise(jsg::Promise<jsg::Value> promise) override {
-      return jsgIsolate.wrapper->wrap(v8Context(), kj::none, kj::mv(promise));
+      return jsgIsolate.getWrapperByContext(*this)->wrap(
+          *this, v8Context(), kj::none, kj::mv(promise));
     }
     jsg::Promise<jsg::Value> toPromise(v8::Local<v8::Value> promise) override {
-      return jsgIsolate.wrapper->template unwrap<jsg::Promise<jsg::Value>>(
-          v8Isolate->GetCurrentContext(), promise, jsg::TypeErrorContext::other());
+      return jsgIsolate.getWrapperByContext(*this)->template unwrap<jsg::Promise<jsg::Value>>(
+          *this, v8Isolate->GetCurrentContext(), promise, jsg::TypeErrorContext::other());
+    }
+
+    template <typename T, typename... Args>
+    JsContext<T> newContextWithWrapper(
+        TypeWrapper* wrapper, NewContextOptions options, Args&&... args) {
+      // TODO(soon): Requiring move semantics for the global object is awkward. This should instead
+      //   allocate the object (forwarding arguments to the constructor) and return something like
+      //   a Ref.
+      auto context = wrapper->newContext(*this, options, jsgIsolate.getObserver(),
+          static_cast<T*>(nullptr), kj::fwd<Args>(args)...);
+      jsg::setAlignedPointerInEmbedderData(
+          context.getHandle(v8Isolate), jsg::ContextPointerSlot::EXTENDED_CONTEXT_WRAPPER, wrapper);
+      return context;
+    }
+
+    // Creates a new JavaScript "context", i.e. the global object. This is the first step to
+    // executing JavaScript code. T should be one of your API types which you want to use as the
+    // global object. `args...` are passed to the type's constructor.
+    template <typename T, typename... Args>
+    JsContext<T> newContext(NewContextOptions options, Args&&... args) {
+      KJ_DASSERT(!jsgIsolate.wrappers.empty());
+      KJ_DASSERT(jsgIsolate.wrappers[0].get() != nullptr);
+      return newContextWithWrapper<T>(
+          jsgIsolate.wrappers[0].get(), options, kj::fwd<Args>(args)...);
     }
 
     // Creates a new JavaScript "context", i.e. the global object. This is the first step to
@@ -486,62 +755,108 @@ public:
     // global object. `args...` are passed to the type's constructor.
     template <typename T, typename... Args>
     JsContext<T> newContext(Args&&... args) {
-      // TODO(soon): Requiring move semantics for the global object is awkward. This should instead
-      //   allocate the object (forwarding arguments to the constructor) and return something like
-      //   a Ref.
-
-      return jsgIsolate.wrapper->newContext(*this, jsgIsolate.getObserver(), (T*)nullptr, kj::fwd<Args>(args)...);
+      return newContext<T>(NewContextOptions{}, kj::fwd<Args>(args)...);
     }
 
-  private:
+    template <typename T, typename MetaConfiguration, typename... Args>
+    JsContext<T> newContextWithConfiguration(
+        MetaConfiguration&& configuration, NewContextOptions options, Args&&... args) {
+      jsgIsolate.hasExtraWrappers = true;
+      auto& wrapper = jsgIsolate.wrappers.add(
+          kj::heap<TypeWrapper>(jsgIsolate.ptr, kj::fwd<MetaConfiguration>(configuration)));
+      return newContextWithWrapper<T>(wrapper.get(), options, kj::fwd<Args>(args)...);
+    }
+
+    void reportError(const JsValue& value) override {
+      auto& js = Lock::from(v8Isolate);
+      KJ_IF_SOME(domException,
+          jsgIsolate.getWrapperByContext(*this)->tryUnwrap(
+              js, v8Context(), value, static_cast<DOMException*>(nullptr), kj::none)) {
+        auto desc =
+            kj::str("DOMException(", domException.getName(), "): ", domException.getMessage());
+        jsgIsolate.reportError(*this, kj::mv(desc), value, JsMessage::create(*this, value));
+      } else {
+        jsgIsolate.reportError(
+            *this, value.toString(*this), value, JsMessage::create(*this, value));
+      }
+    }
+
+    void setWorkerEnv(V8Ref<v8::Object> value) override {
+      jsgIsolate.workerEnvObj.Reset(v8Isolate, value.getHandle(*this));
+    }
+
+    kj::Maybe<V8Ref<v8::Object>> getWorkerEnv() override {
+      if (jsgIsolate.workerEnvObj.IsEmpty()) return kj::none;
+      return v8Ref<v8::Object>(jsgIsolate.workerEnvObj.Get(v8Isolate));
+    }
+
+   private:
     Isolate& jsgIsolate;
 
     virtual kj::Maybe<Object&> getInstance(
         v8::Local<v8::Object> obj, const std::type_info& type) override {
       auto instance = v8::Local<v8::Object>(obj)->FindInstanceInPrototypeChain(
-          jsgIsolate.wrapper->getDynamicTypeInfo(v8Isolate, type).tmpl);
+          jsgIsolate.getWrapperByContext(*this)->getDynamicTypeInfo(v8Isolate, type).tmpl);
       if (instance.IsEmpty()) {
         return kj::none;
       } else {
         return *reinterpret_cast<Object*>(
-            instance->GetAlignedPointerFromInternalField(Wrappable::WRAPPED_OBJECT_FIELD_INDEX));
+            instance->GetAlignedPointerFromInternalField(Wrappable::WRAPPED_OBJECT_FIELD_INDEX,
+                static_cast<v8::EmbedderDataTypeTag>(Wrappable::WRAPPED_OBJECT_FIELD_INDEX)));
       }
+    }
+
+    virtual v8::Local<v8::Object> getPrototypeFor(const std::type_info& type) override {
+      v8::EscapableHandleScope scope(v8Isolate);
+      auto tmpl = jsgIsolate.getWrapperByContext(*this)->getDynamicTypeInfo(v8Isolate, type).tmpl;
+      auto constructor = JsObject(check(tmpl->GetFunction(v8Context())));
+
+      // Note that `constructor.getPrototype()` returns the prototype of the constructor itself,
+      // which is NOT the same as the prototype of the object it constructs. For the latter we
+      // need to access the `prototype` property.
+      auto proto = constructor.get(*this, "prototype");
+
+      KJ_ASSERT(proto.isObject());
+      return scope.Escape(v8::Local<v8::Value>(proto).As<v8::Object>());
     }
   };
 
-  // The func must be a callback with the signature: void(jsg::Lock&)
-  void runInLockScope(auto func) {
-    runInV8Stack([&](V8StackScope& stackScope) {
+  // The func must be a callback with the signature: T(jsg::Lock&)
+  // Be careful not to leak v8 objects outside of the scope.
+  auto runInLockScope(auto func) {
+    return runInV8Stack([&](V8StackScope& stackScope) {
       Lock lock(*this, stackScope);
-      lock.withinHandleScope([&] {
-        func(lock);
-      });
+      return lock.withinHandleScope([&] { return func(lock); });
     });
   }
 
-private:
-  kj::SpaceFor<TypeWrapper> wrapperSpace;
-  kj::Own<TypeWrapper> wrapper;  // Needs to be destroyed under lock...
-};
-
-// This macro helps cut down on template spam in error messages. Instead of instantiating Isolate
-// directly, do:
-//
-//     JSG_DECLARE_ISOLATE_TYPE(MyIsolate, SomeApiType, AnotherApiType, ...);
-//
-// `MyIsolate` becomes your custom Isolate type, which will support wrapping all of the listed
-// API types.
-#define JSG_DECLARE_ISOLATE_TYPE(Type, ...) \
-  class Type##_TypeWrapper; \
-  typedef ::workerd::jsg::TypeWrapper<Type##_TypeWrapper, jsg::DOMException, ##__VA_ARGS__> \
-      Type##_TypeWrapperBase; \
-  class Type##_TypeWrapper final: public Type##_TypeWrapperBase { \
-  public: \
-    using Type##_TypeWrapperBase::TypeWrapper; \
-  }; \
-  class Type final: public ::workerd::jsg::Isolate<Type##_TypeWrapper> { \
-  public: \
-    using ::workerd::jsg::Isolate<Type##_TypeWrapper>::Isolate; \
+ protected:
+  inline TypeWrapper* getWrapperByContext(jsg::Lock& js) {
+    if (KJ_LIKELY(!hasExtraWrappers)) {
+      return wrappers[0].get();
+    } else {
+      return getWrapperByContext(js.v8Context());
+    }
   }
+  inline TypeWrapper* getWrapperByContext(v8::Local<v8::Context> context) {
+    if (KJ_LIKELY(!hasExtraWrappers)) {
+      return wrappers[0].get();
+    } else {
+      KJ_IF_SOME(data,
+          jsg::getAlignedPointerFromEmbedderData<TypeWrapper>(
+              context, ContextPointerSlot::EXTENDED_CONTEXT_WRAPPER)) {
+        return &data;
+      }
+      return wrappers[0].get();
+    }
+  }
+
+ private:
+  kj::SpaceFor<TypeWrapper> wrapperSpace;
+  kj::Vector<kj::Own<TypeWrapper>> wrappers;  // Needs to be destroyed under lock...
+  // This is just an optimization boolean, when we only have one wrapper we can skip calling
+  // GetAlignedPointerFromEmbedderData and just return wrappers[0].
+  bool hasExtraWrappers = false;
+};
 
 }  // namespace workerd::jsg

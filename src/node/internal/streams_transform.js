@@ -23,10 +23,6 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-/* todo: the following is adopted code, enabling linting one day */
-/* eslint-disable */
-
-
 // a transform stream is a readable/writable stream where you do
 // something with the data.  Sometimes it's called a "filter",
 // but that's not a great name for it, since that implies a thing where
@@ -69,19 +65,17 @@
 // would be consumed, and then the rest would wait (un-transformed) until
 // the results of the previous transformed chunk were consumed.
 
-'use strict'
+'use strict';
 
-import {
-  ERR_METHOD_NOT_IMPLEMENTED
-} from 'node-internal:internal_errors';
+import { ERR_METHOD_NOT_IMPLEMENTED } from 'node-internal:internal_errors';
+import { nextTick } from 'node-internal:internal_process';
 
-import {
-  Duplex,
-} from 'node-internal:streams_duplex';
+import { Duplex } from 'node-internal:streams_duplex';
 
-import {
-  getHighWaterMark,
-} from 'node-internal:streams_util';
+import { getHighWaterMark } from 'node-internal:streams_state';
+
+const streamsNodejsV24Compat =
+  Cloudflare.compatibilityFlags.enable_streams_nodejs_v24_compat; // eslint-disable-line no-undef
 
 Object.setPrototypeOf(Transform.prototype, Duplex.prototype);
 Object.setPrototypeOf(Transform, Duplex);
@@ -94,7 +88,9 @@ export function Transform(options) {
   // TODO (ronag): This should preferably always be
   // applied but would be semver-major. Or even better;
   // make Transform a Readable with the Writable interface.
-  const readableHighWaterMark = options ? getHighWaterMark(options, 'readableHighWaterMark', true) : null;
+  const readableHighWaterMark = options
+    ? getHighWaterMark(this, options, 'readableHighWaterMark', true)
+    : null;
   if (readableHighWaterMark === 0) {
     // A Duplex will buffer both on the writable and readable side while
     // a Transform just wants to buffer hwm number of elements. To avoid
@@ -103,11 +99,7 @@ export function Transform(options) {
       ...options,
       highWaterMark: null,
       readableHighWaterMark,
-      // TODO (ronag): 0 is not optimal since we have
-      // a "bug" where we check needDrain before calling _write and not after.
-      // Refs: https://github.com/nodejs/node/pull/32887
-      // Refs: https://github.com/nodejs/node/pull/35941
-      writableHighWaterMark: options?.writableHighWaterMark || 0
+      writableHighWaterMark: options.writableHighWaterMark || 0,
     };
   }
   Duplex.call(this, options);
@@ -118,7 +110,8 @@ export function Transform(options) {
   this._readableState.sync = false;
   this[kCallback] = null;
   if (options) {
-    if (typeof options.transform === 'function') this._transform = options.transform;
+    if (typeof options.transform === 'function')
+      this._transform = options.transform;
     if (typeof options.flush === 'function') this._flush = options.flush;
   }
 
@@ -147,7 +140,7 @@ function final(cb) {
       if (cb) {
         cb();
       }
-    })
+    });
   } else {
     this.push(null);
     if (cb) {
@@ -164,8 +157,8 @@ function prefinish() {
 Transform.prototype._final = final;
 
 Transform.prototype._transform = function () {
-  throw new ERR_METHOD_NOT_IMPLEMENTED('_transform()')
-}
+  throw new ERR_METHOD_NOT_IMPLEMENTED('_transform()');
+};
 
 Transform.prototype._write = function (chunk, encoding, callback) {
   const rState = this._readableState;
@@ -179,7 +172,13 @@ Transform.prototype._write = function (chunk, encoding, callback) {
     if (val != null) {
       this.push(val);
     }
-    if (
+    // This is a semver-major change. Ref: https://github.com/nodejs/node/commit/557044af407376aff28a0a0800f3053bb58e9239
+    if (streamsNodejsV24Compat && rState.ended) {
+      // If user has called this.push(null) we have to delay the callback to properly propagate the new
+      // state.
+      nextTick(callback);
+      return;
+    } else if (
       wState.ended ||
       // Backwards compat.
       length === rState.length ||
@@ -190,8 +189,8 @@ Transform.prototype._write = function (chunk, encoding, callback) {
     } else {
       this[kCallback] = callback;
     }
-  })
-}
+  });
+};
 
 Transform.prototype._read = function (_size) {
   if (this[kCallback]) {
@@ -199,7 +198,7 @@ Transform.prototype._read = function (_size) {
     this[kCallback] = null;
     callback();
   }
-}
+};
 
 Object.setPrototypeOf(PassThrough.prototype, Transform.prototype);
 Object.setPrototypeOf(PassThrough, Transform);
@@ -215,4 +214,4 @@ export function PassThrough(options) {
 
 PassThrough.prototype._transform = function (chunk, _, cb) {
   cb(null, chunk);
-}
+};

@@ -3,17 +3,24 @@
 //     https://opensource.org/licenses/Apache-2.0
 #pragma once
 
-#include "kj/debug.h"
-#include <kj/map.h>
-#include <capnp/common.h>
+#include <capnp/blob.h>
 #include <capnp/list.h>
+#include <kj/string.h>
+
+#include <initializer_list>
 
 namespace workerd::util {
 
 // Workerd-specific list of autogate keys (can also be used in internal repo).
 enum class AutogateKey {
   TEST_WORKERD,
-  NumOfKeys // Reserved for iteration.
+  V8_FAST_API,
+  // Enables support for the streaming tail worker. Note that this is currently also guarded behind
+  // an experimental compat flag.
+  STREAMING_TAIL_WORKER,
+  // Enable refactor used to consolidate the different tail worker stream implementations.
+  TAIL_STREAM_REFACTOR,
+  NumOfKeys  // Reserved for iteration.
 };
 
 // This class allows code changes to be rolled out independent of full binary releases. It enables
@@ -30,19 +37,23 @@ enum class AutogateKey {
 // When making structural changes here, ensure you align them with autogate.h in the internal repo.
 class Autogate {
 
-public:
+ public:
   static bool isEnabled(AutogateKey key);
 
   // Creates a global Autogate and seeds it with gates that are specified in the config.
   //
   // This function is not thread safe, it should be called exactly once close to the start of the
   // process before any threads are created.
-  static void initAutogate(
-      capnp::List<capnp::Text>::Reader autogates);
-  // Destroys an initialised global Autogate instance. Used only for testing.
+  static void initAutogate(capnp::List<capnp::Text>::Reader autogates);
+
+  // Convenience method for bin-tests to invoke initAutogate() with an appropriate config.
+  static void initAutogateNamesForTest(std::initializer_list<kj::StringPtr> gateNames);
+
+  // Destroys an initialized global Autogate instance. Used only for testing.
   static void deinitAutogate();
-private:
-  bool gates[(unsigned long)AutogateKey::NumOfKeys];
+
+ private:
+  bool gates[static_cast<unsigned long>(AutogateKey::NumOfKeys)];
 
   Autogate(capnp::List<capnp::Text>::Reader autogates);
 };
@@ -52,4 +63,4 @@ private:
 // When adding a new gate, add it into this method as well.
 kj::StringPtr KJ_STRINGIFY(AutogateKey key);
 
-}  // namespace workerd::server
+}  // namespace workerd::util

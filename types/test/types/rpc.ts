@@ -7,10 +7,46 @@ import {
   RpcStub,
   RpcTarget,
   WorkerEntrypoint,
-} from "cloudflare:workers";
-import { expectTypeOf } from "expect-type";
+} from 'cloudflare:workers';
+import { expectTypeOf } from 'expect-type';
 
-class BoringClass {}
+type TestType = {
+  fieldString: string;
+  fieldCallback: (p: string) => number;
+  fieldBasicMap: Map<string, number>;
+  fieldComplexMap: Map<
+    string,
+    {
+      fieldString: string;
+      fieldCallback: (p: string) => number;
+    }
+  >;
+  fieldSet: Set<string>;
+  fieldSubLevel: {
+    fieldString: string;
+    fieldCallback: (p: string) => number;
+  };
+};
+
+interface ABasicInterface {
+  fieldString: string;
+  fieldCallback: (p: string) => number;
+}
+
+interface TestInterface extends ABasicInterface {
+  fieldBasicMap: Map<string, number>;
+  fieldComplexMap: Map<string, ABasicInterface>;
+  fieldSet: Set<string>;
+  fieldSubLevelInline: {
+    fieldString: string;
+    fieldCallback: (p: string) => number;
+  };
+  fieldSubLevelInterface: ABasicInterface;
+}
+
+interface NonSerializableInterface {
+  field: ReadableStream<string>;
+}
 
 class TestCounter extends RpcTarget {
   constructor(private val = 0) {
@@ -27,7 +63,7 @@ class TestCounter extends RpcTarget {
   }
 
   [Symbol.dispose]() {
-    console.log("Disposing");
+    console.log('Disposing');
   }
 
   // Check can't use custom `dup()` method
@@ -36,10 +72,12 @@ class TestCounter extends RpcTarget {
   }
 }
 
-const symbolMethod = Symbol("symbolMethod");
+const symbolMethod = Symbol('symbolMethod');
 
-class TestEntrypoint extends WorkerEntrypoint<Env> {
-  constructor(ctx: ExecutionContext, env: Env) {
+type Props = {myProp: number};
+
+class TestEntrypoint extends WorkerEntrypoint<Env, Props> {
+  constructor(ctx: ExecutionContext<Props>, env: Env) {
     super(ctx, env);
   }
 
@@ -54,13 +92,13 @@ class TestEntrypoint extends WorkerEntrypoint<Env> {
 
   private privateInstanceProperty = 0;
   private get privateProperty() {
-    expectTypeOf(this.ctx).toEqualTypeOf<ExecutionContext>();
+    expectTypeOf(this.ctx).toEqualTypeOf<ExecutionContext<Props>>();
     expectTypeOf(this.env).toEqualTypeOf<Env>();
 
     return 1;
   }
 
-  instanceProperty = "2";
+  instanceProperty = '2';
   get property(): number {
     return 3;
   }
@@ -95,7 +133,7 @@ class TestEntrypoint extends WorkerEntrypoint<Env> {
 
   functionWithExtrasMethod() {
     const fn = (x: number) => x;
-    fn.y = "z";
+    fn.y = 'z';
     return fn;
   }
 
@@ -136,7 +174,7 @@ class TestEntrypoint extends WorkerEntrypoint<Env> {
       boolean: false,
       number: 42,
       bigint: 1_000_000n,
-      string: "hello",
+      string: 'hello',
       Int8Array: new Int8Array(),
       Uint8Array: new Uint8Array(),
       Uint8ClampedArray: new Uint8ClampedArray(),
@@ -159,14 +197,14 @@ class TestEntrypoint extends WorkerEntrypoint<Env> {
       TypeError: new TypeError(),
       URIError: new URIError(),
       RegExp: /abc/,
-      Map: new Map([["a", 1]]),
-      Set: new Set(["a"]),
+      Map: new Map([['a', 1]]),
+      Set: new Set(['a']),
       Array: [1, 2, 3],
       ReadonlyArray: [4, 5, 6] as const,
       Object: { a: { b: 1 } },
       ReadableStream: new ReadableStream<Uint8Array>(),
       WritableStream: new WritableStream<Uint8Array>(),
-      Request: new Request("https://example.com"),
+      Request: new Request('https://example.com'),
       Response: new Response(),
       Headers: new Headers(),
       Stub: new RpcStub(() => {}),
@@ -181,18 +219,66 @@ class TestEntrypoint extends WorkerEntrypoint<Env> {
       Object: { a: { b: new TestCounter() } },
     };
   }
-  get nonSerializable1() {
-    return new BoringClass();
+
+  methodReturnsTypeObject(): TestType {
+    return {
+      fieldString: 'a',
+      fieldCallback: (p: string) => 1,
+      fieldBasicMap: new Map([['b', 2]]),
+      fieldComplexMap: new Map([
+        [
+          'c',
+          {
+            fieldString: 'd',
+            fieldCallback: (p: string) => 3,
+          },
+        ],
+      ]),
+      fieldSet: new Set(['e']),
+      fieldSubLevel: {
+        fieldString: 'f',
+        fieldCallback: (p: string) => 4,
+      },
+    };
+  }
+  methodReturnsInterfaceObject(): TestInterface {
+    return {
+      fieldString: 'a',
+      fieldCallback: (p: string) => 1,
+      fieldBasicMap: new Map([['b', 2]]),
+      fieldComplexMap: new Map([
+        [
+          'c',
+          {
+            fieldString: 'd',
+            fieldCallback: (p: string) => 3,
+          },
+        ],
+      ]),
+      fieldSet: new Set(['e']),
+      fieldSubLevelInline: {
+        fieldString: 'f',
+        fieldCallback: (p: string) => 4,
+      },
+      fieldSubLevelInterface: {
+        fieldString: 'e',
+        fieldCallback: (p: string) => 5,
+      },
+    };
+  }
+
+  nonSerializable1() {
+    return new ReadableStream<string>();
   }
   nonSerializable2() {
-    return { a: new BoringClass() };
+    return { field: new ReadableStream<string>() };
   }
-  async nonSerializable3() {
-    return new ReadableStream<string>();
+  nonSerializable3(): NonSerializableInterface {
+    return { field: new ReadableStream<string>() };
   }
 
   [Symbol.dispose]() {
-    console.log("Disposing");
+    console.log('Disposing');
   }
 }
 
@@ -201,6 +287,48 @@ class TestObject extends DurableObject {
     return new Response(request.url);
   }
   async alarm() {}
+
+  complexTypes() {
+    return {
+      undefined: undefined,
+      void: void 0,
+      null: null,
+      boolean: true,
+      number: 1,
+      bigint: BigInt(4),
+      string: 'string',
+      ArrayBuffer: new ArrayBuffer(0),
+      DataView: new DataView(new ArrayBuffer(0)),
+      Date: new Date(),
+      Error: new Error(),
+      RegExp: new RegExp(''),
+      ReadableStream: new ReadableStream(),
+      WritableStream: new WritableStream(),
+      Request: new Request('https://example.com'),
+      Response: new Response(),
+      Headers: new Headers(),
+      nested: {
+        undefined: undefined,
+        void: void 0,
+        null: null,
+        boolean: true,
+        number: 1,
+        bigint: BigInt(4),
+        string: 'string',
+        ArrayBuffer: new ArrayBuffer(0),
+        DataView: new DataView(new ArrayBuffer(0)),
+        Date: new Date(),
+        Error: new Error(),
+        RegExp: new RegExp(''),
+        ReadableStream: new ReadableStream(),
+        WritableStream: new WritableStream(),
+        Request: new Request('https://example.com'),
+        Response: new Response(),
+        Headers: new Headers(),
+      },
+    };
+  }
+
   webSocketMessage(_ws: WebSocket, _message: string | ArrayBuffer) {}
   async webSocketClose(
     _ws: WebSocket,
@@ -218,7 +346,28 @@ class TestObject extends DurableObject {
   }
 
   [Symbol.dispose]() {
-    console.log("Disposing");
+    console.log('Disposing');
+  }
+}
+
+class TestAlarmObject extends DurableObject {
+  // Can declare alarm method consuming optional alarmInfo parameter
+  async alarm(alarmInfo?: AlarmInvocationInfo) {
+    if (alarmInfo !== undefined) {
+      const _isRetry: boolean = alarmInfo.isRetry;
+      const _retryCount: number = alarmInfo.retryCount;
+    }
+  }
+
+  // User code can invoke alarm() directly, if desired.
+  async runAlarmVoid(): Promise<void> {
+    return await this.alarm();
+  }
+  async runAlarmInfo(): Promise<void> {
+    return await this.alarm({
+      isRetry: true,
+      retryCount: 1,
+    });
   }
 }
 
@@ -226,10 +375,10 @@ class TestNaughtyEntrypoint extends WorkerEntrypoint {
   // Check incorrectly typed methods
   // @ts-expect-error
   fetch(_request: Request) {
-    return "body";
+    return 'body';
   }
   // @ts-expect-error
-  async tail(_animal: "🐶") {}
+  async tail(_animal: '🐶') {}
   // @ts-expect-error
   trace(_draw: boolean) {}
   // @ts-expect-error
@@ -259,14 +408,14 @@ class TestNaughtyObject extends DurableObject {
 interface Env {
   REGULAR_SERVICE: Service;
   RPC_SERVICE: Service<TestEntrypoint>;
+  TYPEOF_RPC_SERVICE: Service<typeof TestEntrypoint>;
   NAUGHTY_SERVICE: Service<TestNaughtyEntrypoint>;
   // @ts-expect-error `BoringClass` isn't an RPC capable type
   __INVALID_RPC_SERVICE_1: Service<BoringClass>;
-  // @ts-expect-error `TestEntrypoint` is a `DurableObject`, not a `WorkerEntrypoint`
-  __INVALID_RPC_SERVICE_2: Service<TestObject>;
 
   REGULAR_OBJECT: DurableObjectNamespace;
   RPC_OBJECT: DurableObjectNamespace<TestObject>;
+  ALARM_OBJECT: DurableObjectNamespace<TestAlarmObject>;
   NAUGHTY_OBJECT: DurableObjectNamespace<TestNaughtyObject>;
   // @ts-expect-error `BoringClass` isn't an RPC capable type
   __INVALID_OBJECT_1: DurableObjectNamespace<BoringClass>;
@@ -278,8 +427,8 @@ export default <ExportedHandler<Env>>{
   async fetch(_request, env, _ctx) {
     // Check non-RPC services and namespaces work as usual
     {
-      const response = await env.REGULAR_SERVICE.fetch("https://example.com", {
-        method: "POST",
+      const response = await env.REGULAR_SERVICE.fetch('https://example.com', {
+        method: 'POST',
       });
       expectTypeOf(response).toEqualTypeOf<Response>();
 
@@ -291,8 +440,8 @@ export default <ExportedHandler<Env>>{
       expectTypeOf(stringId).toEqualTypeOf<DurableObjectId>();
 
       const stub = env.REGULAR_OBJECT.get(uniqueId);
-      const objectResponse = await stub.fetch("https://example.com", {
-        method: "POST",
+      const objectResponse = await stub.fetch('https://example.com', {
+        method: 'POST',
       });
       expectTypeOf(objectResponse).toEqualTypeOf<Response>();
       expectTypeOf(stub.id).toEqualTypeOf<DurableObjectId>();
@@ -303,7 +452,7 @@ export default <ExportedHandler<Env>>{
     // `toEqualTypeOf(...)` will fail if the function signature doesn't match *exactly*)
     {
       expectTypeOf(env.RPC_SERVICE.fetch).toEqualTypeOf<
-        (input: RequestInfo, init?: RequestInit) => Promise<Response>
+        (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
       >();
       expectTypeOf(env.RPC_SERVICE.connect).toEqualTypeOf<
         (address: SocketAddress | string, options?: SocketOptions) => Socket
@@ -320,7 +469,7 @@ export default <ExportedHandler<Env>>{
 
       const stub = env.RPC_OBJECT.get(env.RPC_OBJECT.newUniqueId());
       expectTypeOf(stub.fetch).toEqualTypeOf<
-        (input: RequestInfo, init?: RequestInit) => Promise<Response>
+        (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
       >();
       expectTypeOf(stub.connect).toEqualTypeOf<
         (address: SocketAddress | string, options?: SocketOptions) => Socket
@@ -440,7 +589,66 @@ export default <ExportedHandler<Env>>{
       expectTypeOf(s.objectProperty.z(false)).toEqualTypeOf<Promise<number>>(); // (pipelining)
 
       expectTypeOf(s.everySerializable).not.toBeNever();
-      expectTypeOf(s.nonSerializable1).toBeNever();
+
+      // Verify serializable composite objects defined with "type" keyword
+      const oType = await s.methodReturnsTypeObject();
+      expectTypeOf(oType).not.toBeNever();
+      expectTypeOf(oType.fieldString).toEqualTypeOf<string>();
+      expectTypeOf(oType.fieldCallback).toEqualTypeOf<
+        RpcStub<(p: string) => number>
+      >(); // stubified
+      expectTypeOf(oType.fieldBasicMap).toEqualTypeOf<Map<string, number>>();
+      expectTypeOf(oType.fieldComplexMap).toEqualTypeOf<
+        Map<
+          string,
+          {
+            fieldString: string;
+            fieldCallback: RpcStub<(p: string) => number>; // stubified
+          }
+        >
+      >();
+      expectTypeOf(oType.fieldSet).toEqualTypeOf<Set<string>>();
+      expectTypeOf(oType.fieldSubLevel.fieldString).toEqualTypeOf<string>();
+      expectTypeOf(oType.fieldSubLevel.fieldCallback).toEqualTypeOf<
+        RpcStub<(p: string) => number>
+      >(); // stubified
+
+      // Verify serializable composite objects defined with "interface" keyword
+      const oInterface = await s.methodReturnsInterfaceObject();
+      expectTypeOf(oInterface).not.toBeNever();
+      expectTypeOf(oInterface.fieldString).toEqualTypeOf<string>();
+      expectTypeOf(oInterface.fieldCallback).toEqualTypeOf<
+        RpcStub<(p: string) => number>
+      >(); // stubified
+      expectTypeOf(oInterface.fieldBasicMap).toEqualTypeOf<
+        Map<string, number>
+      >();
+      expectTypeOf(oInterface.fieldComplexMap).toEqualTypeOf<
+        Map<
+          string,
+          {
+            fieldString: string;
+            fieldCallback: RpcStub<(p: string) => number>; // stubified
+          }
+        >
+      >();
+      expectTypeOf(oInterface.fieldSet).toEqualTypeOf<Set<string>>();
+      expectTypeOf(
+        oInterface.fieldSubLevelInline.fieldString
+      ).toEqualTypeOf<string>();
+      expectTypeOf(oInterface.fieldSubLevelInline.fieldCallback).toEqualTypeOf<
+        RpcStub<(p: string) => number>
+      >(); // stubified
+      expectTypeOf(
+        oInterface.fieldSubLevelInterface.fieldString
+      ).toEqualTypeOf<string>();
+      expectTypeOf(
+        oInterface.fieldSubLevelInterface.fieldCallback
+      ).toEqualTypeOf<RpcStub<(p: string) => number>>(); // stubified
+
+      expectTypeOf(s.nonSerializable1).returns.toBeNever();
+      // Note: Since one of the object's members is non-serializable,
+      //   the entire object is resolved as 'never'.
       expectTypeOf(s.nonSerializable2).returns.toBeNever();
       expectTypeOf(s.nonSerializable3).returns.toBeNever();
 
@@ -453,7 +661,7 @@ export default <ExportedHandler<Env>>{
       >;
       // TODO(now): these next two don't actually work, should they?
       expectTypeOf(s.everySerializable.Array[0]).toEqualTypeOf<Promise<number>>;
-      expectTypeOf(await s.everySerializable.Map.get("a")).toEqualTypeOf<
+      expectTypeOf(await s.everySerializable.Map.get('a')).toEqualTypeOf<
         number | undefined
       >;
 
@@ -524,6 +732,53 @@ export default <ExportedHandler<Env>>{
     {
       const stub = new RpcStub(new TestCounter(42));
       expectTypeOf(stub.dup).toEqualTypeOf<() => RpcStub<TestCounter>>();
+    }
+
+    // Check methods returning base types are not stubified
+    {
+      const s = env.RPC_OBJECT.get(env.RPC_OBJECT.newUniqueId());
+
+      expectTypeOf(s.fetch(_request)).toMatchTypeOf<Promise<Response>>();
+      expectTypeOf(s.complexTypes()).toMatchTypeOf<
+        Promise<{
+          undefined: undefined;
+          void: void;
+          null: null;
+          boolean: boolean;
+          number: number;
+          bigint: bigint;
+          string: string;
+          ArrayBuffer: ArrayBuffer;
+          DataView: DataView;
+          Date: Date;
+          Error: Error;
+          RegExp: RegExp;
+          ReadableStream: ReadableStream;
+          WritableStream: WritableStream;
+          Request: Request;
+          Response: Response;
+          Headers: Headers;
+          nested: {
+            undefined: undefined;
+            void: void;
+            null: null;
+            boolean: boolean;
+            number: number;
+            bigint: bigint;
+            string: string;
+            ArrayBuffer: ArrayBuffer;
+            DataView: DataView;
+            Date: Date;
+            Error: Error;
+            RegExp: RegExp;
+            ReadableStream: ReadableStream;
+            WritableStream: WritableStream;
+            Request: Request;
+            Response: Response;
+            Headers: Headers;
+          };
+        }>
+      >;
     }
 
     return new Response();

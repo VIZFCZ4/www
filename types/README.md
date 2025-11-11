@@ -34,3 +34,9 @@ $ bazel test //types:all
 - `src/{print,program}.ts`: helpers for printing nodes and creating programs
 - `defines`: additional TypeScript-only definitions that don't correspond to
   `workerd` runtime APIs, appended to the end of outputs
+
+## Updates types
+
+```shell
+just generate-types
+```

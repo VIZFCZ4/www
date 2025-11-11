@@ -4,7 +4,7 @@
 
 #pragma once
 // This file contains several horrible hacks involving setting a thread-local value within some
-// scope in the call stack, and then being able to check the vaule from deeper in the stack,
+// scope in the call stack, and then being able to check the value from deeper in the stack,
 // without passing down an object. We use this pattern to signal hints across modules that do not
 // directly call each other, where it would be excessively inconvenient to pass the value down the
 // stack, perhaps because there is code in between that we do not control (e.g., V8).
@@ -13,7 +13,8 @@
 // done for the time being.
 
 #include <kj/common.h>
-#include <inttypes.h>
+
+#include <cinttypes>
 
 namespace workerd {
 
@@ -23,7 +24,7 @@ namespace workerd {
 //
 // In particular this is used when loading Wasm modules, to properly enable Liftoff and Tier-up.
 class AllowV8BackgroundThreadsScope {
-public:
+ public:
   AllowV8BackgroundThreadsScope();
   ~AllowV8BackgroundThreadsScope() noexcept(false);
 
@@ -34,10 +35,10 @@ public:
 
 // Tracks whether the process hosts isolates from multiple parties that don't know about each
 // other. In such a case, we must take additional precautions against Spectre, and prohibit
-// functionality which cannot be made spectre-safe.
+// functionality which cannot be made Spectre-safe.
 //
-// (Note that simply turning this on is NOT sufficient to enable spectre protection. Instead, this
-// is mostly used as a safeguard to *disable* functionality that is known not to be spectre-safe.)
+// (Note that simply turning this on is NOT sufficient to enable Spectre protection. Instead, this
+// is mostly used as a safeguard to *disable* functionality that is known not to be Spectre-safe.)
 //
 // This is actually a process-level flag rather than thread-level. Once a process becomes
 // multi-tenant it cannot go back, since secrets could persist in memory.
@@ -45,10 +46,10 @@ bool isMultiTenantProcess();
 
 // Tracks whether the process hosts isolates from multiple parties that don't know about each
 // other. In such a case, we must take additional precautions against Spectre, and prohibit
-// functionality which cannot be made spectre-safe.
+// functionality which cannot be made Spectre-safe.
 //
-// (Note that simply turning this on is NOT sufficient to enable spectre protection. Instead, this
-// is mostly used as a safeguard to *disable* functionality that is known not to be spectre-safe.)
+// (Note that simply turning this on is NOT sufficient to enable Spectre protection. Instead, this
+// is mostly used as a safeguard to *disable* functionality that is known not to be Spectre-safe.)
 //
 // This is actually a process-level flag rather than thread-level. Once a process becomes
 // multi-tenant it cannot go back, since secrets could persist in memory.
@@ -68,7 +69,7 @@ void setPredictableModeForTest();
 // changes in a uint64_t. Use this in places where your code cannot call Watchdog::checkIn() and
 // may block for longer than the watchdog timeout, but can still observe forward progress.
 class ThreadProgressCounter {
-public:
+ public:
   // When a ProgressCounter is instantiated, it saves the current value of `counter`. When
   // Watchdog::tryHandleSignal() is called with an active ProgressCounter on the thread, the
   // function compares this saved value with the (possibly updated) current value. If they differ,
@@ -91,7 +92,7 @@ public:
   // the counter is updated.
   static void acknowledgeProgress();
 
-private:
+ private:
   uint64_t savedValue;
   uint64_t& counter;
 
@@ -104,7 +105,7 @@ private:
 // Isolate locks can block for a relatively long time, so we especially try to avoid taking
 // them while any other locks are held.
 class WarnAboutIsolateLockScope {
-public:
+ public:
   WarnAboutIsolateLockScope();
   ~WarnAboutIsolateLockScope() noexcept(false);
   KJ_DISALLOW_COPY(WarnAboutIsolateLockScope);
@@ -112,7 +113,8 @@ public:
   void release();
 
   static void maybeWarn();
-private:
+
+ private:
   bool released = false;
 };
 }  // namespace workerd

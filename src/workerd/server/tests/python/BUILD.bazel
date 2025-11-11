@@ -1,56 +1,78 @@
-load("//:build/wd_test.bzl", "wd_test")
+load("//src/workerd/server/tests/python:import_tests.bzl", "gen_import_tests", "gen_rust_import_tests")
+load("//src/workerd/server/tests/python:py_wd_test.bzl", "py_wd_test", "python_test_setup")
 
-wd_test(
-    src = "hello/hello.wd-test",
-    args = ["--experimental"],
-    data = glob(
-        [
-            "hello/*",
+python_test_setup()
+
+py_wd_test("hello")
+
+py_wd_test("env-param")
+
+py_wd_test("asgi")
+
+py_wd_test("asgi-sse")
+
+py_wd_test("random")
+
+py_wd_test("subdirectory")
+
+py_wd_test("sdk")
+
+py_wd_test("seek-metadatafs")
+
+gen_import_tests(
+    pkg_skip_versions = {
+        "0.28.2": [
+            "micropip",  # missing lockfile
+            "soupsieve",  # Circular dependency with beautifulsoup4
         ],
-        exclude = ["**/*.wd-test"],
-    ),
+    },
 )
 
-wd_test(
-    src = "env-param/env.wd-test",
-    args = ["--experimental"],
-    data = glob(
-        [
-            "env-param/*",
-        ],
-        exclude = ["**/*.wd-test"],
-    ),
+gen_rust_import_tests()
+
+py_wd_test("undefined-handler")
+
+py_wd_test("vendor_dir")
+
+py_wd_test("dont-snapshot-pyodide")
+
+py_wd_test("filter-non-py-files")
+
+py_wd_test("durable-object")
+
+py_wd_test("worker-entrypoint")
+
+py_wd_test(
+    "jspi",
+    skip_python_flags = ["0.26.0a2"],
 )
 
-# langchain test: disabled for now because it's flaky
-# TODO: reenable this?
-#
-# wd_test(
-#     src = "langchain/langchain.wd-test",
-#     args = ["--experimental"],
-#     data = glob(
-#         [
-#             "langchain/*",
-#         ],
-#         exclude = ["**/*.wd-test"],
-#     ),
-#     # TODO: fails in micropip on windows with:
-#     #
-#     # ValueError: Can't fetch metadata for 'openai'. Please make sure you have entered a correct
-#     # package name and correctly specified index_urls (if you changed them).
-#     target_compatible_with = select({
-#         "@platforms//os:windows": ["@platforms//:incompatible"],
-#         "//conditions:default": [],
-#     }),
-# )
+py_wd_test("js-import")
 
-wd_test(
-    src = "subdirectory/subdirectory.wd-test",
-    args = ["--experimental"],
-    data = glob(
-        [
-            "subdirectory/**",
-        ],
-        exclude = ["**/*.wd-test"],
-    ),
+py_wd_test(
+    "importable-env",
+    # TODO: why doesn't dedicated snapshot work with this?
+    use_snapshot = None,
+)
+
+py_wd_test("python-rpc")
+
+py_wd_test("workflow-entrypoint")
+
+py_wd_test("vendor_dir_compat_flag")
+
+py_wd_test("multiprocessing")
+
+py_wd_test("default-class-with-legacy-global-handlers")
+
+py_wd_test(
+    "fastapi",
+    make_snapshot = False,
+    use_snapshot = "fastapi",
+)
+
+py_wd_test(
+    "numpy",
+    make_snapshot = False,
+    use_snapshot = "numpy",
 )

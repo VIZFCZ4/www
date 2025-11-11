@@ -4,19 +4,37 @@ on:
   push:
     branches:
     - main
+  workflow_dispatch:
+    inputs:
+      patch:
+        description: 'Patch Version'
+        required: true
+        default: '0'
+      prerelease:
+        description: 'Is Prerelease'
+        type: boolean
+        default: false
+permissions:
+  id-token: write
+  contents: write
+  actions: write
 
 jobs:
   version:
     outputs:
+      date: ${{ steps.echo.outputs.date }}
       version: ${{ steps.echo.outputs.version }}
-    # version job uses ubuntu 22.04, this way we don't have to install the updated clang while
-    # the build job uses 20.04 for libc compatibility.
-    runs-on: ubuntu-22.04
+      types_version: ${{ steps.echo.outputs.types_version }}
+    # version job uses ubuntu 24.04, this way we don't have to install the updated clang while
+    # the build job uses 22.04 for libc compatibility.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - id: echo
         run: |
-          echo "::set-output name=version::1.$(cat src/workerd/io/supported-compatibility-date.txt | tr -d '-').0"
+          echo "date=$(cat src/workerd/io/supported-compatibility-date.txt)" >> $GITHUB_OUTPUT;
+          echo "version=${{ (github.event_name != 'push' && inputs.prerelease == true) && '0' || '1'}}.$(cat src/workerd/io/supported-compatibility-date.txt | tr -d '-').${{ github.event_name == 'push' && '0' || inputs.patch }}" >> $GITHUB_OUTPUT;
+          echo "types_version=${{ (github.event_name != 'push' && inputs.prerelease == true) && '0' || '4'}}.$(cat src/workerd/io/supported-compatibility-date.txt | tr -d '-').${{ github.event_name == 'push' && '0' || inputs.patch }}" >> $GITHUB_OUTPUT;
   check-tag:
     name: Check tag is new
     outputs:
@@ -56,89 +74,85 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-20.04, macos-13, windows-2022]
         include:
-          - os-name: linux
-            os: ubuntu-20.04
+          - title: linux
+            os-name: Linux
+            image: ubuntu-22.04
             bazel-config: release_linux
-          - os-name: macOS
-            os: macos-13
+            target-arch: X64
+          - title: linux-arm64
+            os-name: Linux
+            image: ubuntu-22.04-arm
+            bazel-config: release_linux
+            target-arch: ARM64
+          # Based on runner availability, we build both Apple Silicon and (cross-compiled) x86
+          # release binaries on the macos-26 runner.
+          - title: macOS-x64
+            os-name: macOS
+            # This configuration is used for cross-compiling – macos-26 is Apple Silicon-based but
+            # we use it to compile the x64 release.
+            image: macos-26
+            bazel-config: release_macos_cross_x86_64
+            target-arch: X64
+          - title: macOS-arm64
+            os-name: macOS
+            image: macos-26
             bazel-config: release_macos
-          - os-name: windows
-            os: windows-2022
+            target-arch: ARM64
+          - title: windows
+            os-name: Windows
+            image: windows-2025
             bazel-config: release_windows
-    runs-on: ${{ matrix.os }}
-    name: build (${{ matrix.os-name }})
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          show-progress: false
-      - name: Cache
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: ~/bazel-disk-cache
-          # Use a different cache key than for tests here, otherwise the release cache could end up
-          # being used for test builds, where it provides little benefit.
-          key: bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'WORKSPACE') }}
-      - name: Setup Linux
-        if: runner.os == 'Linux'
-        run: |
-          export DEBIAN_FRONTEND=noninteractive
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 15
-          sudo apt-get install -y libunwind-15 libc++abi1-15 libc++1-15 libc++-15-dev
-          echo "build:linux --action_env=CC=/usr/lib/llvm-15/bin/clang --action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
-          echo "build:linux --host_action_env=CC=/usr/lib/llvm-15/bin/clang --host_action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
-      - name: Setup macOS
-        if: runner.os == 'macOS'
-        run: |
-          sudo xcode-select -s "/Applications/Xcode_15.1.app"
-      - name: Setup Windows
-        if: runner.os == 'Windows'
-        run: |
-          # Set a custom output root directory to avoid long file name issues.
-          [System.IO.File]::WriteAllLines((Join-Path -Path $env:USERPROFILE -ChildPath '.bazelrc'), 'startup --output_user_root=C:/tmp')
-      - name: Configure download mirrors
-        shell: bash
-        run: |
-          if [ ! -z "${{ secrets.WORKERS_MIRROR_URL }}" ] ; then
-            # Strip comment in front of WORKERS_MIRROR_URL, then substitute secret to use it.
-            sed -e '/WORKERS_MIRROR_URL/ { s@# *@@; s@WORKERS_MIRROR_URL@${{ secrets.WORKERS_MIRROR_URL }}@; }' -i.bak WORKSPACE
-          fi
-      - name: Bazel build
-        run: |
-          bazelisk build --disk_cache=~/bazel-disk-cache --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --config=${{ matrix.bazel-config }} //src/workerd/server:workerd
-      - name: Strip debug symbols
-        if: runner.os != 'Windows'
-        run: |
-          # bazel makes the output directory read-only, fix permissions for binary
-          chmod +w bazel-bin/src/workerd/server/workerd
-          # Strip debug information from the binary, this is acceptable as debug symbols are not
-          # generated for the release configuration. Regular symbols are still included.
-          strip -S bazel-bin/src/workerd/server/workerd
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ runner.os }}-${{ runner.arch }}-binary
-          path: bazel-bin/src/workerd/server/workerd${{ runner.os == 'Windows' && '.exe' || '' }}
+            target-arch: X64
+    name: build (${{ matrix.title }})
+    uses: './.github/workflows/_bazel.yml'
+    with:
+      image: ${{ matrix.image }}
+      os_name: ${{ matrix.os-name }}
+      phase: '-release'
+      extra_bazel_args: '--strip=always --config=${{matrix.bazel-config}} --config=wpt-report'
+      arch_name: ${{ matrix.target-arch }}
+      upload_binary: true
+      macos_use_lld: true
+      # On release, generate a full WPT report...
+      run_tests: true
+      upload_test_logs: true
+      test_target: //src/wpt/...
+    secrets:
+      BAZEL_CACHE_KEY: ${{ secrets.BAZEL_CACHE_KEY }}
+      WORKERS_MIRROR_URL: ${{ secrets.WORKERS_MIRROR_URL }}
+
+
 
   upload-artifacts:
     name: Upload Artifacts
-    needs: [tag-and-release, build]
+    needs: [version, tag-and-release, build]
     runs-on: ubuntu-latest
     strategy:
       matrix:
         arch: [linux-64, darwin-64, windows-64]
+        # This variable itself is unused, but allows us to set up two macOS builds. arm64 builds for
+        # other platforms will be supported later, then we'll list both architectures here.
+        cpu: [ X64 ]
         include:
           - arch: linux-64
             name: Linux-X64
+          - arch: linux-arm64
+            name: Linux-ARM64
+            cpu: ARM64
           - arch: darwin-64
             name: macOS-X64
+          - arch: darwin-arm64
+            name: macOS-ARM64
+            cpu: ARM64
           - arch: windows-64
             name: Windows-X64
     steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download ${{ matrix.name }}
         uses: actions/download-artifact@v4
         with:
@@ -152,7 +166,7 @@ jobs:
             # As of release v1.20230404.0 the Linux x64 binary after debug_strip is 65.8 MB,
             # 21.0 MB with gzip and 17.3 MB with brotli -9. Use gzip as a widely supported format
             # which still produces an acceptable compressed size.
-            gzip -9N /tmp/workerd${{ matrix.arch == 'windows-64' && '.exe' || '' }}
+            gzip -9N -k /tmp/workerd${{ matrix.arch == 'windows-64' && '.exe' || '' }}
       - run: mv /tmp/workerd${{ matrix.arch == 'windows-64' && '.exe' || '' }}.gz /tmp/workerd-${{ matrix.arch }}.gz
       # Upload compressed release binaries – one set of artifacts is sufficient with gzip being
       # widely supported
@@ -167,6 +181,23 @@ jobs:
           asset_name: workerd-${{ matrix.arch }}.gz
           asset_content_type: application/gzip
 
+      # Upload release to npm
+      - name: Use Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Modify package.json version
+        run: node npm/scripts/bump-version.mjs npm/workerd-${{ matrix.arch }}/package.json
+        env:
+          WORKERD_VERSION: ${{ needs.version.outputs.version }}
+          LATEST_COMPATIBILITY_DATE: ${{ needs.version.outputs.date }}
+      - run: mkdir npm/workerd-${{ matrix.arch }}/bin
+      - run: cp /tmp/workerd${{ matrix.arch == 'windows-64' && '.exe' || '' }} npm/workerd-${{ matrix.arch }}/bin/workerd${{ matrix.arch == 'windows-64' && '.exe' || '' }}
+      - run: echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > npm/workerd-${{ matrix.arch }}/.npmrc
+      - run: cd npm/workerd-${{ matrix.arch }} && npm publish --access public --tag ${{ startsWith(needs.version.outputs.version, '0') && 'beta' || 'latest'}}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_ACCESS_TOKEN }}
+
   miniflare-test:
     name: Run Miniflare tests
     needs: [build]
@@ -178,9 +209,7 @@ jobs:
           repository: cloudflare/workers-sdk
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 8.8.0
+        uses: pnpm/action-setup@v4
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
@@ -204,3 +233,96 @@ jobs:
         run: pnpm --filter miniflare test
         env:
           MINIFLARE_WORKERD_PATH: /tmp/workerd
+
+  publish-wrapper:
+    name: Publish `workerd` to NPM
+    needs: [version, upload-artifacts]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Cache
+        id: cache
+        uses: actions/cache@v4
+        # Use same cache and build configuration as release build, this allows us to keep download
+        # sizes small and generate types with optimization enabled, should be slightly faster.
+        with:
+          path: ~/bazel-disk-cache
+          key: bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'WORKSPACE') }}
+      - name: Setup Runner
+        uses: ./.github/actions/setup-runner
+      - name: Build type generating Worker
+        run: |
+          bazel build --strip=always --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --config=ci --config=release_linux //types:types_worker
+
+      - name: Modify package.json version
+        run: node npm/scripts/bump-version.mjs npm/workerd/package.json
+        env:
+          WORKERD_VERSION: ${{ needs.version.outputs.version }}
+          LATEST_COMPATIBILITY_DATE: ${{ needs.version.outputs.date }}
+      - run: mkdir -p npm/workerd/lib
+      - run: mkdir -p npm/workerd/bin
+      - name: Build node-install
+        run: npx esbuild npm/lib/node-install.ts --outfile=npm/workerd/install.js --bundle --target=node22 --define:LATEST_COMPATIBILITY_DATE="\"${LATEST_COMPATIBILITY_DATE}\"" --define:WORKERD_VERSION="\"${WORKERD_VERSION}\"" --platform=node --external:workerd --log-level=warning
+        env:
+          WORKERD_VERSION: ${{ needs.version.outputs.version }}
+          LATEST_COMPATIBILITY_DATE: ${{ needs.version.outputs.date }}
+      - name: Build node-shim
+        run: npx esbuild npm/lib/node-shim.ts --outfile=npm/workerd/bin/workerd --bundle --target=node22 --define:LATEST_COMPATIBILITY_DATE="\"${LATEST_COMPATIBILITY_DATE}\"" --define:WORKERD_VERSION="\"${WORKERD_VERSION}\"" --platform=node --external:workerd --log-level=warning
+        env:
+          WORKERD_VERSION: ${{ needs.version.outputs.version }}
+          LATEST_COMPATIBILITY_DATE: ${{ needs.version.outputs.date }}
+      - name: Build node-path
+        run: npx esbuild npm/lib/node-path.ts --outfile=npm/workerd/lib/main.js --bundle --target=node22 --define:LATEST_COMPATIBILITY_DATE="\"${LATEST_COMPATIBILITY_DATE}\"" --define:WORKERD_VERSION="\"${WORKERD_VERSION}\"" --platform=node --external:workerd --log-level=warning
+        env:
+          WORKERD_VERSION: ${{ needs.version.outputs.version }}
+          LATEST_COMPATIBILITY_DATE: ${{ needs.version.outputs.date }}
+      - name: Build package
+        run: node npm/scripts/build-shim-package.mjs
+        env:
+          WORKERD_VERSION: ${{ needs.version.outputs.version }}
+          LATEST_COMPATIBILITY_DATE: ${{ needs.version.outputs.date }}
+      - run: echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > npm/workerd/.npmrc
+      - run: cd npm/workerd && npm publish --access public --tag ${{ startsWith(needs.version.outputs.version, '0') && 'beta' || 'latest'}}
+
+  build-and-publish-types:
+    runs-on: ubuntu-22.04
+    needs: [version, upload-artifacts]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Use Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24 # needed for a version of npm that supports "trusted publishing".
+      - name: Cache
+        id: cache
+        uses: actions/cache@v4
+        # Use same cache and build configuration as release build, this allows us to keep download
+        # sizes small and generate types with optimization enabled, should be slightly faster.
+        with:
+          path: ~/bazel-disk-cache
+          key: bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'WORKSPACE') }}
+      - name: Setup Runner
+        uses: ./.github/actions/setup-runner
+      - name: build types
+        run: |
+            bazel build --strip=always --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --config=ci --config=release_linux //types
+      - name: Build package
+        run: node npm/scripts/build-types-package.mjs
+        env:
+          WORKERD_VERSION: ${{ needs.version.outputs.types_version }}
+          LATEST_COMPATIBILITY_DATE: ${{ needs.version.outputs.date }}
+      - run: cp -r bazel-bin/types/definitions/. npm/workers-types
+      - run: cp npm/workers-types/oldest/* npm/workers-types
+      - run: echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > npm/workers-types/.npmrc
+      - run: cd npm/workers-types && npm publish --access public --tag ${{ startsWith(needs.version.outputs.version, '0') && 'beta' || 'latest'}}

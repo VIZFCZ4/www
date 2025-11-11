@@ -4,7 +4,11 @@
 
 #include "uuid.h"
 
-#include <openssl/rand.h>
+#include <workerd/util/entropy.h>
+
+#include <kj/compat/http.h>
+#include <kj/debug.h>
+
 #include <cstdlib>
 
 namespace workerd {
@@ -13,15 +17,15 @@ constexpr char HEX_DIGITS[] = "0123456789abcdef";
 }  // namespace
 
 kj::String randomUUID(kj::Maybe<kj::EntropySource&> optionalEntropySource) {
-  kj::byte buffer[16];
+  kj::FixedArray<kj::byte, 16> buffer;
 
   KJ_IF_SOME(entropySource, optionalEntropySource) {
     entropySource.generate(buffer);
   } else {
-    KJ_ASSERT(RAND_bytes(buffer, sizeof(buffer)) == 1);
+    getEntropy(buffer);
   }
-  buffer[6] = kj::byte((buffer[6] & 0x0f) | 0x40);
-  buffer[8] = kj::byte((buffer[8] & 0x3f) | 0x80);
+  buffer[6] = static_cast<kj::byte>((buffer[6] & 0x0f) | 0x40);
+  buffer[8] = static_cast<kj::byte>((buffer[8] & 0x3f) | 0x80);
 
 #define HEX(b) (char)(HEX_DIGITS[(b >> 4) & 0xf]), (char)(HEX_DIGITS[b & 0xf])
 
@@ -112,7 +116,6 @@ kj::Maybe<UUID> UUID::fromString(kj::StringPtr str) {
   return UUID(upper, lower);
 }
 
-
 kj::String UUID::toString() const {
   // clang-format off
   return kj::str(
@@ -156,4 +159,4 @@ kj::String UUID::toString() const {
   // clang-format on
 }
 
-} // namespace workerd
+}  // namespace workerd

@@ -2,15 +2,15 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-
 #pragma once
 
-#include <kj/test.h>
-#include <kj/debug.h>
 #include <capnp/dynamic.h>
+#include <capnp/message.h>
 #include <capnp/serialize-text.h>
+#include <kj/debug.h>
 #include <kj/list.h>
 #include <kj/map.h>
+#include <kj/refcount.h>
 #include <kj/source-location.h>
 
 namespace workerd {
@@ -21,34 +21,55 @@ namespace workerd {
 //
 // TODO(cleanup): Move this to KJ!
 
-#define KJ_REQUIRE_AT(cond, location, ...) \
-  if (auto _kjCondition = ::kj::_::MAGIC_ASSERT << cond) {} else \
-    for (::kj::_::Debug::Fault f(location.fileName, location.lineNumber, ::kj::Exception::Type::FAILED, \
-        #cond, "_kjCondition," #__VA_ARGS__, _kjCondition, ##__VA_ARGS__);; f.fatal())
+#ifndef KJ_REQUIRE_AT
+#define KJ_REQUIRE_AT(cond, location, ...)                                                         \
+  if (auto _kjCondition = ::kj::_::MAGIC_ASSERT << cond) {                                         \
+  } else                                                                                           \
+    for (::kj::_::Debug::Fault f(location.fileName, location.lineNumber,                           \
+             ::kj::Exception::Type::FAILED, #cond, "_kjCondition," #__VA_ARGS__, _kjCondition,     \
+             ##__VA_ARGS__);                                                                       \
+         ; f.fatal())
+#endif
 
-#define KJ_FAIL_REQUIRE_AT(location, ...) \
-  for (::kj::_::Debug::Fault f(location.fileName, location.lineNumber, ::kj::Exception::Type::FAILED, \
-                               nullptr, #__VA_ARGS__, ##__VA_ARGS__);; f.fatal())
+#ifndef KJ_FAIL_REQUIRE_AT
+#define KJ_FAIL_REQUIRE_AT(location, ...)                                                          \
+  for (::kj::_::Debug::Fault f(location.fileName, location.lineNumber,                             \
+           ::kj::Exception::Type::FAILED, nullptr, #__VA_ARGS__, ##__VA_ARGS__);                   \
+       ; f.fatal())
+#endif
 
-#define KJ_REQUIRE_NONNULL_AT(value, location, ...) \
-  (*({ \
-    auto _kj_result = ::kj::_::readMaybe(value); \
-    if (KJ_UNLIKELY(!_kj_result)) { \
+#ifndef KJ_REQUIRE_NONNULL_AT
+#define KJ_REQUIRE_NONNULL_AT(value, location, ...)                                                \
+  (*({                                                                                             \
+    auto _kj_result = ::kj::_::readMaybe(value);                                                   \
+    if (KJ_UNLIKELY(!_kj_result)) {                                                                \
       ::kj::_::Debug::Fault(location.fileName, location.lineNumber, ::kj::Exception::Type::FAILED, \
-                            #value " != nullptr", #__VA_ARGS__, ##__VA_ARGS__).fatal(); \
-    } \
-    kj::mv(_kj_result); \
+          #value " != nullptr", #__VA_ARGS__, ##__VA_ARGS__)                                       \
+          .fatal();                                                                                \
+    }                                                                                              \
+    kj::mv(_kj_result);                                                                            \
   }))
+#endif
 
+#ifndef KJ_ASSERT_AT
 #define KJ_ASSERT_AT KJ_REQUIRE_AT
-#define KJ_FAIL_ASSERT_AT KJ_FAIL_REQUIRE_AT
-#define KJ_ASSERT_NONNULL_AT KJ_REQUIRE_NONNULL_AT
+#endif
 
-#define KJ_LOG_AT(severity, location, ...) \
-  for (bool _kj_shouldLog = ::kj::_::Debug::shouldLog(::kj::LogSeverity::severity); \
-       _kj_shouldLog; _kj_shouldLog = false) \
-    ::kj::_::Debug::log(location.fileName, location.lineNumber, ::kj::LogSeverity::severity, \
-                        #__VA_ARGS__, ##__VA_ARGS__)
+#ifndef KJ_FAIL_ASSERT_AT
+#define KJ_FAIL_ASSERT_AT KJ_FAIL_REQUIRE_AT
+#endif
+
+#ifndef KJ_ASSERT_NONNULL_AT
+#define KJ_ASSERT_NONNULL_AT KJ_REQUIRE_NONNULL_AT
+#endif
+
+#ifndef KJ_LOG_AT
+#define KJ_LOG_AT(severity, location, ...)                                                         \
+  for (bool _kj_shouldLog = ::kj::_::Debug::shouldLog(::kj::LogSeverity::severity); _kj_shouldLog; \
+       _kj_shouldLog = false)                                                                      \
+  ::kj::_::Debug::log(location.fileName, location.lineNumber, ::kj::LogSeverity::severity,         \
+      #__VA_ARGS__, ##__VA_ARGS__)
+#endif
 
 // =======================================================================================
 // Cap'n Proto mocking framework
@@ -57,31 +78,33 @@ namespace workerd {
 
 const capnp::TextCodec TEXT_CODEC;
 
-kj::String canonicalizeCapnpText(capnp::StructSchema schema, kj::StringPtr text,
-                                 kj::Maybe<kj::StringPtr> capName = kj::none);
+kj::String canonicalizeCapnpText(
+    capnp::StructSchema schema, kj::StringPtr text, kj::Maybe<kj::StringPtr> capName = kj::none);
 
 class MockClient: public capnp::DynamicCapability::Client {
-public:
+ public:
   using capnp::DynamicCapability::Client::Client;
   MockClient(capnp::DynamicCapability::Client&& client)
       : capnp::DynamicCapability::Client(kj::mv(client)) {}
 
   class ExpectedCall {
-  public:
-    ExpectedCall(capnp::RemotePromise<capnp::DynamicStruct> promise)
-        : promise(kj::mv(promise)) {}
+   public:
+    ExpectedCall(capnp::RemotePromise<capnp::DynamicStruct> promise): promise(kj::mv(promise)) {}
 
-    void expectReturns(kj::StringPtr resultsText, kj::WaitScope& ws,
-                       kj::SourceLocation location = {}) && {
+    void expectReturns(
+        kj::StringPtr resultsText, kj::WaitScope& ws, kj::SourceLocation location = {}) && {
       kj::String expectedResults = canonicalizeCapnpText(promise.getSchema(), resultsText);
       auto response = promise.wait(ws);
       auto actualResults = TEXT_CODEC.encode(response);
       KJ_ASSERT_AT(expectedResults == actualResults, location);
     }
 
-    void expectThrows(kj::Exception::Type expectedType, kj::StringPtr expectedMessageSubstring,
-                      kj::WaitScope& ws, kj::SourceLocation location = {}) {
-      promise.then([&](auto&&) {
+    void expectThrows(kj::Exception::Type expectedType,
+        kj::StringPtr expectedMessageSubstring,
+        kj::WaitScope& ws,
+        kj::SourceLocation location = {}) {
+      promise
+          .then([&](auto&&) {
         KJ_FAIL_ASSERT_AT(location, "expected call to throw exception but instead it returned",
             expectedType, expectedMessageSubstring);
       }, [&](kj::Exception&& e) {
@@ -91,7 +114,7 @@ public:
       }).wait(ws);
     }
 
-  private:
+   private:
     capnp::RemotePromise<capnp::DynamicStruct> promise;
   };
 
@@ -107,7 +130,8 @@ public:
 // TODO(cleanup): This should obviously go in Cap'n Proto!
 class MockServer: public kj::Refcounted {
   struct ReceivedCall;
-public:
+
+ public:
   MockServer(capnp::InterfaceSchema schema): schema(schema) {}
 
   template <typename T>
@@ -120,11 +144,11 @@ public:
   static Pair<T> make() {
     auto mock = kj::refcounted<MockServer>(capnp::Schema::from<T>());
     capnp::DynamicCapability::Client client = kj::heap<Server>(*mock);
-    return { kj::mv(mock), client.as<T>() };
+    return {kj::mv(mock), client.as<T>()};
   }
 
   class ExpectedCall {
-  public:
+   public:
     ExpectedCall(ReceivedCall& received): maybeReceived(received) {
       received.expectedCall = this;
     }
@@ -134,20 +158,20 @@ public:
     ~ExpectedCall() noexcept(false) {
       KJ_IF_SOME(r, maybeReceived) {
         KJ_ASSERT(&KJ_ASSERT_NONNULL(r.expectedCall) == this);
-        r.expectedCall = nullptr;
+        r.expectedCall = kj::none;
       }
     }
 
     ExpectedCall withParams(kj::StringPtr paramsText,
-                            kj::Maybe<kj::StringPtr> capName = kj::none,
-                            kj::SourceLocation location = {}) &&
-                            KJ_WARN_UNUSED_RESULT {
+        kj::Maybe<kj::StringPtr> capName = kj::none,
+        kj::SourceLocation location = {}) &&
+        KJ_WARN_UNUSED_RESULT {
       // Expect that the call had the given parameters.
 
       auto& received = getReceived(location);
 
-      kj::String expectedParams = canonicalizeCapnpText(
-          received.method.getParamType(), paramsText, capName);
+      kj::String expectedParams =
+          canonicalizeCapnpText(received.method.getParamType(), paramsText, capName);
 
       auto actualParams = TEXT_CODEC.encode(received.context.getParams());
       KJ_ASSERT_AT(expectedParams == actualParams, location);
@@ -164,8 +188,9 @@ public:
     // Note that it's explicitly OK if `func` captures a `WaitScope` and uses it. In this way,
     // the incoming call can be delayed from returning until the callback completes.
     template <typename Func>
-    ExpectedCall useCallback(kj::StringPtr callbackName, Func&& func,
-                             kj::SourceLocation location = {}) && KJ_WARN_UNUSED_RESULT {
+        ExpectedCall useCallback(
+            kj::StringPtr callbackName, Func&& func, kj::SourceLocation location = {}) &&
+        KJ_WARN_UNUSED_RESULT {
       auto& received = getReceived(location);
       func(received.context.getParams().get(callbackName).as<capnp::DynamicCapability>());
       return kj::mv(*this);
@@ -181,12 +206,13 @@ public:
     // Causes the method to return the given result message, which is parsed from text.
     // All capabilities in the result message will be filled in, with MockServer instances
     // returned in the hashmap.
-    kj::HashMap<kj::String, kj::Own<MockServer>> thenReturnWithMocks(kj::StringPtr message, kj::SourceLocation location = {}) && {
+    kj::HashMap<kj::String, kj::Own<MockServer>> thenReturnWithMocks(
+        kj::StringPtr message, kj::SourceLocation location = {}) && {
       auto& received = getReceived(location);
       auto callResults = received.context.getResults();
       auto results = kj::HashMap<kj::String, kj::Own<MockServer>>();
       TEXT_CODEC.decode(message, callResults);
-      for(const auto& field : received.method.getResultType().getFields()) {
+      for (const auto& field: received.method.getResultType().getFields()) {
         if (field.getType().isInterface()) {
           auto name = field.getProto().getName();
           auto mockServer = kj::refcounted<MockServer>(field.getType().asInterface());
@@ -221,7 +247,7 @@ public:
       KJ_ASSERT_AT(maybeReceived == kj::none, location, "call has not been canceled");
     }
 
-  private:
+   private:
     kj::Maybe<ReceivedCall&> maybeReceived;
     ReceivedCall& getReceived(kj::SourceLocation location) {
       return KJ_REQUIRE_NONNULL_AT(maybeReceived, location, "call was unexpectedly canceled");
@@ -229,23 +255,22 @@ public:
     friend struct ReceivedCall;
   };
 
-  ExpectedCall expectCall(kj::StringPtr methodName, kj::WaitScope& waitScope,
-                          kj::SourceLocation location = {})
-      KJ_WARN_UNUSED_RESULT {
+  ExpectedCall expectCall(kj::StringPtr methodName,
+      kj::WaitScope& waitScope,
+      kj::SourceLocation location = {}) KJ_WARN_UNUSED_RESULT {
     auto expectedMethod = schema.getMethodByName(methodName);
 
-    KJ_ASSERT_AT(waitForEvent(waitScope), location,
-                 "no method call was received when expected", methodName);
+    KJ_ASSERT_AT(
+        waitForEvent(waitScope), location, "no method call was received when expected", methodName);
 
-    KJ_ASSERT_AT(!dropped, location,
-        "capability was dropped without making expected call", methodName);
+    KJ_ASSERT_AT(
+        !dropped, location, "capability was dropped without making expected call", methodName);
 
     auto& received = receivedCalls.front();
     receivedCalls.remove(received);
 
     KJ_ASSERT_AT(received.method == expectedMethod, location,
-        "a different method was called than expected",
-        received.method.getProto().getName(),
+        "a different method was called than expected", received.method.getProto().getName(),
         expectedMethod.getProto().getName());
 
     return ExpectedCall(received);
@@ -253,8 +278,8 @@ public:
 
   void expectDropped(kj::WaitScope& waitScope, kj::SourceLocation location = {}) {
     KJ_ASSERT_AT(waitForEvent(waitScope), location, "capability was not dropped when expected");
-    KJ_ASSERT_AT(receivedCalls.empty(), location,
-        receivedCalls.front().method.getProto().getName());
+    KJ_ASSERT_AT(
+        receivedCalls.empty(), location, receivedCalls.front().method.getProto().getName());
 
     KJ_ASSERT(dropped);  // should always be true if receivedCalls is empty
   }
@@ -271,15 +296,19 @@ public:
     }
   }
 
-private:
+ private:
   capnp::InterfaceSchema schema;
   kj::Maybe<kj::Own<kj::PromiseFulfiller<void>>> waiter;
 
   struct ReceivedCall {
-    ReceivedCall(kj::PromiseFulfiller<void>& fulfiller, MockServer& mock,
-                 capnp::InterfaceSchema::Method method,
-                 capnp::CallContext<capnp::DynamicStruct, capnp::DynamicStruct> context)
-        : fulfiller(fulfiller), mock(mock), method(method), context(kj::mv(context)) {
+    ReceivedCall(kj::PromiseFulfiller<void>& fulfiller,
+        MockServer& mock,
+        capnp::InterfaceSchema::Method method,
+        capnp::CallContext<capnp::DynamicStruct, capnp::DynamicStruct> context)
+        : fulfiller(fulfiller),
+          mock(mock),
+          method(method),
+          context(kj::mv(context)) {
       mock.receivedCalls.add(*this);
       KJ_IF_SOME(w, mock.waiter) {
         w.get()->fulfill();
@@ -290,7 +319,7 @@ private:
         mock.receivedCalls.remove(*this);
       }
       KJ_IF_SOME(e, expectedCall) {
-        e.maybeReceived = nullptr;
+        e.maybeReceived = kj::none;
       }
     }
     KJ_DISALLOW_COPY_AND_MOVE(ReceivedCall);
@@ -321,7 +350,7 @@ private:
   }
 
   class Server final: public capnp::DynamicCapability::Server {
-  public:
+   public:
     Server(MockServer& mock)
         : capnp::DynamicCapability::Server(mock.schema, {.allowCancellation = true}),
           mock(kj::addRef(mock)) {}
@@ -337,7 +366,7 @@ private:
       return kj::newAdaptedPromise<void, ReceivedCall>(*mock, method, kj::mv(context));
     }
 
-  private:
+   private:
     kj::Own<MockServer> mock;
   };
 };
@@ -347,7 +376,7 @@ private:
 // the literal.
 #define CAPNP(...) ("(" #__VA_ARGS__ ")"_kj)
 
-template<typename Schema, typename InitFunc>
+template <typename Schema, typename InitFunc>
 kj::String Capnp(InitFunc func) {
   capnp::MallocMessageBuilder message;
   auto builder = message.initRoot<Schema>();
@@ -355,4 +384,4 @@ kj::String Capnp(InitFunc func) {
   return TEXT_CODEC.encode(builder.asReader());
 }
 
-} // namespace workerd
+}  // namespace workerd

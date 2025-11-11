@@ -4,19 +4,20 @@
 
 #pragma once
 
-#include <kj/debug.h>
-#include <workerd/api/web-socket.h>
-#include <workerd/api/hibernatable-web-socket.h>
 #include <workerd/api/actor-state.h>
+#include <workerd/api/hibernatable-web-socket.h>
+#include <workerd/api/web-socket.h>
 #include <workerd/jsg/jsg.h>
+
+#include <kj/exception.h>
 
 #include <list>
 
 namespace workerd {
 
 // Implements the HibernationManager class.
-class HibernationManagerImpl final : public Worker::Actor::HibernationManager {
-public:
+class HibernationManagerImpl final: public Worker::Actor::HibernationManager {
+ public:
   HibernationManagerImpl(kj::Own<Worker::Actor::Loopback> loopback, uint16_t hibernationEventType);
   ~HibernationManagerImpl() noexcept(false);
 
@@ -28,16 +29,16 @@ public:
   // Gets a collection of websockets associated with the given tag. Any hibernating websockets will
   // be woken up. If no tag is provided, we return all accepted websockets.
   kj::Vector<jsg::Ref<api::WebSocket>> getWebSockets(
-      jsg::Lock& js,
-      kj::Maybe<kj::StringPtr> tag) override;
+      jsg::Lock& js, kj::Maybe<kj::StringPtr> tag) override;
 
   // Hibernates all the websockets held by the HibernationManager.
   // This converts our activeOrPackage from an api::WebSocket to a HibernationPackage.
   void hibernateWebSockets(Worker::Lock& lock) override;
 
-  void setWebSocketAutoResponse(kj::Maybe<kj::StringPtr> request,
-      kj::Maybe<kj::StringPtr> response) override;
-  kj::Maybe<jsg::Ref<api::WebSocketRequestResponsePair>> getWebSocketAutoResponse() override;
+  void setWebSocketAutoResponse(
+      kj::Maybe<kj::StringPtr> request, kj::Maybe<kj::StringPtr> response) override;
+  kj::Maybe<jsg::Ref<api::WebSocketRequestResponsePair>> getWebSocketAutoResponse(
+      jsg::Lock& js) override;
   void setTimerChannel(TimerChannel& timerChannel) override;
 
   kj::Own<HibernationManager> addRef() override;
@@ -51,7 +52,7 @@ public:
   // Gets the event timeout if set.
   kj::Maybe<uint32_t> getEventTimeout() override;
 
-private:
+ private:
   class HibernatableWebSocket;
 
   kj::Promise<void> handleReadLoop(HibernatableWebSocket& refToHibernatable);
@@ -75,10 +76,10 @@ private:
   // such as `attachment`, `url`, `extensions`, etc. These properties are only read/modified
   // when initiating, or waking from hibernation.
   class HibernatableWebSocket {
-  public:
+   public:
     HibernatableWebSocket(jsg::Ref<api::WebSocket> websocket,
-                          kj::ArrayPtr<kj::String> tags,
-                          HibernationManagerImpl& manager);
+        kj::ArrayPtr<kj::String> tags,
+        HibernationManagerImpl& manager);
     ~HibernatableWebSocket() noexcept(false);
     KJ_DISALLOW_COPY_AND_MOVE(HibernatableWebSocket);
 
@@ -139,7 +140,6 @@ private:
     friend HibernationManagerImpl;
   };
 
-private:
   // Removes a HibernatableWebSocket from the HibernationManager's various collections.
   void dropHibernatableWebSocket(HibernatableWebSocket& hib);
 
@@ -150,8 +150,7 @@ private:
   // dispatch a close event (if we haven't already), or an error event.
   // We will also remove the HibernatableWebSocket from the HibernationManager's collections.
   kj::Promise<void> handleSocketTermination(
-      HibernatableWebSocket& hib, kj::Maybe<kj::Exception>& maybeError)
-      KJ_WARN_UNUSED_RESULT;
+      HibernatableWebSocket& hib, kj::Maybe<kj::Exception>& maybeError) KJ_WARN_UNUSED_RESULT;
 
   // Like the api::WebSocket readLoop(), but we dispatch different types of events.
   kj::Promise<void> readLoop(HibernatableWebSocket& hib);
@@ -204,7 +203,7 @@ private:
   const size_t ACTIVE_CONNECTION_LIMIT = 1024 * 32;
 
   class DisconnectHandler: public kj::TaskSet::ErrorHandler {
-  public:
+   public:
     // We don't need to do anything here; we already handle disconnects in the callee of readLoop().
     void taskFailed(kj::Exception&& exception) override {};
   };
@@ -214,4 +213,4 @@ private:
   kj::Maybe<TimerChannel&> timer;
   kj::Maybe<uint32_t> eventTimeoutMs;
 };
-}; // namespace workerd
+};  // namespace workerd

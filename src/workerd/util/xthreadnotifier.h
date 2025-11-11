@@ -18,12 +18,12 @@ class XThreadNotifier final: public kj::AtomicRefcounted {
   //   an executor.executeAsync() promise from an arbitrary thread. Then, if the inspector
   //   session was destroyed in its thread while a cross-thread notification was in-flight, it
   //   could cancel that notification directly.
-public:
+ public:
   static inline kj::Own<XThreadNotifier> create() {
     return kj::atomicRefcounted<XThreadNotifier>();
   }
 
-  XThreadNotifier() : paf(kj::newPromiseAndCrossThreadFulfiller<void>()) { }
+  XThreadNotifier(): paf(kj::newPromiseAndCrossThreadFulfiller<void>()) {}
 
   kj::Promise<void> awaitNotification() {
     auto promise = kj::mv(paf.lockExclusive()->promise);
@@ -38,7 +38,7 @@ public:
     paf.lockExclusive()->fulfiller->fulfill();
   }
 
-private:
+ private:
   kj::MutexGuarded<kj::PromiseCrossThreadFulfillerPair<void>> paf;
 };
 

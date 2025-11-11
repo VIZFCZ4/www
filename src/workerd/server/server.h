@@ -4,41 +4,49 @@
 
 #pragma once
 
+#include <workerd/api/memory-cache.h>
+#include <workerd/api/pyodide/pyodide.h>
+#include <workerd/io/worker.h>
+#include <workerd/server/alarm-scheduler.h>
+#include <workerd/server/workerd.capnp.h>
+
+#include <kj/async-io.h>
+#include <kj/compat/http.h>
 #include <kj/filesystem.h>
 #include <kj/map.h>
 #include <kj/one-of.h>
-#include <kj/async-io.h>
-#include <workerd/io/worker.h>
-#include <workerd/api/memory-cache.h>
-#include <workerd/server/workerd.capnp.h>
-#include <workerd/util/sqlite.h>
-#include <workerd/server/alarm-scheduler.h>
-#include <kj/compat/http.h>
 
 namespace kj {
-  class TlsContext;
+class TlsContext;
 }
 
 namespace workerd::jsg {
-  class V8System;
+class V8System;
 }
 
 namespace workerd::server {
+
+using api::pyodide::PythonConfig;
 
 // Implements the single-tenant Workers Runtime server / CLI.
 //
 // The purpose of this class is to implement the core logic independently of the CLI itself,
 // in such a way that it can be unit-tested. workerd.c++ implements the CLI wrapper around this.
-class Server: private kj::TaskSet::ErrorHandler {
-public:
-  Server(kj::Filesystem& fs, kj::Timer& timer, kj::Network& network,
-         kj::EntropySource& entropySource, Worker::ConsoleMode consoleMode,
-         kj::Function<void(kj::String)> reportConfigError);
-  ~Server() noexcept(false);
+class Server final: private kj::TaskSet::ErrorHandler {
+ public:
+  Server(kj::Filesystem& fs,
+      kj::Timer& timer,
+      kj::Network& network,
+      kj::EntropySource& entropySource,
+      Worker::LoggingOptions loggingOptions,
+      kj::Function<void(kj::String)> reportConfigError);
+  ~Server() noexcept;
 
   // Permit experimental features to be used. These features may break backwards compatibility
   // in the future.
-  void allowExperimental() { experimental = true; }
+  void allowExperimental() {
+    experimental = true;
+  }
 
   void overrideSocket(kj::String name, kj::Own<kj::ConnectionReceiver> port) {
     socketOverrides.upsert(kj::mv(name), kj::mv(port));
@@ -58,46 +66,71 @@ public:
   void enableControl(uint fd) {
     controlOverride = kj::heap<kj::FdOutputStream>(fd);
   }
-  void setDiskCacheRoot(kj::Maybe<kj::Own<const kj::Directory>> &&dkr) {
-    diskCacheRoot = kj::mv(dkr);
+  void setPackageDiskCacheRoot(kj::Maybe<kj::Own<const kj::Directory>>&& dkr) {
+    pythonConfig.packageDiskCacheRoot = kj::mv(dkr);
+  }
+  void setPyodideDiskCacheRoot(kj::Maybe<kj::Own<const kj::Directory>>&& dkr) {
+    pythonConfig.pyodideDiskCacheRoot = kj::mv(dkr);
+  }
+  void setPythonCreateSnapshot() {
+    pythonConfig.createSnapshot = true;
+  }
+  void setPythonCreateBaselineSnapshot() {
+    pythonConfig.createBaselineSnapshot = true;
+  }
+  void setPythonLoadSnapshot(kj::String snapshot) {
+    pythonConfig.loadSnapshotFromDisk = kj::mv(snapshot);
   }
 
   // Runs the server using the given config.
-  kj::Promise<void> run(jsg::V8System& v8System, config::Config::Reader conf,
-                        kj::Promise<void> drainWhen = kj::NEVER_DONE);
+  kj::Promise<void> run(jsg::V8System& v8System,
+      config::Config::Reader conf,
+      kj::Promise<void> drainWhen = kj::NEVER_DONE);
 
   // Executes one or more tests. By default, all exported test handlers from all entrypoints to
   // all services in the config are executed. Glob patterns can be specified to match specific
   // service and entrypoint names.
   //
   // The returned promise resolves true if at least one test ran and no tests failed.
-  kj::Promise<bool> test(jsg::V8System& v8System, config::Config::Reader conf,
-                         kj::StringPtr servicePattern = "*"_kj,
-                         kj::StringPtr entrypointPattern = "*"_kj);
+  kj::Promise<bool> test(jsg::V8System& v8System,
+      config::Config::Reader conf,
+      kj::StringPtr servicePattern = "*"_kj,
+      kj::StringPtr entrypointPattern = "*"_kj);
 
   struct Durable {
     kj::String uniqueKey;
     bool isEvictable;
+    bool enableSql;
+    kj::Maybe<config::Worker::DurableObjectNamespace::ContainerOptions::Reader> containerOptions;
   };
   struct Ephemeral {
     bool isEvictable;
+    bool enableSql;
   };
   using ActorConfig = kj::OneOf<Durable, Ephemeral>;
 
   class InspectorService;
   class InspectorServiceIsolateRegistrar;
 
-private:
+  void handleReportConfigError(kj::String error) {
+    reportConfigError(kj::mv(error));
+  }
+
+ private:
   kj::Filesystem& fs;
   kj::Timer& timer;
   kj::Network& network;
   kj::EntropySource& entropySource;
   kj::Function<void(kj::String)> reportConfigError;
-  kj::Maybe<kj::Own<const kj::Directory>> diskCacheRoot;
+  PythonConfig pythonConfig = PythonConfig{.packageDiskCacheRoot = kj::none,
+    .pyodideDiskCacheRoot = kj::none,
+    .createSnapshot = false,
+    .createBaselineSnapshot = false,
+    .loadSnapshotFromDisk = kj::none};
 
   bool experimental = false;
 
-  Worker::ConsoleMode consoleMode;
+  Worker::LoggingOptions loggingOptions;
 
   kj::Own<api::MemoryCacheProvider> memoryCacheProvider;
 
@@ -115,11 +148,14 @@ private:
   kj::Maybe<kj::Own<kj::FdOutputStream>> controlOverride;
 
   struct GlobalContext;
-  // General context needed to construct workers. Initilaized early in run().
+  // General context needed to construct workers. Initialized early in run().
   kj::Own<GlobalContext> globalContext;
 
   class Service;
   kj::Own<Service> invalidConfigServiceSingleton;
+
+  class ActorClass;
+  kj::Own<ActorClass> invalidConfigActorClassSingleton;
 
   // Information about all known actor namespaces. Maps serviceName -> className -> config.
   // This needs to be populated in advance of constructing any services, in order to be able to
@@ -127,6 +163,10 @@ private:
   kj::HashMap<kj::String, kj::HashMap<kj::String, ActorConfig>> actorConfigs;
 
   kj::HashMap<kj::String, kj::Own<Service>> services;
+
+  class WorkerLoaderNamespace;
+  kj::HashMap<kj::String, kj::Rc<WorkerLoaderNamespace>> workerLoaderNamespaces;
+  kj::Vector<kj::Rc<WorkerLoaderNamespace>> anonymousWorkerLoaderNamespaces;
 
   kj::Own<kj::PromiseFulfiller<void>> fatalFulfiller;
 
@@ -141,7 +181,8 @@ private:
 
     template <typename... Params>
     ListedHttpServer(Server& owner, Params&&... params)
-        : owner(owner), httpServer(kj::fwd<Params>(params)...) {
+        : owner(owner),
+          httpServer(kj::fwd<Params>(params)...) {
       owner.httpServers.add(*this);
     };
     ~ListedHttpServer() noexcept(false) {
@@ -164,37 +205,49 @@ private:
   kj::Promise<void> handleDrain(kj::Promise<void> drainWhen);
 
   kj::Own<kj::TlsContext> makeTlsContext(config::TlsOptions::Reader conf);
-  kj::Promise<kj::Own<kj::NetworkAddress>> makeTlsNetworkAddress(
-      config::TlsOptions::Reader conf, kj::StringPtr addrStr,
-      kj::Maybe<kj::StringPtr> certificateHost, uint defaultPort = 0);
+  kj::Promise<kj::Own<kj::NetworkAddress>> makeTlsNetworkAddress(config::TlsOptions::Reader conf,
+      kj::StringPtr addrStr,
+      kj::Maybe<kj::StringPtr> certificateHost,
+      uint defaultPort = 0);
 
   class HttpRewriter;
 
   kj::Own<Service> makeInvalidConfigService();
-  kj::Own<Service> makeExternalService(
-      kj::StringPtr name, config::ExternalServer::Reader conf,
+  kj::Own<Service> makeExternalService(kj::StringPtr name,
+      config::ExternalServer::Reader conf,
       kj::HttpHeaderTable::Builder& headerTableBuilder);
   kj::Own<Service> makeNetworkService(config::Network::Reader conf);
-  kj::Own<Service> makeDiskDirectoryService(
-      kj::StringPtr name, config::DiskDirectory::Reader conf,
+  kj::Own<Service> makeDiskDirectoryService(kj::StringPtr name,
+      config::DiskDirectory::Reader conf,
       kj::HttpHeaderTable::Builder& headerTableBuilder);
-  kj::Own<Service> makeWorker(kj::StringPtr name, config::Worker::Reader conf,
+  kj::Promise<kj::Own<Service>> makeWorker(kj::StringPtr name,
+      config::Worker::Reader conf,
       capnp::List<config::Extension>::Reader extensions);
-  kj::Own<Service> makeService(
-      config::Service::Reader conf,
+  kj::Promise<kj::Own<Service>> makeService(config::Service::Reader conf,
       kj::HttpHeaderTable::Builder& headerTableBuilder,
       capnp::List<config::Extension>::Reader extensions);
 
   // Aborts all actors in this server except those in namespaces marked with `preventEviction`.
-  void abortAllActors();
+  void abortAllActors(kj::Maybe<const kj::Exception&> reason);
 
   // Can only be called in the link stage.
-  Service& lookupService(config::ServiceDesignator::Reader designator, kj::String errorContext);
+  //
+  // May return a new object or may return a fake-own around a long-lived object.
+  kj::Own<Service> lookupService(
+      config::ServiceDesignator::Reader designator, kj::String errorContext);
 
-  kj::Promise<void> listenHttp(kj::Own<kj::ConnectionReceiver> listener, Service& service,
-                               kj::StringPtr physicalProtocol, kj::Own<HttpRewriter> rewriter);
+  // Like lookupService() but looks up an actor class (especially for use as a facet class).
+  // Returns none on a config error.
+  kj::Own<ActorClass> lookupActorClass(
+      config::ServiceDesignator::Reader designator, kj::String errorContext);
+
+  kj::Promise<void> listenHttp(kj::Own<kj::ConnectionReceiver> listener,
+      kj::Own<Service> service,
+      kj::StringPtr physicalProtocol,
+      kj::Own<HttpRewriter> rewriter);
 
   class InvalidConfigService;
+  class InvalidConfigActorClass;
   class ExternalHttpService;
   class ExternalTcpService;
   class NetworkService;
@@ -203,64 +256,35 @@ private:
   class WorkerEntrypointService;
   class HttpListener;
 
-  void startServices(jsg::V8System& v8System, config::Config::Reader config,
-                     kj::HttpHeaderTable::Builder& headerTableBuilder,
-                     kj::ForkedPromise<void>& forkedDrainWhen);
+  struct ErrorReporter;
+  struct ConfigErrorReporter;
+  struct DynamicErrorReporter;
+  struct WorkerDef;
+  kj::Promise<kj::Own<WorkerService>> makeWorkerImpl(kj::StringPtr name,
+      WorkerDef def,
+      capnp::List<config::Extension>::Reader extensions,
+      ErrorReporter& errorReporter);
+
+  kj::Promise<void> startServices(jsg::V8System& v8System,
+      config::Config::Reader config,
+      kj::HttpHeaderTable::Builder& headerTableBuilder,
+      kj::ForkedPromise<void>& forkedDrainWhen);
 
   // Must be called after startServices!
   void startAlarmScheduler(config::Config::Reader config);
 
   kj::Promise<void> listenOnSockets(config::Config::Reader config,
-                                    kj::HttpHeaderTable::Builder& headerTableBuilder,
-                                    kj::ForkedPromise<void>& forkedDrainWhen,
-                                    bool forTest = false);
-};
+      kj::HttpHeaderTable::Builder& headerTableBuilder,
+      kj::ForkedPromise<void>& forkedDrainWhen,
+      bool forTest = false);
 
-// An ActorStorage implementation which will always respond to reads as if the state is empty,
-// and will fail any writes.
-class EmptyReadOnlyActorStorageImpl final: public rpc::ActorStorage::Stage::Server {
-public:
-  kj::Promise<void> get(GetContext context) override {
-    return kj::READY_NOW;
-  }
-  kj::Promise<void> getMultiple(GetMultipleContext context) override {
-    return context.getParams().getStream().endRequest(capnp::MessageSize {2, 0})
-        .send().ignoreResult();
-  }
-  kj::Promise<void> list(ListContext context) override {
-    return context.getParams().getStream().endRequest(capnp::MessageSize {2, 0})
-        .send().ignoreResult();
-  }
-  kj::Promise<void> getAlarm(GetAlarmContext context) override {
-    return kj::READY_NOW;
-  }
-  kj::Promise<void> txn(TxnContext context) override {
-    auto results = context.getResults(capnp::MessageSize {2, 1});
-    results.setTransaction(kj::heap<TransactionImpl>());
-    return kj::READY_NOW;
-  }
+  void unlinkWorkerLoaders();
 
-private:
-  class TransactionImpl final: public rpc::ActorStorage::Stage::Transaction::Server {
-  protected:
-    kj::Promise<void> get(GetContext context) override {
-      return kj::READY_NOW;
-    }
-    kj::Promise<void> getMultiple(GetMultipleContext context) override {
-      return context.getParams().getStream().endRequest(capnp::MessageSize {2, 0})
-          .send().ignoreResult();
-    }
-    kj::Promise<void> list(ListContext context) override {
-      return context.getParams().getStream().endRequest(capnp::MessageSize {2, 0})
-          .send().ignoreResult();
-    }
-    kj::Promise<void> getAlarm(GetAlarmContext context) override {
-      return kj::READY_NOW;
-    }
-    kj::Promise<void> commit(CommitContext context) override {
-      return kj::READY_NOW;
-    }
-  };
+  kj::Promise<void> preloadPython(
+      kj::StringPtr workerName, const WorkerDef& workerDef, ErrorReporter& errorReporter);
+
+  friend struct FutureSubrequestChannel;
+  friend struct FutureActorClassChannel;
 };
 
 }  // namespace workerd::server

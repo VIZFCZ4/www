@@ -6,10 +6,11 @@ declare namespace Rpc {
   // TypeScript uses *structural* typing meaning anything with the same shape as type `T` is a `T`.
   // For the classes exported by `cloudflare:workers` we want *nominal* typing (i.e. we only want to
   // accept `WorkerEntrypoint` from `cloudflare:workers`, not any other class with the same shape)
-  export const __RPC_STUB_BRAND: unique symbol;
-  export const __RPC_TARGET_BRAND: unique symbol;
-  export const __WORKER_ENTRYPOINT_BRAND: unique symbol;
-  export const __DURABLE_OBJECT_BRAND: unique symbol;
+  export const __RPC_STUB_BRAND: '__RPC_STUB_BRAND';
+  export const __RPC_TARGET_BRAND: '__RPC_TARGET_BRAND';
+  export const __WORKER_ENTRYPOINT_BRAND: '__WORKER_ENTRYPOINT_BRAND';
+  export const __DURABLE_OBJECT_BRAND: '__DURABLE_OBJECT_BRAND';
+  export const __WORKFLOW_ENTRYPOINT_BRAND: '__WORKFLOW_ENTRYPOINT_BRAND';
   export interface RpcTargetBranded {
     [__RPC_TARGET_BRAND]: never;
   }
@@ -19,16 +20,49 @@ declare namespace Rpc {
   export interface DurableObjectBranded {
     [__DURABLE_OBJECT_BRAND]: never;
   }
+  export interface WorkflowEntrypointBranded {
+    [__WORKFLOW_ENTRYPOINT_BRAND]: never;
+  }
   export type EntrypointBranded =
     | WorkerEntrypointBranded
-    | DurableObjectBranded;
+    | DurableObjectBranded
+    | WorkflowEntrypointBranded;
 
   // Types that can be used through `Stub`s
   export type Stubable = RpcTargetBranded | ((...args: any[]) => any);
 
   // Types that can be passed over RPC
-  type Serializable =
+  // The reason for using a generic type here is to build a serializable subset of structured
+  //   cloneable composite types. This allows types defined with the "interface" keyword to pass the
+  //   serializable check as well. Otherwise, only types defined with the "type" keyword would pass.
+  type Serializable<T> =
     // Structured cloneables
+    | BaseType
+    // Structured cloneable composites
+    | Map<
+        T extends Map<infer U, unknown> ? Serializable<U> : never,
+        T extends Map<unknown, infer U> ? Serializable<U> : never
+      >
+    | Set<T extends Set<infer U> ? Serializable<U> : never>
+    | ReadonlyArray<T extends ReadonlyArray<infer U> ? Serializable<U> : never>
+    | {
+        [K in keyof T]: K extends number | string ? Serializable<T[K]> : never;
+      }
+    // Special types
+    | Stub<Stubable>
+    // Serialized as stubs, see `Stubify`
+    | Stubable;
+
+  // Base type for all RPC stubs, including common memory management methods.
+  // `T` is used as a marker type for unwrapping `Stub`s later.
+  interface StubBase<T extends Stubable> extends Disposable {
+    [__RPC_STUB_BRAND]: T;
+    dup(): this;
+  }
+  export type Stub<T extends Stubable> = Provider<T> & StubBase<T>;
+
+  // This represents all the types that can be sent as-is over an RPC boundary
+  type BaseType =
     | void
     | undefined
     | null
@@ -42,38 +76,22 @@ declare namespace Rpc {
     | Date
     | Error
     | RegExp
-    // Structured cloneable composites
-    | Map<Serializable, Serializable>
-    | Set<Serializable>
-    | ReadonlyArray<Serializable>
-    | { [key: string | number]: Serializable }
-    // Special types
     | ReadableStream<Uint8Array>
     | WritableStream<Uint8Array>
     | Request
     | Response
-    | Headers
-    | Stub<Stubable>
-    // Serialized as stubs, see `Stubify`
-    | Stubable;
-
-  // Base type for all RPC stubs, including common memory management methods.
-  // `T` is used as a marker type for unwrapping `Stub`s later.
-  interface StubBase<T extends Stubable> extends Disposable {
-    [__RPC_STUB_BRAND]: T;
-    dup(): this;
-  }
-  export type Stub<T extends Stubable> = Provider<T> & StubBase<T>;
-
+    | Headers;
   // Recursively rewrite all `Stubable` types with `Stub`s
   // prettier-ignore
   type Stubify<T> =
-      T extends Stubable ? Stub<T>
+    T extends Stubable ? Stub<T>
     : T extends Map<infer K, infer V> ? Map<Stubify<K>, Stubify<V>>
     : T extends Set<infer V> ? Set<Stubify<V>>
     : T extends Array<infer V> ? Array<Stubify<V>>
     : T extends ReadonlyArray<infer V> ? ReadonlyArray<Stubify<V>>
-    : T extends { [key: string | number]: unknown } ? { [K in keyof T]: Stubify<T[K]> }
+    : T extends BaseType ? T
+    // When using "unknown" instead of "any", interfaces are not stubified.
+    : T extends { [key: string | number]: any } ? { [K in keyof T]: Stubify<T[K]> }
     : T;
 
   // Recursively rewrite all `Stub<T>`s with the corresponding `T`s.
@@ -81,11 +99,12 @@ declare namespace Rpc {
   // `Stub` depends on `Provider`, which depends on `Unstubify`, which would depend on `Stub`.
   // prettier-ignore
   type Unstubify<T> =
-      T extends StubBase<infer V> ? V
+    T extends StubBase<infer V> ? V
     : T extends Map<infer K, infer V> ? Map<Unstubify<K>, Unstubify<V>>
     : T extends Set<infer V> ? Set<Unstubify<V>>
     : T extends Array<infer V> ? Array<Unstubify<V>>
     : T extends ReadonlyArray<infer V> ? ReadonlyArray<Unstubify<V>>
+    : T extends BaseType ? T
     : T extends { [key: string | number]: unknown } ? { [K in keyof T]: Unstubify<T[K]> }
     : T;
   type UnstubifyAll<A extends any[]> = { [I in keyof A]: Unstubify<A[I]> };
@@ -104,8 +123,8 @@ declare namespace Rpc {
   // Intersecting with `(Maybe)Provider` allows pipelining.
   // prettier-ignore
   type Result<R> =
-      R extends Stubable ? Promise<Stub<R>> & Provider<R>
-    : R extends Serializable ? Promise<Stubify<R> & MaybeDisposable<R>> & MaybeProvider<R>
+    R extends Stubable ? Promise<Stub<R>> & Provider<R>
+    : R extends Serializable<R> ? Promise<Stubify<R> & MaybeDisposable<R>> & MaybeProvider<R>
     : never;
 
   // Type for method or property on an RPC interface.
@@ -137,7 +156,62 @@ declare namespace Rpc {
   };
 }
 
-declare module "cloudflare:workers" {
+declare namespace Cloudflare {
+  // Type of `env`.
+  //
+  // The specific project can extend `Env` by redeclaring it in project-specific files. Typescript
+  // will merge all declarations.
+  //
+  // You can use `wrangler types` to generate the `Env` type automatically.
+  interface Env {}
+
+  // Project-specific parameters used to inform types.
+  //
+  // This interface is, again, intended to be declared in project-specific files, and then that
+  // declaration will be merged with this one.
+  //
+  // A project should have a declaration like this:
+  //
+  //     interface GlobalProps {
+  //       // Declares the main module's exports. Used to populate Cloudflare.Exports aka the type
+  //       // of `ctx.exports`.
+  //       mainModule: typeof import("my-main-module");
+  //
+  //       // Declares which of the main module's exports are configured with durable storage, and
+  //       // thus should behave as Durable Object namsepace bindings.
+  //       durableNamespaces: "MyDurableObject" | "AnotherDurableObject";
+  //     }
+  //
+  // You can use `wrangler types` to generate `GlobalProps` automatically.
+  interface GlobalProps {}
+
+  // Evaluates to the type of a property in GlobalProps, defaulting to `Default` if it is not
+  // present.
+  type GlobalProp<K extends string, Default> =
+      K extends keyof GlobalProps ? GlobalProps[K] : Default;
+
+  // The type of the program's main module exports, if known. Requires `GlobalProps` to declare the
+  // `mainModule` property.
+  type MainModule = GlobalProp<"mainModule", {}>;
+
+  // The type of ctx.exports, which contains loopback bindings for all top-level exports.
+  type Exports = {
+    [K in keyof MainModule]:
+        & LoopbackForExport<MainModule[K]>
+
+        // If the export is listed in `durableNamespaces`, then it is also a
+        // DurableObjectNamespace.
+        & (K extends GlobalProp<"durableNamespaces", never>
+            ?  MainModule[K] extends new (...args: any[]) => infer DoInstance
+                ? DoInstance extends Rpc.DurableObjectBranded
+                    ? DurableObjectNamespace<DoInstance>
+                    : DurableObjectNamespace<undefined>
+                : DurableObjectNamespace<undefined>
+            : {});
+  };
+}
+
+declare namespace CloudflareWorkersModule {
   export type RpcStub<T extends Rpc.Stubable> = Rpc.Stub<T>;
   export const RpcStub: {
     new <T extends Rpc.Stubable>(value: T): Rpc.Stub<T>;
@@ -149,34 +223,39 @@ declare module "cloudflare:workers" {
 
   // `protected` fields don't appear in `keyof`s, so can't be accessed over RPC
 
-  export abstract class WorkerEntrypoint<Env = unknown>
-    implements Rpc.WorkerEntrypointBranded
+  export abstract class WorkerEntrypoint<
+    Env = Cloudflare.Env,
+    Props = {},
+  > implements Rpc.WorkerEntrypointBranded
   {
     [Rpc.__WORKER_ENTRYPOINT_BRAND]: never;
 
-    protected ctx: ExecutionContext;
+    protected ctx: ExecutionContext<Props>;
     protected env: Env;
     constructor(ctx: ExecutionContext, env: Env);
 
     fetch?(request: Request): Response | Promise<Response>;
     tail?(events: TraceItem[]): void | Promise<void>;
+    tailStream?(event: TailStream.TailEvent<TailStream.Onset>): TailStream.TailEventHandlerType | Promise<TailStream.TailEventHandlerType>;
     trace?(traces: TraceItem[]): void | Promise<void>;
     scheduled?(controller: ScheduledController): void | Promise<void>;
     queue?(batch: MessageBatch<unknown>): void | Promise<void>;
     test?(controller: TestController): void | Promise<void>;
   }
 
-  export abstract class DurableObject<Env = unknown>
-    implements Rpc.DurableObjectBranded
+  export abstract class DurableObject<
+    Env = Cloudflare.Env,
+    Props = {},
+  > implements Rpc.DurableObjectBranded
   {
     [Rpc.__DURABLE_OBJECT_BRAND]: never;
 
-    protected ctx: DurableObjectState;
+    protected ctx: DurableObjectState<Props>;
     protected env: Env;
     constructor(ctx: DurableObjectState, env: Env);
 
     fetch?(request: Request): Response | Promise<Response>;
-    alarm?(): void | Promise<void>;
+    alarm?(alarmInfo?: AlarmInvocationInfo): void | Promise<void>;
     webSocketMessage?(
       ws: WebSocket,
       message: string | ArrayBuffer
@@ -189,4 +268,93 @@ declare module "cloudflare:workers" {
     ): void | Promise<void>;
     webSocketError?(ws: WebSocket, error: unknown): void | Promise<void>;
   }
+
+  export type WorkflowDurationLabel =
+    | 'second'
+    | 'minute'
+    | 'hour'
+    | 'day'
+    | 'week'
+    | 'month'
+    | 'year';
+
+  export type WorkflowSleepDuration =
+    | `${number} ${WorkflowDurationLabel}${'s' | ''}`
+    | number;
+
+  export type WorkflowDelayDuration = WorkflowSleepDuration;
+
+  export type WorkflowTimeoutDuration = WorkflowSleepDuration;
+
+  export type WorkflowRetentionDuration = WorkflowSleepDuration;
+
+  export type WorkflowBackoff = 'constant' | 'linear' | 'exponential';
+
+  export type WorkflowStepConfig = {
+    retries?: {
+      limit: number;
+      delay: WorkflowDelayDuration | number;
+      backoff?: WorkflowBackoff;
+    };
+    timeout?: WorkflowTimeoutDuration | number;
+  };
+
+  export type WorkflowEvent<T> = {
+    payload: Readonly<T>;
+    timestamp: Date;
+    instanceId: string;
+  };
+
+  export type WorkflowStepEvent<T> = {
+    payload: Readonly<T>;
+    timestamp: Date;
+    type: string;
+  };
+
+  export abstract class WorkflowStep {
+    do<T extends Rpc.Serializable<T>>(
+      name: string,
+      callback: () => Promise<T>
+    ): Promise<T>;
+    do<T extends Rpc.Serializable<T>>(
+      name: string,
+      config: WorkflowStepConfig,
+      callback: () => Promise<T>
+    ): Promise<T>;
+    sleep: (name: string, duration: WorkflowSleepDuration) => Promise<void>;
+    sleepUntil: (name: string, timestamp: Date | number) => Promise<void>;
+    waitForEvent<T extends Rpc.Serializable<T>>(
+      name: string,
+      options: {
+        type: string;
+        timeout?: WorkflowTimeoutDuration | number;
+      }
+    ): Promise<WorkflowStepEvent<T>>;
+  }
+
+  export abstract class WorkflowEntrypoint<
+    Env = unknown,
+    T extends Rpc.Serializable<T> | unknown = unknown,
+  > implements Rpc.WorkflowEntrypointBranded
+  {
+    [Rpc.__WORKFLOW_ENTRYPOINT_BRAND]: never;
+
+    protected ctx: ExecutionContext;
+    protected env: Env;
+
+    constructor(ctx: ExecutionContext, env: Env);
+
+    run(
+      event: Readonly<WorkflowEvent<T>>,
+      step: WorkflowStep
+    ): Promise<unknown>;
+  }
+
+  export function waitUntil(promise: Promise<unknown>): void;
+
+  export const env: Cloudflare.Env;
+}
+
+declare module 'cloudflare:workers' {
+  export = CloudflareWorkersModule;
 }

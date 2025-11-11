@@ -2,6 +2,7 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 #include "mimetype.h"
+
 #include <kj/test.h>
 
 namespace workerd {
@@ -15,7 +16,7 @@ KJ_TEST("Basic MimeType parsing works") {
     kj::StringPtr output;
     kj::Maybe<kj::Array<MimeType::MimeParams::Entry>> params;
   };
-  static TestCase kTests[] = {
+  static const TestCase kTests[] = {
     {
       .input = "text/plain"_kj,
       .type = "text"_kj,
@@ -28,57 +29,43 @@ KJ_TEST("Basic MimeType parsing works") {
       .subtype = "plain"_kj,
       .output = "text/plain"_kj,
     },
-    {
-      .input = "text/plain; charset=utf-8"_kj,
+    {.input = "text/plain; charset=utf-8"_kj,
       .type = "text"_kj,
       .subtype = "plain"_kj,
       .output = "text/plain;charset=utf-8"_kj,
-      .params = kj::arr(MimeType::MimeParams::Entry {kj::str("charset"), kj::str("utf-8")})
-    },
-    {
-      .input = "text/plain; charset=\"utf-8\""_kj,
+      .params = kj::arr(MimeType::MimeParams::Entry{kj::str("charset"), kj::str("utf-8")})},
+    {.input = "text/plain; charset=\"utf-8\""_kj,
       .type = "text"_kj,
       .subtype = "plain"_kj,
       .output = "text/plain;charset=utf-8"_kj,
-      .params = kj::arr(MimeType::MimeParams::Entry {kj::str("charset"), kj::str("utf-8")})
-    },
-    {
-      .input = "text/plain; charset=\"utf-8\"; \r\n\t"_kj,
+      .params = kj::arr(MimeType::MimeParams::Entry{kj::str("charset"), kj::str("utf-8")})},
+    {.input = "text/plain; charset=\"utf-8\"; \r\n\t"_kj,
       .type = "text"_kj,
       .subtype = "plain"_kj,
       .output = "text/plain;charset=utf-8"_kj,
-      .params = kj::arr(MimeType::MimeParams::Entry {kj::str("charset"), kj::str("utf-8")})
-    },
-    {
-      .input = "text/plain; charset=\"utf-8\"; \r\n\ta=b"_kj,
+      .params = kj::arr(MimeType::MimeParams::Entry{kj::str("charset"), kj::str("utf-8")})},
+    {.input = "text/plain; charset=\"utf-8\"; \r\n\ta=b"_kj,
       .type = "text"_kj,
       .subtype = "plain"_kj,
       .output = "text/plain;charset=utf-8;a=b"_kj,
-      .params = kj::arr(
-        MimeType::MimeParams::Entry {kj::str("charset"), kj::str("utf-8")},
-        MimeType::MimeParams::Entry {kj::str("a"), kj::str("b")}
-      )
-    },
-    {
-      .input = "text/plain; charset=utf-8; a=b;a=a"_kj,
+      .params = kj::arr(MimeType::MimeParams::Entry{kj::str("charset"), kj::str("utf-8")},
+          MimeType::MimeParams::Entry{kj::str("a"), kj::str("b")})},
+    {.input = "text/plain; charset=utf-8; a=b;a=a"_kj,
       .type = "text"_kj,
       .subtype = "plain"_kj,
       .output = "text/plain;charset=utf-8;a=b"_kj,
-      .params = kj::arr(
-        MimeType::MimeParams::Entry {kj::str("charset"), kj::str("utf-8")},
-        MimeType::MimeParams::Entry {kj::str("a"), kj::str("b")}
-      )
-    },
+      .params = kj::arr(MimeType::MimeParams::Entry{kj::str("charset"), kj::str("utf-8")},
+          MimeType::MimeParams::Entry{kj::str("a"), kj::str("b")})},
   };
 
-  for (auto& test : kTests) {
+  for (auto& test: kTests) {
     auto mimeType = KJ_ASSERT_NONNULL(MimeType::tryParse(test.input));
     KJ_ASSERT(mimeType.type() == test.type);
     KJ_ASSERT(mimeType.subtype() == test.subtype);
     KJ_ASSERT(mimeType.toString() == test.output);
 
     KJ_IF_SOME(params, test.params) {
-      for (auto& param : params) {
+      for (auto& param: params) {
         auto& value = KJ_ASSERT_NONNULL(mimeType.params().find(param.key));
         KJ_ASSERT(value == param.value);
       }
@@ -88,22 +75,22 @@ KJ_TEST("Basic MimeType parsing works") {
   struct ErrorTestCase {
     kj::StringPtr input;
   };
-  static ErrorTestCase kErrorTests[] = {
-    { "" },
-    { "text" },
-    { "text/" },
-    { "/plain" },
-    { "/" },
-    { " a/\x12" },
-    { " \x12/a" },
-    { " text/ plain" },
-    { " text /plain" },
-    { " text / plain" },
-    { ";charset=utf-8" },
-    { "javascript"},
+  static const ErrorTestCase kErrorTests[] = {
+    {""},
+    {"text"},
+    {"text/"},
+    {"/plain"},
+    {"/"},
+    {" a/\x12"},
+    {" \x12/a"},
+    {" text/ plain"},
+    {" text /plain"},
+    {" text / plain"},
+    {";charset=utf-8"},
+    {"javascript"},
   };
 
-  for (auto& test : kErrorTests) {
+  for (auto& test: kErrorTests) {
     KJ_ASSERT(MimeType::tryParse(test.input) == kj::none, test.input);
   }
 }
@@ -135,11 +122,10 @@ KJ_TEST("WHATWG tests") {
     kj::Maybe<kj::StringPtr> output;
   };
 
-  static const Test kTests[] = {
-    {
-      .input = "text/html;charset=gbk"_kj,
-      .output = "text/html;charset=gbk"_kj,
-    },
+  static const Test kTests[] = {{
+                                  .input = "text/html;charset=gbk"_kj,
+                                  .output = "text/html;charset=gbk"_kj,
+                                },
     {
       .input = "TEXT/HTML;CHARSET=GBK"_kj,
       .output = "text/html;charset=GBK"_kj,
@@ -164,24 +150,24 @@ KJ_TEST("WHATWG tests") {
     },
     // "Spaces",
     {
-     .input = "text/html;charset =gbk"_kj,
-     .output = "text/html"_kj,
+      .input = "text/html;charset =gbk"_kj,
+      .output = "text/html"_kj,
     },
     {
-     .input = "text/html ;charset=gbk"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html ;charset=gbk"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html; charset=gbk"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html; charset=gbk"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html;charset= gbk"_kj,
-     .output = "text/html;charset=\" gbk\""_kj,
+      .input = "text/html;charset= gbk"_kj,
+      .output = "text/html;charset=\" gbk\""_kj,
     },
     {
-     .input = "text/html;charset= \"gbk\""_kj,
-     .output = "text/html;charset=\" \\\"gbk\\\"\""_kj,
+      .input = "text/html;charset= \"gbk\""_kj,
+      .output = "text/html;charset=\" \\\"gbk\\\"\""_kj,
     },
     // "0x0B and 0x0C",
     {
@@ -202,49 +188,49 @@ KJ_TEST("WHATWG tests") {
     },
     // "Single quotes are a token, not a delimiter",
     {
-     .input = "text/html;charset='gbk'"_kj,
-     .output = "text/html;charset='gbk'"_kj,
+      .input = "text/html;charset='gbk'"_kj,
+      .output = "text/html;charset='gbk'"_kj,
     },
     {
-     .input = "text/html;charset='gbk"_kj,
-     .output = "text/html;charset='gbk"_kj,
+      .input = "text/html;charset='gbk"_kj,
+      .output = "text/html;charset='gbk"_kj,
     },
     {
-     .input = "text/html;charset=gbk'"_kj,
-     .output = "text/html;charset=gbk'"_kj,
+      .input = "text/html;charset=gbk'"_kj,
+      .output = "text/html;charset=gbk'"_kj,
     },
     {
-     .input = "text/html;charset=';charset=GBK"_kj,
-     .output = "text/html;charset='"_kj,
+      .input = "text/html;charset=';charset=GBK"_kj,
+      .output = "text/html;charset='"_kj,
     },
     // "Invalid parameters",
     {
-     .input = "text/html;test;charset=gbk"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html;test;charset=gbk"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html;test=;charset=gbk"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html;test=;charset=gbk"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html;';charset=gbk"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html;';charset=gbk"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html;\";charset=gbk"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html;\";charset=gbk"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html ; ; charset=gbk"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html ; ; charset=gbk"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html;;;;charset=gbk"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html;;;;charset=gbk"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html;charset= \"\u007F;charset=GBK"_kj,
-     .output = "text/html;charset=GBK"_kj,
+      .input = "text/html;charset= \"\u007F;charset=GBK"_kj,
+      .output = "text/html;charset=GBK"_kj,
     },
     {
       .input = "text/html;charset=\"\u007F;charset=foo\";charset=GBK"_kj,
@@ -256,60 +242,66 @@ KJ_TEST("WHATWG tests") {
       .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html;charset=\"gbk"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html;charset=\"gbk"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html;charset=gbk\""_kj,
-     .output = "text/html;charset=\"gbk\\\"\""_kj,
+      .input = "text/html;charset=gbk\""_kj,
+      .output = "text/html;charset=\"gbk\\\"\""_kj,
     },
     {
-     .input = "text/html;charset=\" gbk\""_kj,
-     .output = "text/html;charset=\" gbk\""_kj,
+      .input = "text/html;charset=\" gbk\""_kj,
+      .output = "text/html;charset=\" gbk\""_kj,
     },
     {
-     .input = "text/html;charset=\"gbk \""_kj,
-     .output = "text/html;charset=\"gbk \""_kj,
+      .input = "text/html;charset=\"gbk \""_kj,
+      .output = "text/html;charset=\"gbk \""_kj,
     },
     {
-     .input = "text/html;charset=\"\\ gbk\""_kj,
-     .output = "text/html;charset=\" gbk\""_kj,
+      .input = "text/html;charset=\"\\ gbk\""_kj,
+      .output = "text/html;charset=\" gbk\""_kj,
     },
     {
-     .input = "text/html;charset=\"\\g\\b\\k\""_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html;charset=\"\\g\\b\\k\""_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
-     .input = "text/html;charset=\"gbk\"x"_kj,
-     .output = "text/html;charset=gbk"_kj,
+      .input = "text/html;charset=\"gbk\"x"_kj,
+      .output = "text/html;charset=gbk"_kj,
     },
     {
       .input = "text/html;charset=\"\";charset=GBK"_kj,
       .output = "text/html;charset=\"\""_kj,
     },
     {
-     .input = "text/html;charset=\";charset=GBK"_kj,
-     .output = "text/html;charset=\";charset=GBK\""_kj,
+      .input = "text/html;charset=\";charset=GBK"_kj,
+      .output = "text/html;charset=\";charset=GBK\""_kj,
     },
     // "Unexpected code points",
     {
-     .input = "text/html;charset={gbk}"_kj,
-     .output = "text/html;charset=\"{gbk}\""_kj,
+      .input = "text/html;charset={gbk}"_kj,
+      .output = "text/html;charset=\"{gbk}\""_kj,
     },
     // "Parameter name longer than 127",
     {
-      .input = "text/html;0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789=x;charset=gbk"_kj,
-      .output = "text/html;0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789=x;charset=gbk"_kj,
+      .input =
+          "text/html;0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789=x;charset=gbk"_kj,
+      .output =
+          "text/html;0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789=x;charset=gbk"_kj,
     },
     // "type/subtype longer than 127",
     {
-      .input = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789/0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"_kj,
-      .output =  "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789/0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"_kj,
+      .input =
+          "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789/0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"_kj,
+      .output =
+          "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789/0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"_kj,
     },
     // "Valid",
     {
-      .input = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz/!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz;!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz=!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"_kj,
-      .output = "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz/!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz;!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz=!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"_kj,
+      .input =
+          "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz/!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz;!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz=!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"_kj,
+      .output =
+          "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz/!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz;!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz=!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"_kj,
     },
     // TODO(soon): Extreme edge case, we currently don't pass it but not too concerned.
     // {
@@ -359,29 +351,17 @@ KJ_TEST("WHATWG tests") {
     //   .output = "x/x;x=x"_kj,
     // },
     // "Failure",
-    { .input = "\u000Bx/x"_kj, },
-    { .input = "\u000Cx/x"_kj },
-    { .input = "x/x\u000B"_kj },
-    { .input = "x/x\u000C"_kj },
-    { .input = ""_kj },
-    { .input = "\t"_kj },
-    { .input = "/"_kj },
-    { .input = "bogus"_kj },
-    { .input = "bogus/"_kj },
-    { .input = "bogus/ "_kj },
-    { .input = "bogus/bogus/;"_kj },
-    { .input = "</>"_kj },
-    { .input = "(/)"_kj },
-    { .input = "ÿ/ÿ"_kj },
-    { .input = "text/html(;doesnot=matter"_kj },
-    { .input = "{/}"_kj },
-    { .input = "\u0100/\u0100"_kj },
-    { .input = "text /html"_kj },
-    { .input = "text/ html"_kj },
-    { .input = "\"text/html\""_kj }
-  };
+    {
+      .input = "\u000Bx/x"_kj,
+    },
+    {.input = "\u000Cx/x"_kj}, {.input = "x/x\u000B"_kj}, {.input = "x/x\u000C"_kj},
+    {.input = ""_kj}, {.input = "\t"_kj}, {.input = "/"_kj}, {.input = "bogus"_kj},
+    {.input = "bogus/"_kj}, {.input = "bogus/ "_kj}, {.input = "bogus/bogus/;"_kj},
+    {.input = "</>"_kj}, {.input = "(/)"_kj}, {.input = "ÿ/ÿ"_kj},
+    {.input = "text/html(;doesnot=matter"_kj}, {.input = "{/}"_kj}, {.input = "\u0100/\u0100"_kj},
+    {.input = "text /html"_kj}, {.input = "text/ html"_kj}, {.input = "\"text/html\""_kj}};
 
-  for (const auto& test : kTests) {
+  for (const auto& test: kTests) {
     KJ_IF_SOME(output, test.output) {
       auto result = KJ_ASSERT_NONNULL(MimeType::tryParse(test.input));
       KJ_ASSERT(result.toString() == output);
@@ -391,11 +371,10 @@ KJ_TEST("WHATWG tests") {
   }
 
   KJ_ASSERT(MimeType::JSON ==
-            KJ_ASSERT_NONNULL(MimeType::tryParse("application/json;charset=nothing")));
+      KJ_ASSERT_NONNULL(MimeType::tryParse("application/json;charset=nothing"_kj)));
+  KJ_ASSERT(MimeType::JSON == KJ_ASSERT_NONNULL(MimeType::tryParse("application/json;"_kj)));
   KJ_ASSERT(MimeType::JSON ==
-            KJ_ASSERT_NONNULL(MimeType::tryParse("application/json;")));
-  KJ_ASSERT(MimeType::JSON ==
-            KJ_ASSERT_NONNULL(MimeType::tryParse("application/json;char=\"UTF-8\"")));
+      KJ_ASSERT_NONNULL(MimeType::tryParse("application/json;char=\"UTF-8\""_kj)));
   KJ_ASSERT(MimeType::isJson(MimeType::JSON));
   KJ_ASSERT(MimeType::isJson(MimeType::MANIFEST_JSON));
   KJ_ASSERT(MimeType::isJavascript(MimeType::JAVASCRIPT));
@@ -407,9 +386,178 @@ KJ_TEST("WHATWG tests") {
   KJ_ASSERT(MimeType::isText(MimeType::JAVASCRIPT));
   KJ_ASSERT(MimeType::isText(MimeType::XJAVASCRIPT));
   KJ_ASSERT(MimeType::isText(
-      KJ_ASSERT_NONNULL(MimeType::tryParse("application/json; charset=\"utf-8\""))));
+      KJ_ASSERT_NONNULL(MimeType::tryParse("application/json; charset=\"utf-8\""_kj))));
+}
+
+KJ_TEST("Extract Mime Type") {
+  // These are taken from the fetch spec
+  // https://fetch.spec.whatwg.org/#concept-header-extract-mime-type
+  {
+    auto mimeType = KJ_ASSERT_NONNULL(MimeType::extract("text/plain;charset=gbk, text/html"_kj));
+    KJ_ASSERT(mimeType == MimeType::HTML);
+  }
+
+  {
+    auto mimeType =
+        KJ_ASSERT_NONNULL(MimeType::extract("text/html;charset=gbk;a=b, text/html;x=y"));
+    KJ_ASSERT(mimeType.toString() == "text/html;x=y;charset=gbk");
+  }
+
+  {
+    auto mimeType =
+        KJ_ASSERT_NONNULL(MimeType::extract("text/html;charset=gbk, x/x, text/html;x=y"));
+    KJ_ASSERT(mimeType.toString() == "text/html;x=y");
+  }
+
+  {
+    auto mimeType = KJ_ASSERT_NONNULL(MimeType::extract("text/html, cannot parse"));
+    KJ_ASSERT(mimeType.toString() == "text/html");
+  }
+
+  {
+    auto mimeType = KJ_ASSERT_NONNULL(MimeType::extract("text/html, */*"));
+    KJ_ASSERT(mimeType.toString() == "text/html");
+  }
+
+  {
+    auto mimeType = KJ_ASSERT_NONNULL(MimeType::extract("text/html, "));
+    KJ_ASSERT(mimeType.toString() == "text/html");
+  }
+
+  {
+    // An odd edge case where the parameter value contains an escaped quote and escaped
+    // comma in the value.
+    auto mimeType = KJ_ASSERT_NONNULL(MimeType::extract("text/html;a=\\\"not-quoted\\,, foo/bar"));
+    KJ_ASSERT(mimeType.toString() == "foo/bar");
+  }
+
+  // These are taken from the web platform tests
+  struct Test {
+    kj::StringPtr input;
+    kj::StringPtr encoding;
+    kj::StringPtr result;
+  };
+
+  Test tests[] = {
+    Test{
+      .input = ", text/plain"_kj,
+      .encoding = nullptr,
+      .result = "text/plain"_kj,
+    },
+    Test{
+      .input = "text/plain, "_kj,
+      .encoding = nullptr,
+      .result = "text/plain"_kj,
+    },
+    {
+      .input = "text/html, text/plain"_kj,
+      .encoding = nullptr,
+      .result = "text/plain"_kj,
+    },
+    {
+      .input = "text/plain;charset=gbk, text/html"_kj,
+      .encoding = nullptr,
+      .result = "text/html"_kj,
+    },
+    {
+      .input = "text/plain;charset=gbk, text/html;charset=windows-1254"_kj,
+      .encoding = "windows-1254"_kj,
+      .result = "text/html;charset=windows-1254"_kj,
+    },
+    {
+      .input = "text/plain;charset=gbk, text/plain"_kj,
+      .encoding = "gbk"_kj,
+      .result = "text/plain;charset=gbk"_kj,
+    },
+    {
+      .input = "text/plain;charset=gbk, text/plain;charset=windows-1252"_kj,
+      .encoding = "windows-1252"_kj,
+      .result = "text/plain;charset=windows-1252"_kj,
+    },
+    {
+      .input = "text/plain;charset=gbk;x=foo, text/plain"_kj,
+      .encoding = "gbk"_kj,
+      .result = "text/plain;charset=gbk"_kj,
+    },
+    {
+      .input = "text/html;charset=gbk, text/plain, text/html"_kj,
+      .encoding = nullptr,
+      .result = "text/html"_kj,
+    },
+    {
+      .input = "text/plain, */*"_kj,
+      .encoding = nullptr,
+      .result = "text/plain"_kj,
+    },
+    {
+      .input = "text/html, */*"_kj,
+      .encoding = nullptr,
+      .result = "text/html"_kj,
+    },
+    {
+      .input = "*/*, text/html"_kj,
+      .encoding = nullptr,
+      .result = "text/html"_kj,
+    },
+    {
+      .input = "text/plain, */*;charset=gbk"_kj,
+      .encoding = nullptr,
+      .result = "text/plain"_kj,
+    },
+    {
+      .input = "text/html, */*;charset=gbk"_kj,
+      .encoding = nullptr,
+      .result = "text/html"_kj,
+    },
+    {
+      .input = "text/html;\", \", text/plain"_kj,
+      .encoding = nullptr,
+      .result = "text/plain"_kj,
+    },
+    {
+      .input = "text/html;charset=gbk, text/html;x=\",text/plain"_kj,
+      .encoding = "gbk"_kj,
+      .result = "text/html;x=\",text/plain\";charset=gbk"_kj,
+    },
+    {
+      .input = "text/html;x=\", text/plain"_kj,
+      .encoding = nullptr,
+      .result = "text/html;x=\", text/plain\""_kj,
+    },
+    {
+      .input = "text/html;\", text/plain"_kj,
+      .encoding = nullptr,
+      .result = "text/html"_kj,
+    },
+    {
+      .input = "text/html;\", \\\", text/plain"_kj,
+      .encoding = nullptr,
+      .result = "text/html"_kj,
+    },
+    {
+      // This is actually three separate Content-Type header fields concatenated together
+      // into a list. The original values are:
+      //  Content-Type: text/html;\"
+      //  Content-Type: \\\"
+      //  Content-Type: text/plain, \";charset=GBK
+      //
+      // When combined using the typical rules for combining multiple headers, the result
+      // actually ends up being just a single mime type with an invalid parameter.
+      .input = "text/html;\", \\\", text/plain, \";charset=GBK"_kj,
+      .encoding = "GBK"_kj,
+      .result = "text/html;charset=GBK"_kj,
+    },
+  };
+  auto ptr = kj::ArrayPtr<Test>(tests, sizeof(tests) / sizeof(Test));
+
+  for (auto& test: ptr) {
+    auto parsed = KJ_ASSERT_NONNULL(MimeType::extract(test.input));
+    KJ_ASSERT(parsed.toString() == test.result);
+    if (test.encoding != nullptr) {
+      KJ_ASSERT(KJ_ASSERT_NONNULL(parsed.params().find("charset"_kj)) == test.encoding);
+    }
+  }
 }
 
 }  // namespace
 }  // namespace workerd
-

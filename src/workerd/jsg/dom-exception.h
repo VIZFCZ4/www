@@ -6,36 +6,31 @@
 
 #include "jsg.h"
 
-#define JSG_DOM_EXCEPTION_FOR_EACH_ERROR_NAME(f) \
-    f(INDEX_SIZE_ERR, 1, "IndexSizeError") \
-    f(DOMSTRING_SIZE_ERR, 2, "DOMStringSizeError") \
-    f(HIERARCHY_REQUEST_ERR, 3, "HierarchyRequestError") \
-    f(WRONG_DOCUMENT_ERR, 4, "WrongDocumentError") \
-    f(INVALID_CHARACTER_ERR, 5, "InvalidCharacterError") \
-    f(NO_DATA_ALLOWED_ERR, 6, "NoDataAllowedError") \
-    f(NO_MODIFICATION_ALLOWED_ERR, 7, "NoModificationAllowedError") \
-    f(NOT_FOUND_ERR, 8, "NotFoundError") \
-    f(NOT_SUPPORTED_ERR, 9, "NotSupportedError") \
-    f(INUSE_ATTRIBUTE_ERR, 10, "InUseAttributeError") \
-    f(INVALID_STATE_ERR, 11, "InvalidStateError") \
-    f(SYNTAX_ERR, 12, "SyntaxError") \
-    f(INVALID_MODIFICATION_ERR, 13, "InvalidModificationError") \
-    f(NAMESPACE_ERR, 14, "NamespaceError") \
-    f(INVALID_ACCESS_ERR, 15, "InvalidAccessError") \
-    f(VALIDATION_ERR, 16, "ValidationError") \
-    f(TYPE_MISMATCH_ERR, 17, "TypeMismatchError") \
-    f(SECURITY_ERR, 18, "SecurityError") \
-    f(NETWORK_ERR, 19, "NetworkError") \
-    f(ABORT_ERR, 20, "AbortError") \
-    f(URL_MISMATCH_ERR, 21, "URLMismatchError") \
-    f(QUOTA_EXCEEDED_ERR, 22, "QuotaExceededError") \
-    f(TIMEOUT_ERR, 23, "TimeoutError") \
-    f(INVALID_NODE_TYPE_ERR, 24, "InvalidNodeTypeError") \
-    f(DATA_CLONE_ERR, 25, "DataCloneError")
+#define JSG_DOM_EXCEPTION_FOR_EACH_ERROR_NAME(f)                                                   \
+  f(INDEX_SIZE_ERR, 1, "IndexSizeError") f(DOMSTRING_SIZE_ERR, 2, "DOMStringSizeError")            \
+      f(HIERARCHY_REQUEST_ERR, 3, "HierarchyRequestError") f(WRONG_DOCUMENT_ERR, 4,                \
+          "WrongDocumentError") f(INVALID_CHARACTER_ERR, 5, "InvalidCharacterError")               \
+          f(NO_DATA_ALLOWED_ERR, 6, "NoDataAllowedError")                                          \
+              f(NO_MODIFICATION_ALLOWED_ERR, 7, "NoModificationAllowedError") f(                   \
+                  NOT_FOUND_ERR, 8, "NotFoundError") f(NOT_SUPPORTED_ERR, 9, "NotSupportedError")  \
+                  f(INUSE_ATTRIBUTE_ERR, 10, "InUseAttributeError") f(                             \
+                      INVALID_STATE_ERR, 11, "InvalidStateError") f(SYNTAX_ERR, 12, "SyntaxError") \
+                      f(INVALID_MODIFICATION_ERR, 13, "InvalidModificationError") f(NAMESPACE_ERR, \
+                          14, "NamespaceError") f(INVALID_ACCESS_ERR, 15, "InvalidAccessError")    \
+                          f(VALIDATION_ERR, 16, "ValidationError") f(TYPE_MISMATCH_ERR, 17,        \
+                              "TypeMismatchError") f(SECURITY_ERR, 18, "SecurityError")            \
+                              f(NETWORK_ERR, 19, "NetworkError") f(ABORT_ERR, 20, "AbortError")    \
+                                  f(URL_MISMATCH_ERR, 21, "URLMismatchError")                      \
+                                      f(QUOTA_EXCEEDED_ERR, 22, "QuotaExceededError")              \
+                                          f(TIMEOUT_ERR, 23, "TimeoutError")                       \
+                                              f(INVALID_NODE_TYPE_ERR, 24, "InvalidNodeTypeError") \
+                                                  f(DATA_CLONE_ERR, 25, "DataCloneError")
 
 namespace workerd::jsg {
+class Serializer;
+class Deserializer;
 
-// JSG allows DOMExceptions to be tunneled through kj::Exceptions (see makeInternalError() for
+// JSG allows DOMExceptions to be tunneled through kj::Exceptions (see exceptionToJs() for
 // details). While this feature is activated conditionally at run-time, and thus does not depend
 // on any specific concrete C++ type, JSG needs to be able to unit test the tunneled exception
 // functionality, thus the existence of this implementation.
@@ -48,30 +43,21 @@ namespace workerd::jsg {
 // the same tunneled exception feature by defining their own globally-accessible type named
 // "DOMException".
 class DOMException: public Object {
-public:
-  DOMException(kj::String message,
-               kj::String name,
-               V8Ref<v8::Object> errorForStack)
-      : message(kj::mv(message)),
-        name(kj::mv(name)),
-        errorForStack(kj::mv(errorForStack)) {}
+ public:
+  DOMException(kj::String message, kj::String name): message(kj::mv(message)), name(kj::mv(name)) {}
 
   // JS API
 
-  static Ref<DOMException> constructor(Lock& js,
-                                       Optional<kj::String> message,
-                                       Optional<kj::String> name);
+  static Ref<DOMException> constructor(const v8::FunctionCallbackInfo<v8::Value>& args,
+      Optional<kj::String> message,
+      Optional<kj::String> name);
 
-  kj::StringPtr getName();
-  kj::StringPtr getMessage();
-  int getCode();
+  kj::StringPtr getName() const;
+  kj::StringPtr getMessage() const;
+  int getCode() const;
 
-  v8::Local<v8::Value> getStack(Lock& js);
-
-#define JSG_DOM_EXCEPTION_CONSTANT_CXX(name, code, friendlyName) \
-    static constexpr int name = code;
-#define JSG_DOM_EXCEPTION_CONSTANT_JS(name, code, friendlyName) \
-    JSG_STATIC_CONSTANT(name);
+#define JSG_DOM_EXCEPTION_CONSTANT_CXX(name, code, friendlyName) static constexpr int name = code;
+#define JSG_DOM_EXCEPTION_CONSTANT_JS(name, code, friendlyName) JSG_STATIC_CONSTANT(name);
 
   // Define constexpr codes for every INDEX_SIZE_ERR, DOMSTRING_SIZE_ERR, etc.
   JSG_DOM_EXCEPTION_FOR_EACH_ERROR_NAME(JSG_DOM_EXCEPTION_CONSTANT_CXX)
@@ -84,24 +70,19 @@ public:
     // flags.getJsgPropertyOnPrototypeTemplate() compatibility flag.
     // The standard definition of DOMException can be found here:
     // https://webidl.spec.whatwg.org/#idl-DOMException
-    JSG_READONLY_INSTANCE_PROPERTY(message, getMessage);
-    JSG_READONLY_INSTANCE_PROPERTY(name, getName);
-    JSG_READONLY_INSTANCE_PROPERTY(code, getCode);
-
-    JSG_LAZY_READONLY_INSTANCE_PROPERTY(stack, getStack);
-    // V8 gives Error objects a non-standard (but widely known) `stack` property, and Web IDL
-    // requires that DOMException get any non-standard properties that Error gets. Chrome honors
-    // this requirement only for runtime-generated DOMExceptions -- script-generated DOMExceptions
-    // don't get `stack`, even though script-generated Errors do. It's more convenient and, IMO,
-    // more conformant to just give all DOMExceptions a `stack` property.
-    //
-    // Note that Chrome makes this a mutable property, presumably because Error properties are
-    // mutable in JavaScript. Maybe we should do that? It's easier to implement as a read-only
-    // property, though.
+    JSG_LAZY_READONLY_INSTANCE_PROPERTY(message, getMessage);
+    JSG_LAZY_READONLY_INSTANCE_PROPERTY(name, getName);
+    JSG_LAZY_READONLY_INSTANCE_PROPERTY(code, getCode);
 
     // Declare static JS constants for every INDEX_SIZE_ERR, DOMSTRING_SIZE_ERR, etc.
     JSG_DOM_EXCEPTION_FOR_EACH_ERROR_NAME(JSG_DOM_EXCEPTION_CONSTANT_JS)
+
+    JSG_TS_OVERRIDE({
+      get stack(): any;
+      set stack(value: any);
+    });
   }
+  JSG_REFLECTION(stack);
 
 #undef JSG_DOM_EXCEPTION_CONSTANT_CXX
 #undef JSG_DOM_EXCEPTION_CONSTANT_JS
@@ -109,18 +90,24 @@ public:
   void visitForMemoryInfo(MemoryTracker& tracker) const {
     tracker.trackField("message", message);
     tracker.trackField("name", name);
-    tracker.trackField("errorForStack", errorForStack);
   }
 
-private:
+  // TODO(cleanup): The value is taken from worker-interface.capnp, which we can't
+  // depend on directly here because we cannot introduce the dependency into JSG.
+  // Therefore we have to set it manually. A better solution long term is to actually
+  // move DOMException into workerd/api, but we'll do that separately.
+  static constexpr uint SERIALIZATION_TAG = 7;
+  static constexpr uint SERIALIZATION_TAG_V2 = 8;
+  JSG_SERIALIZABLE(SERIALIZATION_TAG_V2, SERIALIZATION_TAG);
+
+  void serialize(jsg::Lock& js, jsg::Serializer& serializer);
+  static jsg::Ref<DOMException> deserialize(
+      jsg::Lock& js, uint tag, jsg::Deserializer& deserializer);
+
+ private:
   kj::String message;
   kj::String name;
-
-  // We implement the `stack` property in a similarly hacky way as Chrome: store an Error object
-  // and use its `stack`.
-  V8Ref<v8::Object> errorForStack;
-
-  void visitForGc(GcVisitor& visitor);
+  PropertyReflection<kj::String> stack;
 };
 
-}  // namespace::jsg
+}  // namespace workerd::jsg

@@ -3,25 +3,41 @@
 //     https://opensource.org/licenses/Apache-2.0
 #pragma once
 
+#include <workerd/api/performance.h>
 #include <workerd/jsg/jsg.h>
 #include <workerd/util/mimetype.h>
 
 namespace workerd::api::node {
 
+// Originally implemented by Node.js contributors.
+// Available at https://github.com/nodejs/node/blob/b7b96282b212a2274b9db605ac29d388246754de/src/node_buffer.h#L75
+// This is verbose to be explicit with inline commenting
+static constexpr bool IsWithinBounds(size_t off, size_t len, size_t max) noexcept {
+  // Asking to seek too far into the buffer
+  // check to avoid wrapping in subsequent subtraction
+  if (off > max) return false;
+
+  // Asking for more than is left over in the buffer
+  if (max - off < len) return false;
+
+  // Otherwise we're in bounds
+  return true;
+}
+
 class MIMEType;
 
 class MIMEParams final: public jsg::Object {
-private:
+ private:
   template <typename T>
   struct IteratorState final {
     kj::Array<T> values;
     uint index = 0;
   };
 
-public:
+ public:
   MIMEParams(kj::Maybe<MimeType&> mimeType = kj::none);
 
-  static jsg::Ref<MIMEParams> constructor();
+  static jsg::Ref<MIMEParams> constructor(jsg::Lock& js);
 
   void delete_(kj::String name);
   kj::Maybe<kj::StringPtr> get(kj::String name);
@@ -29,19 +45,14 @@ public:
   void set(kj::String name, kj::String value);
   kj::String toString();
 
-  JSG_ITERATOR(EntryIterator, entries,
-               kj::Array<kj::String>,
-               IteratorState<kj::Array<kj::String>>,
-               iteratorNext<kj::Array<kj::String>>);
-  JSG_ITERATOR(KeyIterator, keys,
-                kj::String,
-                IteratorState<kj::String>,
-                iteratorNext<kj::String>);
-  JSG_ITERATOR(ValueIterator,
-                values,
-                kj::String,
-                IteratorState<kj::String>,
-                iteratorNext<kj::String>);
+  JSG_ITERATOR(EntryIterator,
+      entries,
+      kj::Array<kj::String>,
+      IteratorState<kj::Array<kj::String>>,
+      iteratorNext<kj::Array<kj::String>>);
+  JSG_ITERATOR(KeyIterator, keys, kj::String, IteratorState<kj::String>, iteratorNext<kj::String>);
+  JSG_ITERATOR(
+      ValueIterator, values, kj::String, IteratorState<kj::String>, iteratorNext<kj::String>);
 
   JSG_RESOURCE_TYPE(MIMEParams) {
     JSG_METHOD_NAMED(delete, delete_);
@@ -56,7 +67,7 @@ public:
     JSG_ITERABLE(entries);
   }
 
-private:
+ private:
   template <typename T>
   static kj::Maybe<T> iteratorNext(jsg::Lock& js, IteratorState<T>& state) {
     if (state.index >= state.values.size()) {
@@ -77,10 +88,10 @@ private:
 };
 
 class MIMEType final: public jsg::Object {
-public:
-  MIMEType(MimeType inner);
+ public:
+  explicit MIMEType(jsg::Lock& js, MimeType inner);
   ~MIMEType() noexcept(false);
-  static jsg::Ref<MIMEType> constructor(kj::String input);
+  static jsg::Ref<MIMEType> constructor(jsg::Lock& js, kj::String input);
 
   kj::StringPtr getType();
   void setType(kj::String type);
@@ -99,58 +110,57 @@ public:
     JSG_METHOD_NAMED(toJSON, toString);
   }
 
-  void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
-    // TODO(cleanup): Better to have jsg::MimeType be a MemoryRetainer directly
-    tracker.trackFieldWithSize("mimeType", inner.toString().size());
-    tracker.trackField("params", params);
-  }
-
-private:
+ private:
   workerd::MimeType inner;
   jsg::Ref<MIMEParams> params;
 };
 
-#define JS_UTIL_IS_TYPES(V) \
-  V(ArrayBufferView) \
-  V(ArgumentsObject) \
-  V(ArrayBuffer) \
-  V(AsyncFunction) \
-  V(BigInt64Array) \
-  V(BigIntObject) \
-  V(BigUint64Array) \
-  V(BooleanObject) \
-  V(DataView) \
-  V(Date) \
-  V(Float32Array) \
-  V(Float64Array) \
-  V(GeneratorFunction) \
-  V(GeneratorObject) \
-  V(Int8Array) \
-  V(Int16Array) \
-  V(Int32Array) \
-  V(Map) \
-  V(MapIterator) \
-  V(ModuleNamespaceObject) \
-  V(NativeError) \
-  V(NumberObject) \
-  V(Promise) \
-  V(Proxy) \
-  V(RegExp) \
-  V(Set) \
-  V(SetIterator) \
-  V(SharedArrayBuffer) \
-  V(StringObject) \
-  V(SymbolObject) \
-  V(TypedArray) \
-  V(Uint8Array) \
-  V(Uint8ClampedArray) \
-  V(Uint16Array) \
-  V(Uint32Array) \
-  V(WeakMap) \
+#define JS_UTIL_IS_TYPES(V)                                                                        \
+  V(ArrayBufferView)                                                                               \
+  V(ArgumentsObject)                                                                               \
+  V(ArrayBuffer)                                                                                   \
+  V(AsyncFunction)                                                                                 \
+  V(BigInt64Array)                                                                                 \
+  V(BigIntObject)                                                                                  \
+  V(BigUint64Array)                                                                                \
+  V(BooleanObject)                                                                                 \
+  V(DataView)                                                                                      \
+  V(Date)                                                                                          \
+  V(External)                                                                                      \
+  V(Float16Array)                                                                                  \
+  V(Float32Array)                                                                                  \
+  V(Float64Array)                                                                                  \
+  V(GeneratorFunction)                                                                             \
+  V(GeneratorObject)                                                                               \
+  V(Int8Array)                                                                                     \
+  V(Int16Array)                                                                                    \
+  V(Int32Array)                                                                                    \
+  V(Map)                                                                                           \
+  V(MapIterator)                                                                                   \
+  V(ModuleNamespaceObject)                                                                         \
+  V(NativeError)                                                                                   \
+  V(NumberObject)                                                                                  \
+  V(Promise)                                                                                       \
+  V(Proxy)                                                                                         \
+  V(RegExp)                                                                                        \
+  V(Set)                                                                                           \
+  V(SetIterator)                                                                                   \
+  V(SharedArrayBuffer)                                                                             \
+  V(StringObject)                                                                                  \
+  V(SymbolObject)                                                                                  \
+  V(TypedArray)                                                                                    \
+  V(Uint8Array)                                                                                    \
+  V(Uint8ClampedArray)                                                                             \
+  V(Uint16Array)                                                                                   \
+  V(Uint32Array)                                                                                   \
+  V(WeakMap)                                                                                       \
   V(WeakSet)
 
 class UtilModule final: public jsg::Object {
-public:
+ public:
+  UtilModule() = default;
+  UtilModule(jsg::Lock&, const jsg::Url&) {}
+
   jsg::Name getResourceTypeInspect(jsg::Lock& js);
 
   // `getOwnNonIndexProperties()` `filter`s
@@ -165,30 +175,45 @@ public:
   static constexpr int kRejected = jsg::PromiseState::REJECTED;
 
   struct PromiseDetails {
-    int state; // TODO: can we make this a `jsg::PromiseState`
-    jsg::Optional<jsg::JsValue> result;
+    int state;  // TODO: can we make this a `jsg::PromiseState`
+    jsg::Optional<jsg::JsRef<jsg::JsValue>> result;
 
     JSG_STRUCT(state, result);
   };
-  jsg::Optional<PromiseDetails> getPromiseDetails(jsg::JsValue value);
+  jsg::Optional<PromiseDetails> getPromiseDetails(jsg::Lock& js, jsg::JsValue value);
 
   struct ProxyDetails {
-    jsg::JsValue target;
-    jsg::JsValue handler;
+    jsg::JsRef<jsg::JsValue> target;
+    jsg::JsRef<jsg::JsValue> handler;
 
     JSG_STRUCT(target, handler);
   };
-  jsg::Optional<ProxyDetails> getProxyDetails(jsg::JsValue value);
+  jsg::Optional<ProxyDetails> getProxyDetails(jsg::Lock& js, jsg::JsValue value);
 
   struct PreviewedEntries {
-    jsg::JsArray entries;
+    jsg::JsRef<jsg::JsArray> entries;
     bool isKeyValue;
 
     JSG_STRUCT(entries, isKeyValue);
   };
-  jsg::Optional<PreviewedEntries> previewEntries(jsg::JsValue value);
+  jsg::Optional<PreviewedEntries> previewEntries(jsg::Lock& js, jsg::JsValue value);
 
   jsg::JsString getConstructorName(jsg::Lock& js, jsg::JsObject value);
+
+  struct CallSiteEntry {
+    kj::String functionName;
+    kj::String scriptName;
+    int lineNumber;
+    // Node.js originally introduced the API with the name `getCallSite()` as an experimental
+    // API but then renamed it to `getCallSites()` soon after. We had already implemented the
+    // API with the original name in a release. To avoid the possibility of breaking, we export
+    // the function using both names.
+    int columnNumber;
+    int column;
+
+    JSG_STRUCT(functionName, scriptName, lineNumber, columnNumber, column);
+  };
+  kj::Array<CallSiteEntry> getCallSites(jsg::Lock& js, jsg::Optional<int> frames);
 
 #define V(Type) bool is##Type(jsg::JsValue value);
   JS_UTIL_IS_TYPES(V)
@@ -214,27 +239,30 @@ public:
     JSG_METHOD(getProxyDetails);
     JSG_METHOD(previewEntries);
     JSG_METHOD(getConstructorName);
+    JSG_METHOD(getCallSites);
 
-  #define V(Type) JSG_METHOD(is##Type);
+    JSG_NESTED_TYPE(Performance);
+    JSG_NESTED_TYPE(PerformanceEntry);
+    JSG_NESTED_TYPE(PerformanceMeasure);
+    JSG_NESTED_TYPE(PerformanceMark);
+    JSG_NESTED_TYPE(PerformanceObserver);
+    JSG_NESTED_TYPE(PerformanceObserverEntryList);
+    JSG_NESTED_TYPE(PerformanceResourceTiming);
+
+#define V(Type) JSG_METHOD(is##Type);
     JS_UTIL_IS_TYPES(V)
-  #undef V
+#undef V
     JSG_METHOD(isAnyArrayBuffer);
     JSG_METHOD(isBoxedPrimitive);
   }
 };
 
-#define EW_NODE_UTIL_ISOLATE_TYPES              \
-    api::node::UtilModule,                      \
-    api::node::UtilModule::PromiseDetails,      \
-    api::node::UtilModule::ProxyDetails,        \
-    api::node::UtilModule::PreviewedEntries,    \
-    api::node::MIMEType,                        \
-    api::node::MIMEParams,                      \
-    api::node::MIMEParams::EntryIterator,       \
-    api::node::MIMEParams::ValueIterator,       \
-    api::node::MIMEParams::KeyIterator,         \
-    api::node::MIMEParams::EntryIterator::Next, \
-    api::node::MIMEParams::ValueIterator::Next, \
-    api::node::MIMEParams::KeyIterator::Next
+#define EW_NODE_UTIL_ISOLATE_TYPES                                                                 \
+  api::node::UtilModule, api::node::UtilModule::PromiseDetails,                                    \
+      api::node::UtilModule::ProxyDetails, api::node::UtilModule::PreviewedEntries,                \
+      api::node::MIMEType, api::node::MIMEParams, api::node::MIMEParams::EntryIterator,            \
+      api::node::MIMEParams::ValueIterator, api::node::MIMEParams::KeyIterator,                    \
+      api::node::MIMEParams::EntryIterator::Next, api::node::MIMEParams::ValueIterator::Next,      \
+      api::node::MIMEParams::KeyIterator::Next, api::node::UtilModule::CallSiteEntry
 
 }  // namespace workerd::api::node

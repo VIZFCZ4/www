@@ -5,13 +5,13 @@
 #pragma once
 
 #include "common.h"
+
 #include <workerd/util/weak-refs.h>
 
 namespace workerd::api {
 
-class WritableStreamDefaultWriter: public jsg::Object,
-                                   public WritableStreamController::Writer {
-public:
+class WritableStreamDefaultWriter: public jsg::Object, public WritableStreamController::Writer {
+ public:
   explicit WritableStreamDefaultWriter();
 
   ~WritableStreamDefaultWriter() noexcept(false) override;
@@ -19,8 +19,7 @@ public:
   // JavaScript API
 
   static jsg::Ref<WritableStreamDefaultWriter> constructor(
-      jsg::Lock& js,
-      jsg::Ref<WritableStream> stream);
+      jsg::Lock& js, jsg::Ref<WritableStream> stream);
 
   jsg::MemoizedIdentity<jsg::Promise<void>>& getClosed();
   jsg::MemoizedIdentity<jsg::Promise<void>>& getReady();
@@ -65,7 +64,7 @@ public:
 
   // Internal API
 
-  void attach(
+  void attach(jsg::Lock& js,
       WritableStreamController& controller,
       jsg::Promise<void> closedPromise,
       jsg::Promise<void> readyPromise) override;
@@ -74,16 +73,18 @@ public:
 
   void lockToStream(jsg::Lock& js, WritableStream& stream);
 
-  void replaceReadyPromise(jsg::Promise<void> readyPromise) override;
+  void replaceReadyPromise(jsg::Lock& js, jsg::Promise<void> readyPromise) override;
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+  kj::Maybe<jsg::Promise<void>> isReady(jsg::Lock& js);
+
+ private:
   struct Initial {};
   // While a Writer is attached to a WritableStream, it holds a strong reference to the
-  // WritableStream to prevent it from being GC'd so long as the Writer is available.
-  // Once the writer is closed, released, or GC'd the reference to the WritableStream
-  // is cleared and the WritableStream can be GC'd if there are no other references to
+  // WritableStream to prevent it from being GC'ed so long as the Writer is available.
+  // Once the writer is closed, released, or GC'ed the reference to the WritableStream
+  // is cleared and the WritableStream can be GC'ed if there are no other references to
   // it being held anywhere. If the writer is still attached to the WritableStream when
   // it is destroyed, the WritableStream's reference to the writer is cleared but the
   // WritableStream remains in the "writer locked" state, per the spec.
@@ -95,19 +96,23 @@ private:
 
   kj::Maybe<jsg::MemoizedIdentity<jsg::Promise<void>>> closedPromise;
   kj::Maybe<jsg::MemoizedIdentity<jsg::Promise<void>>> readyPromise;
+  kj::Maybe<jsg::Promise<void>> readyPromisePending;
 
   void visitForGc(jsg::GcVisitor& visitor);
 };
 
 class WritableStream: public jsg::Object {
-public:
+ public:
   explicit WritableStream(IoContext& ioContext,
-                          kj::Own<WritableStreamSink> sink,
-                          kj::Maybe<uint64_t> maybeHighWaterMark = kj::none,
-                          kj::Maybe<jsg::Promise<void>> maybeClosureWaitable = kj::none);
+      kj::Own<WritableStreamSink> sink,
+      kj::Maybe<kj::Own<ByteStreamObserver>> observer,
+      kj::Maybe<uint64_t> maybeHighWaterMark = kj::none,
+      kj::Maybe<jsg::Promise<void>> maybeClosureWaitable = kj::none);
 
   explicit WritableStream(kj::Own<WritableStreamController> controller);
-  ~WritableStream() noexcept(false) { weakRef->invalidate(); }
+  ~WritableStream() noexcept(false) {
+    weakRef->invalidate();
+  }
 
   WritableStreamController& getController();
 
@@ -116,13 +121,16 @@ public:
   // Remove and return the underlying implementation of this WritableStream. Throw a TypeError if
   // this WritableStream is locked or closed, otherwise this WritableStream becomes immediately
   // locked and closed. If this writable stream is errored, throw the stored error.
-  virtual kj::Own<WritableStreamSink> removeSink(jsg::Lock& js);
+  // TODO(cleanup): There are a couple of places where we need to convert to using detach()
+  // or the inner removeSink (on WritableStreamController) before we can remove this method.
+  virtual KJ_DEPRECATED("Use detach() instead") kj::Own<WritableStreamSink> removeSink(
+      jsg::Lock& js);
+  virtual void detach(jsg::Lock& js);
 
   // ---------------------------------------------------------------------------
   // JS interface
 
-  static jsg::Ref<WritableStream> constructor(
-      jsg::Lock& js,
+  static jsg::Ref<WritableStream> constructor(jsg::Lock& js,
       jsg::Optional<UnderlyingSink> underlyingSink,
       jsg::Optional<StreamQueuingStrategy> queuingStrategy);
 
@@ -168,13 +176,15 @@ public:
 
   void visitForMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-private:
+ private:
   kj::Maybe<IoContext&> ioContext;
   kj::Own<WritableStreamController> controller;
   kj::Own<WeakRef<WritableStream>> weakRef =
       kj::refcounted<WeakRef<WritableStream>>(kj::Badge<WritableStream>(), *this);
 
-  kj::Own<WeakRef<WritableStream>> addWeakRef() { return weakRef->addRef(); }
+  kj::Own<WeakRef<WritableStream>> addWeakRef() {
+    return weakRef->addRef();
+  }
 
   void visitForGc(jsg::GcVisitor& visitor);
 

@@ -19,7 +19,7 @@ enum class ActorGetMode {
 // This is NOT at I/O type. Each global actor namespace binding holds one instance of this which
 // it may call from any thread.
 class ActorIdFactory {
-public:
+ public:
   // Abstract actor ID.
   //
   // This is NOT an I/O type. An ActorId created in one IoContext can be used in other
@@ -28,13 +28,16 @@ public:
   // worker (by the IoChannelFactory for any IoContext), but will detect if the ID is not valid
   // for the specific namespace.
   class ActorId {
-  public:
+   public:
     // Get the string that could be passed to `idFromString()` to recreate this ID.
     virtual kj::String toString() const = 0;
 
     // If the ActorId was created using `idFromName()`, return a copy of the name that was passed
     // to it. Otherwise, returns null.
     virtual kj::Maybe<kj::StringPtr> getName() const = 0;
+
+    // Get the jurisdiction that was used when creating this ID.
+    virtual kj::Maybe<kj::StringPtr> getJurisdiction() const = 0;
 
     // Compare with another ID.
     //
@@ -50,7 +53,8 @@ public:
   virtual kj::Own<ActorId> idFromName(kj::String name) = 0;
   virtual kj::Own<ActorId> idFromString(kj::String str) = 0;
   virtual bool matchesJurisdiction(const ActorId& id) = 0;
-  virtual kj::Own<ActorIdFactory> cloneWithJurisdiction(kj::StringPtr jurisdiction) = 0;
+  virtual kj::Own<ActorIdFactory> cloneWithJurisdiction(
+      kj::Maybe<kj::StringPtr> maybeJurisdiction) = 0;
 };
 
 }  // namespace workerd

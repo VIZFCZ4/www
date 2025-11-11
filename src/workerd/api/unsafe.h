@@ -1,14 +1,29 @@
 #pragma once
 
-#include <workerd/jsg/jsg.h>
 #include <workerd/io/io-context.h>
+#include <workerd/jsg/jsg.h>
+#include <workerd/jsg/modules-new.h>
+#include <workerd/jsg/script.h>
+#include <workerd/jsg/url.h>
+
+#include <csignal>
+#include <iostream>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
+#include <workerd/api/fuzzilli.h>
 
 namespace workerd::api {
 
 // A special binding object that allows for dynamic evaluation.
 class UnsafeEval: public jsg::Object {
-public:
+ public:
   UnsafeEval() = default;
+  UnsafeEval(jsg::Lock&, const jsg::Url&) {}
 
   // A non-capturing eval. Compile and evaluates the given script, returning whatever
   // value is returned by the script. This version of eval intentionally does not
@@ -30,8 +45,7 @@ public:
   // const fn = env.unsafe.newFunction('return m', 'foo', 'm');
   // console.log(fn(1));  // prints 1
   //
-  UnsafeEvalFunction newFunction(
-      jsg::Lock& js,
+  UnsafeEvalFunction newFunction(jsg::Lock& js,
       jsg::JsString script,
       jsg::Optional<kj::String> name,
       jsg::Arguments<jsg::JsRef<jsg::JsString>> args,
@@ -43,8 +57,7 @@ public:
   // and will appear in stack traces for any errors thrown. An optional list of
   // arguments names can be passed in. If your function needs to use the await
   // key, use this instead of newFunction.
-  UnsafeEvalFunction newAsyncFunction(
-      jsg::Lock& js,
+  UnsafeEvalFunction newAsyncFunction(jsg::Lock& js,
       jsg::JsString script,
       jsg::Optional<kj::String> name,
       jsg::Arguments<jsg::JsRef<jsg::JsString>> args,
@@ -60,8 +73,31 @@ public:
   }
 };
 
+// A special binding that allows access to stdin. Used for REPL.
+class Stdin: public jsg::Object {
+ public:
+  Stdin() = default;
+
+  void reprl(jsg::Lock& js);
+
+  kj::String getline(jsg::Lock& js) {
+    std::string res;
+    std::getline(std::cin, res);
+    return kj::heapString(res.c_str());
+  }
+
+  JSG_RESOURCE_TYPE(Stdin) {
+    JSG_METHOD(getline);
+#ifdef WORKERD_FUZZILLI
+    JSG_METHOD(reprl);
+#endif
+  }
+};
+
 class UnsafeModule: public jsg::Object {
-public:
+ public:
+  UnsafeModule() = default;
+  UnsafeModule(jsg::Lock&, const jsg::Url&) {}
   jsg::Promise<void> abortAllDurableObjects(jsg::Lock& js);
 
   JSG_RESOURCE_TYPE(UnsafeModule) {
@@ -69,17 +105,71 @@ public:
   }
 };
 
+#ifdef WORKERD_FUZZILLI
+// Fuzzilli fuzzing support for triggering crashes and printing debug output
+class Fuzzilli: public jsg::Object {
+ public:
+  Fuzzilli() = default;
+  Fuzzilli(jsg::Lock&, const jsg::Url&) {}
+
+  // Fuzzilli function for triggering crashes or printing debug output
+  // fuzzilli('FUZZILLI_CRASH', type: number): Triggers a crash based on type
+  // fuzzilli('FUZZILLI_PRINT', message: string): Prints message to fuzzer output
+  void fuzzilli(jsg::Lock& js, jsg::Arguments<jsg::Value> args);
+
+  JSG_RESOURCE_TYPE(Fuzzilli) {
+    JSG_METHOD(fuzzilli);
+  }
+};
+#endif
+
 template <class Registry>
 void registerUnsafeModule(Registry& registry) {
-  registry.template addBuiltinModule<UnsafeModule>("workerd:unsafe",
-    workerd::jsg::ModuleRegistry::Type::BUILTIN);
+  registry.template addBuiltinModule<UnsafeModule>(
+      "workerd:unsafe", workerd::jsg::ModuleRegistry::Type::BUILTIN);
+  registry.template addBuiltinModule<UnsafeEval>(
+      "workerd:unsafe-eval", workerd::jsg::ModuleRegistry::Type::BUILTIN);
 }
 
-#define EW_UNSAFE_ISOLATE_TYPES api::UnsafeEval, \
-  api::UnsafeModule
+#ifdef WORKERD_FUZZILLI
+#define EW_UNSAFE_ISOLATE_TYPES api::UnsafeEval, api::UnsafeModule, api::Stdin, api::Fuzzilli
+#else
+#define EW_UNSAFE_ISOLATE_TYPES api::UnsafeEval, api::UnsafeModule, api::Stdin
+#endif
 
-template <class Registry> void registerUnsafeModules(Registry& registry, auto featureFlags) {
-  registry.template addBuiltinModule<UnsafeEval>("internal:unsafe-eval",
-                                                 workerd::jsg::ModuleRegistry::Type::INTERNAL);
+template <class Registry>
+void registerUnsafeModules(Registry& registry, auto featureFlags) {
+  registry.template addBuiltinModule<UnsafeEval>(
+      "internal:unsafe-eval", workerd::jsg::ModuleRegistry::Type::INTERNAL);
+#ifdef WORKERD_FUZZILLI
+  registry.template addBuiltinModule<Stdin>(
+      "workerd:stdin", workerd::jsg::ModuleRegistry::Type::BUILTIN);
+
+  if (featureFlags.getWorkerdExperimental()) {
+    registry.template addBuiltinModule<Fuzzilli>(
+        "workerd:fuzzilli", workerd::jsg::ModuleRegistry::Type::BUILTIN);
+  }
+#endif
 }
-} // namespace workerd::api
+
+template <typename TypeWrapper>
+kj::Own<jsg::modules::ModuleBundle> getInternalUnsafeModuleBundle(auto featureFlags) {
+  jsg::modules::ModuleBundle::BuiltinBuilder builder(
+      jsg::modules::ModuleBundle::BuiltinBuilder::Type::BUILTIN_ONLY);
+  static const auto kSpecifier = "internal:unsafe-eval"_url;
+  builder.addObject<UnsafeEval, TypeWrapper>(kSpecifier);
+  return builder.finish();
+}
+
+template <typename TypeWrapper>
+kj::Own<jsg::modules::ModuleBundle> getExternalUnsafeModuleBundle(auto featureFlags) {
+  jsg::modules::ModuleBundle::BuiltinBuilder builder(
+      jsg::modules::ModuleBundle::BuiltinBuilder::Type::BUILTIN);
+  static const auto kSpecifier = "workerd:unsafe-eval"_url;
+  builder.addObject<UnsafeEval, TypeWrapper>(kSpecifier);
+
+  static const auto kUnsafeSpecifier = "workerd:unsafe"_url;
+  builder.addObject<UnsafeModule, TypeWrapper>(kUnsafeSpecifier);
+  return builder.finish();
+}
+}  // namespace workerd::api

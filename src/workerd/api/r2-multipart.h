@@ -11,54 +11,66 @@
 namespace workerd::api::public_beta {
 
 class R2MultipartUpload: public jsg::Object {
-  public:
-    struct UploadedPart {
-      int partNumber;
-      kj::String etag;
+ public:
+  struct UploadedPart {
+    int partNumber;
+    kj::String etag;
 
-      JSG_STRUCT(partNumber, etag);
-      JSG_STRUCT_TS_OVERRIDE(R2UploadedPart);
-    };
+    JSG_STRUCT(partNumber, etag);
+    JSG_STRUCT_TS_OVERRIDE(R2UploadedPart);
+  };
+  struct UploadPartOptions {
+    jsg::Optional<kj::OneOf<kj::Array<byte>, kj::String>> ssecKey;
 
-    R2MultipartUpload(kj::String key, kj::String uploadId, jsg::Ref<R2Bucket> bucket):
-      key(kj::mv(key)), uploadId(kj::mv(uploadId)), bucket(kj::mv(bucket)) {}
+    JSG_STRUCT(ssecKey);
+    JSG_STRUCT_TS_OVERRIDE(R2UploadPartOptions);
+  };
 
-    kj::StringPtr getKey() const { return kj::StringPtr(key); }
-    kj::StringPtr getUploadId() const { return kj::StringPtr(uploadId); }
+  R2MultipartUpload(kj::String key, kj::String uploadId, jsg::Ref<R2Bucket> bucket)
+      : key(kj::mv(key)),
+        uploadId(kj::mv(uploadId)),
+        bucket(kj::mv(bucket)) {}
 
-    jsg::Promise<UploadedPart> uploadPart(
-        jsg::Lock& js, int partNumber, R2PutValue value,
-        const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType
-    );
-    jsg::Promise<void> abort(jsg::Lock& js, const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType);
-    jsg::Promise<jsg::Ref<R2Bucket::HeadResult>> complete(
-        jsg::Lock& js, kj::Array<UploadedPart> uploadedParts,
-        const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType
-    );
+  kj::StringPtr getKey() const {
+    return key;
+  }
+  kj::StringPtr getUploadId() const {
+    return uploadId;
+  }
 
-    JSG_RESOURCE_TYPE(R2MultipartUpload) {
-      JSG_LAZY_READONLY_INSTANCE_PROPERTY(key, getKey);
-      JSG_LAZY_READONLY_INSTANCE_PROPERTY(uploadId, getUploadId);
-      JSG_METHOD(uploadPart);
-      JSG_METHOD(abort);
-      JSG_METHOD(complete);
-    }
+  jsg::Promise<UploadedPart> uploadPart(jsg::Lock& js,
+      int partNumber,
+      R2PutValue value,
+      jsg::Optional<UploadPartOptions> options,
+      const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType);
+  jsg::Promise<void> abort(jsg::Lock& js, const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType);
+  jsg::Promise<jsg::Ref<R2Bucket::HeadResult>> complete(jsg::Lock& js,
+      kj::Array<UploadedPart> uploadedParts,
+      const jsg::TypeHandler<jsg::Ref<R2Error>>& errorType);
 
-    void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
-      tracker.trackField("key", key);
-      tracker.trackField("uploadId", uploadId);
-      tracker.trackField("bucket", bucket);
-    }
+  JSG_RESOURCE_TYPE(R2MultipartUpload) {
+    JSG_LAZY_READONLY_INSTANCE_PROPERTY(key, getKey);
+    JSG_LAZY_READONLY_INSTANCE_PROPERTY(uploadId, getUploadId);
+    JSG_METHOD(uploadPart);
+    JSG_METHOD(abort);
+    JSG_METHOD(complete);
+  }
 
-  protected:
-    kj::String key;
-    kj::String uploadId;
-    jsg::Ref<R2Bucket> bucket;
+  void visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
+    tracker.trackField("key", key);
+    tracker.trackField("uploadId", uploadId);
+    tracker.trackField("bucket", bucket);
+  }
 
-  private:
-    void visitForGc(jsg::GcVisitor& visitor) {
-      visitor.visit(bucket);
-    }
+ protected:
+  kj::String key;
+  kj::String uploadId;
+  jsg::Ref<R2Bucket> bucket;
+
+ private:
+  void visitForGc(jsg::GcVisitor& visitor) {
+    visitor.visit(bucket);
+  }
 };
 
-}
+}  // namespace workerd::api::public_beta

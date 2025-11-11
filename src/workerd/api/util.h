@@ -4,16 +4,15 @@
 
 #pragma once
 
+#include <workerd/jsg/jsg.h>
+
+#include <v8.h>
+
 #include <kj/async-io.h>
 #include <kj/compat/url.h>
 #include <kj/string.h>
-#include <workerd/jsg/jsg.h>
-#include <v8.h>
 
 namespace workerd::api {
-
-// Convert `str` to lower-case (e.g. to canonicalize a header name).
-jsg::ByteString toLower(kj::StringPtr str);
 
 // =======================================================================================
 
@@ -28,23 +27,12 @@ struct CiLess {
   }
 };
 
-// Mutate `str` with all alphabetic ASCII characters lowercased. Returns `str`.
-kj::String toLower(kj::String&& str);
-// Mutate `str` with all alphabetic ASCII characters uppercased. Returns `str`.
-kj::String toUpper(kj::String&& str);
-
-inline bool isHexDigit(uint32_t c) {
-  // Check if `c` is the ASCII code of a hexadecimal digit.
-  return ('0' <= c && c <= '9') ||
-         ('a' <= c && c <= 'f') ||
-         ('A' <= c && c <= 'F');
-}
-
 // Parse `rawText` as application/x-www-form-urlencoded name/value pairs and store in `query`. If
 // `skipLeadingQuestionMark` is true, any initial '?' will be ignored. Otherwise, it will be
 // interpreted as part of the first URL-encoded field.
-void parseQueryString(kj::Vector<kj::Url::QueryParam>& query, kj::ArrayPtr<const char> rawText,
-                      bool skipLeadingQuestionMark = false);
+void parseQueryString(kj::Vector<kj::Url::QueryParam>& query,
+    kj::ArrayPtr<const char> rawText,
+    bool skipLeadingQuestionMark = false);
 // TODO(cleanup): Would be really nice to move this to kj-url.
 
 // Given the value of a Content-Type header, returns the value of a single expected parameter.
@@ -58,8 +46,7 @@ void parseQueryString(kj::Vector<kj::Url::QueryParam>& query, kj::ArrayPtr<const
 //   - `contentType` has a semi-colon followed by OWS before the parameters.
 //   - If the wanted parameter uses quoted-string values, the correct
 //     value may not be returned.
-kj::Maybe<kj::String> readContentTypeParameter(kj::StringPtr contentType,
-                                               kj::StringPtr param);
+kj::Maybe<kj::String> readContentTypeParameter(kj::StringPtr contentType, kj::StringPtr param);
 // TODO(cleanup): Replace this function with a full kj::MimeType parser.
 
 // =======================================================================================
@@ -78,8 +65,7 @@ struct ErrorTranslation {
 // user. While crude, we can string match to provide cleaned up exception messages. This O(n)
 // function helps you do that.
 kj::Maybe<kj::Exception> translateKjException(
-    const kj::Exception& exception,
-    std::initializer_list<ErrorTranslation> translations);
+    const kj::Exception& exception, std::initializer_list<ErrorTranslation> translations);
 
 // =======================================================================================
 
@@ -96,11 +82,11 @@ kj::String redactUrl(kj::StringPtr url);
 
 // =======================================================================================
 
-// Returns exactly what Date.now() would return.
-double dateNow();
-
-// =======================================================================================
-
 void maybeWarnIfNotText(jsg::Lock& js, kj::StringPtr str);
+
+kj::String fastEncodeBase64Url(kj::ArrayPtr<const byte> bytes);
+kj::Array<char16_t> fastEncodeUtf16(kj::ArrayPtr<const char> bytes);
+
+kj::String uriEncodeControlChars(kj::ArrayPtr<const byte> bytes);
 
 }  // namespace workerd::api

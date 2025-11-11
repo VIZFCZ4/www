@@ -3,6 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "wait-list.h"
+
 #include <kj/debug.h>
 
 namespace workerd {
@@ -10,7 +11,7 @@ namespace workerd {
 namespace {
 // Optimization: If the same wait list is waited multiple times in the same thread, we want to
 // share the signal rather than send two cross-thread signals.
-thread_local CrossThreadWaitList::WaiterMap threadLocalWaiters;
+static const kj::EventLoopLocal<CrossThreadWaitList::WaiterMap> threadLocalWaiters;
 
 void END_WAIT_LIST_CANCELER_STACK_START_CANCELEE_STACK() {}
 }  // namespace
@@ -22,9 +23,10 @@ void CrossThreadWaitList::destroyed() {
   if (!createdFulfiller) state->lostFulfiller();
 }
 
-CrossThreadWaitList::Waiter::Waiter(const State& state,
-    kj::Own<kj::CrossThreadPromiseFulfiller<void>> fulfillerArg)
-    : state(kj::atomicAddRef(state)), fulfiller(kj::mv(fulfillerArg)) {
+CrossThreadWaitList::Waiter::Waiter(
+    const State& state, kj::Own<kj::CrossThreadPromiseFulfiller<void>> fulfillerArg)
+    : state(kj::atomicAddRef(state)),
+      fulfiller(kj::mv(fulfillerArg)) {
   auto lock = state.waiters.lockExclusive();
   if (__atomic_load_n(&state.done, __ATOMIC_ACQUIRE)) {
     KJ_IF_SOME(e, state.exception) {
@@ -48,9 +50,9 @@ CrossThreadWaitList::Waiter::~Waiter() noexcept(false) {
   }
 
   if (state->useThreadLocalOptimization) {
-    auto& entry = KJ_ASSERT_NONNULL(threadLocalWaiters.findEntry(state.get()));
+    auto& entry = KJ_ASSERT_NONNULL(threadLocalWaiters->findEntry(state.get()));
     KJ_ASSERT(entry.value == this);
-    threadLocalWaiters.erase(entry);
+    threadLocalWaiters->erase(entry);
   }
 }
 
@@ -66,12 +68,12 @@ kj::Promise<void> CrossThreadWaitList::addWaiter() const {
   if (state->useThreadLocalOptimization) {
     kj::Own<Waiter> ownWaiter;
 
-    auto& waiter = threadLocalWaiters.findOrCreate(state.get(),
-        [&]() -> decltype(threadLocalWaiters)::Entry {
+    auto& waiter = threadLocalWaiters->findOrCreate(
+        state.get(), [&]() -> CrossThreadWaitList::WaiterMap::Entry {
       auto paf = kj::newPromiseAndCrossThreadFulfiller<void>();
       ownWaiter = kj::refcounted<Waiter>(*state, kj::mv(paf.fulfiller));
       ownWaiter->forkedPromise = paf.promise.fork();
-      return { state.get(), ownWaiter.get() };
+      return {state.get(), ownWaiter.get()};
     });
 
     if (ownWaiter.get() == nullptr) {
@@ -89,7 +91,7 @@ kj::Promise<void> CrossThreadWaitList::addWaiter() const {
 
 kj::Own<kj::CrossThreadPromiseFulfiller<void>> CrossThreadWaitList::makeSeparateFulfiller() {
   class FulfillerImpl final: public kj::CrossThreadPromiseFulfiller<void> {
-  public:
+   public:
     FulfillerImpl(kj::Own<const State> state): state(kj::mv(state)) {}
     ~FulfillerImpl() noexcept(false) {
       state->lostFulfiller();
@@ -108,7 +110,7 @@ kj::Own<kj::CrossThreadPromiseFulfiller<void>> CrossThreadWaitList::makeSeparate
       return !__atomic_load_n(&state->done, __ATOMIC_ACQUIRE);
     }
 
-  private:
+   private:
     kj::Own<const State> state;
   };
 
@@ -149,8 +151,8 @@ void CrossThreadWaitList::State::lostFulfiller() const {
   auto lock = waiters.lockExclusive();
   if (done) return;
   auto& exceptionRef = exception.emplace(kj::getDestructionReason(
-        reinterpret_cast<void*>(&END_WAIT_LIST_CANCELER_STACK_START_CANCELEE_STACK),
-        kj::Exception::Type::FAILED, __FILE__, __LINE__, "wait list was never fulfilled"_kj));
+      reinterpret_cast<void*>(&END_WAIT_LIST_CANCELER_STACK_START_CANCELEE_STACK),
+      kj::Exception::Type::FAILED, __FILE__, __LINE__, "wait list was never fulfilled"_kj));
   __atomic_store_n(&done, true, __ATOMIC_RELEASE);
 
   if (!lock->empty()) {

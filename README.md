@@ -69,22 +69,23 @@ On other platforms, you may have to do tinkering to make things work.
 
 To build `workerd`, you need:
 
-* [Bazel](https://bazel.build/)
+* Bazel
   * If you use [Bazelisk](https://github.com/bazelbuild/bazelisk) (recommended), it will automatically download and use the right version of Bazel for building workerd.
 * On Linux:
-  * We use the clang/LLVM toolchain to build workerd and support version 15 and higher. Earlier versions of clang may still work, but are not officially supported.
-  * Clang 15+ (e.g. package `clang-15` on Debian Bookworm).
-  * libc++ 15+ (e.g. packages `libc++-15-dev` and `libc++abi-15-dev`)
-  * LLD 15+ (e.g. package `lld-15`).
+  * We use the clang/LLVM toolchain to build workerd and support version 19 and higher. Earlier versions of clang may still work, but are not officially supported.
+  * Clang 19+ (e.g. package `clang-19` on Debian Bookworm). If clang is installed as `clang-<version>` please create a symlink to it in your PATH named `clang`, or use `--action_env=CC=clang-<version>` on `bazel` command lines to specify the compiler name.
+
+  * libc++ 19+ (e.g. packages `libc++-19-dev` and `libc++abi-19-dev`)
+  * LLD 19+ (e.g. package `lld-19`).
   * `python3`, `python3-distutils`, and `tcl8.6`
 * On macOS:
-  * Xcode 15 installation (available on macOS 13 and higher)
+  * Xcode 16.3 installation (available on macOS 15 and higher). Building with just the Xcode Command Line Tools is not being tested, but should work too.
   * Homebrew installed `tcl-tk` package (provides Tcl 8.6)
 * On Windows:
   * Install [App Installer](https://learn.microsoft.com/en-us/windows/package-manager/winget/#install-winget)
     from the Microsoft Store for the `winget` package manager and then run
     [install-deps.bat](tools/windows/install-deps.bat) from an administrator prompt to install
-    bazel, LLVM, and other dependencies required to build workerd on Windows.
+    bazelisk, LLVM, and other dependencies required to build workerd on Windows.
   * Add `startup --output_user_root=C:/tmp` to the `.bazelrc` file in your user directory.
   * When developing at the command-line, run [bazel-env.bat](tools/windows/bazel-env.bat) in your shell first
     to select tools and Windows SDK versions before running bazel.
@@ -177,14 +178,21 @@ For more details about command-line usage, use `workerd --help`.
 Prebuilt binaries are distributed via `npm`. Run `npx workerd ...` to use these. If you're running a prebuilt binary, you'll need to make sure your system has the right dependencies installed:
 
 * On Linux:
-  * glibc 2.31 or higher (already included on e.g. Ubuntu 20.04, Debian Bullseye)
+  * glibc 2.35 or higher (already included on e.g. Ubuntu 22.04, Debian Bookworm)
 * On macOS:
-  * macOS 11.5 or higher
+  * macOS 13.5 or higher
   * The Xcode command line tools, which can be installed with `xcode-select --install`
+* x86_64 CPU with at least SSE4.2 and CLMUL ISA extensions, or arm64 CPU with CRC extension (enabled by default under armv8.1-a). These extensions are supported by all recent x86 and arm64 CPUs.
 
 ### Local Worker development with `wrangler`
 
-You can use [Wrangler](https://developers.cloudflare.com/workers/wrangler/) (v3.0 or greater) to develop Cloudflare Workers locally, using `workerd`. Run:
+You can use [Wrangler](https://developers.cloudflare.com/workers/wrangler/) (v3.0 or greater) to develop Cloudflare Workers locally, using `workerd`. First, run the following command to configure Miniflare to use this build of `workerd`.
+
+```
+$ export MINIFLARE_WORKERD_PATH="<WORKERD_REPO_DIR>/bazel-bin/src/workerd/server/workerd"
+```
+
+Then, run:
 
 `wrangler dev`
 

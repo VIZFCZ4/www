@@ -4,7 +4,7 @@
 
 // We want to test the behavior of the Durable Object stub now that it uses name interception to
 // behave like a JS Proxy object.
-import * as assert from 'node:assert'
+import * as assert from 'node:assert';
 
 export class DurableObjectExample {
   constructor() {
@@ -12,12 +12,16 @@ export class DurableObjectExample {
   }
 
   async fetch(request) {
-    return new Response("OK");
+    return new Response('OK');
   }
 
   async foo() {
     // Server side impl of foo.
-    return "foo from remote";
+    return 'foo from remote';
+  }
+
+  async throw() {
+    throw 1;
   }
 
   thisCheck() {
@@ -28,55 +32,93 @@ export class DurableObjectExample {
   }
 }
 
+async function checkDurableObject(obj) {
+  assert.equal(await obj.foo(), 'foo from remote');
+  assert.equal(await obj.thisCheck(), true);
+  assert.deepStrictEqual(await obj.fetch('http://foo/'), new Response('OK'));
+  assert.rejects(obj.throw());
+}
+
+function checkNullishJurisdiction(env, jurisdiction) {
+  const id1 = env.ns.jurisdiction(jurisdiction).newUniqueId();
+  const stub1 = env.ns.get(id1);
+  checkDurableObject(stub1);
+  const id2 = env.ns.newUniqueId({ jurisdiction });
+  const stub2 = env.ns.get(id2);
+  checkDurableObject(stub2);
+}
+
 export default {
-  async test(ctrl, env, ctx) {
+  async test(_request, env, _ctx) {
     // This test verifies we can still use registered methods like `fetch()`, and also confirms that
     // dynamic names (foo() in this case) can also be called.
     //
     // We should still be able to define names on the stub in JS and get the expected result.
 
-    let id = env.ns.idFromName("foo");
+    // Check properties of DurableObjectId.
+    const id = env.ns.idFromName('foo');
+    assert.equal(id.name, 'foo');
+    assert.equal(id.jurisdiction, undefined);
+
+    {
+      // Check that no two DurableObjectId created via `newUniqueId()` are equal.
+      const id1 = env.ns.newUniqueId();
+      const id2 = env.ns.newUniqueId();
+      assert.equal(!id1.equals(id2), true);
+    }
+
+    // Check round tripping of DurableObjectId to string.
+    //
+    // Note: `name` property is dropped from `env.ns.idFromString(id.toString())`
+    assert.equal(env.ns.idFromString(id.toString()).toString(), id.toString());
+
+    // Check properties of DurableObject.
     let obj = env.ns.get(id);
-    // Since we have the flag enabled, we should be able to call foo();
-    let expected = "foo from remote";
-    try {
-      let foo = await obj.foo();
-      if (typeof foo != "string" && foo != expected) {
-        throw foo;
-      }
-    } catch(e) {
-      throw new Error(`Expected ${expected} but got ${e}`);
+    assert.equal(Object.keys(obj).length, 2);
+    assert.equal(obj.name, 'foo');
+    assert.equal(obj.id, id);
+    assert.equal(obj.id.name, 'foo');
+    assert.equal(obj.id.jurisdiction, undefined);
+
+    // Check that we can call methods on a DurableObject.
+    checkDurableObject(obj);
+
+    {
+      // Check that DurableObject constructed with `locationHint` is equivalent to `obj`.
+      let otherObj = env.ns.get(id, { locationHint: 'wnam' });
+      assert.deepStrictEqual(obj, otherObj);
+      checkDurableObject(otherObj);
     }
 
-    // Let's check to make sure the `this` in the called function is correct
-    if ((await obj.thisCheck()) !== true) {
-      throw new Error('Checking `this` in the DO stub failed');
+    {
+      // Check that DurableObject constructed via `getByName()` is equivalent to `obj`.
+      let otherObj = env.ns.getByName('foo');
+      assert.deepStrictEqual(obj, otherObj);
+      checkDurableObject(otherObj);
     }
 
-    // Let's also look at the keys of our stub.
-    let keys = Object.keys(obj);
-    if (keys.length != 2) {
-      // The keys are `id` and `name`.
-      throw new Error(`New Durable Object stub had keys: ${keys}`);
+    {
+      // Check that DurableObject constructed with `locationHint` and `getByName()` is equivalent
+      // to `obj`.
+      let otherObj = env.ns.getByName('foo', { locationHint: 'wnam' });
+      assert.deepStrictEqual(obj, otherObj);
+      checkDurableObject(otherObj);
     }
 
-    // Now let's define a method on our object, we should be able to call it.
-    obj.baz = ()  => { return "called baz"; };
-    if (typeof obj.baz != "function") {
-      throw new Error(`baz was not a function: ${obj.baz}`);
-    }
-    // Make sure the call works right.
-    if (obj.baz() != "called baz") {
-      throw new Error(`obj.baz() returned unexpected value: ${obj.baz()}`);
+    {
+      // Check that nullish jurisdictions work in Workerd
+      checkNullishJurisdiction(env, null);
+      checkNullishJurisdiction(env, undefined);
     }
 
-    // Check the keys again, we should have `baz` now.
-    keys = Object.keys(obj);
-    if (keys.length != 3 || !(keys.includes("baz"))) {
-      throw new Error(`New Durable Object stub had unexpected keys: ${keys}`);
-    }
+    // Check that methods can be defined on DurableObject and are callable.
+    obj.baz = () => {
+      return 'called baz';
+    };
+    assert.equal(Object.keys(obj).length, 3);
+    assert.equal(typeof obj.baz, 'function');
+    assert.equal(obj.baz(), 'called baz');
 
-    // End it with a call to the DO.
-    return await obj.fetch("http://foo/");
-  }
-}
+    return new Response('OK');
+  },
+};

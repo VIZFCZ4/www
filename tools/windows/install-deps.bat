@@ -57,7 +57,7 @@ winget install "Microsoft.VisualStudio.2022.Community" --override "install --con
 echo.
 echo.* Step 4: Install Python 3.
 winget install Python3 -v 3.12.1 --override "/passive PrependPath=1"
-@rem bazel requires a bazel3.exe binary, create a symlink for it.
+@rem bazel requires a python3.exe binary, create a symlink for it.
 mklink "%LOCALAPPDATA%\Programs\Python\Python312\python3.exe" "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 
 echo.
@@ -73,11 +73,9 @@ call :AddToUserPathInEnvironment C:\msys64\usr\bin
 
 echo.
 echo.* Step 7: Install LLVM compiler toolchain.
-@rem workerd is tied to 16.0.6 for the time being (https://github.com/cloudflare/workerd/pull/1092).
-winget install "LLVM" --version 16.0.6
-@rem Work around for clang / bazel not agreeing on install location, will be fixed by
-@rem https://github.com/bazelbuild/bazel/pull/1939.
-move "C:\Program Files\LLVM\lib\clang\16" "C:\Program Files\LLVM\lib\clang\16.0.6"
+@rem The MSVC build frequently breaks in some ways when the LLVM version is updated, we may have to
+@rem manually install a different version again soon.
+@rem winget install "LLVM" --version 19.1.7
 
 echo.
 echo.* Step 8: Install bazelisk as %LOCALAPPDATA%\Programs\bazelisk\bazel.exe.

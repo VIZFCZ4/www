@@ -1,7 +1,8 @@
-#include "standard.h"
 #include "readable.h"
-#include <workerd/jsg/jsg.h>
+#include "standard.h"
+
 #include <workerd/jsg/jsg-test.h>
+#include <workerd/jsg/jsg.h>
 #include <workerd/jsg/observer.h>
 
 namespace workerd::api {
@@ -17,25 +18,22 @@ JSG_DECLARE_ISOLATE_TYPE(RsIsolate, RsContext, ReadResult);
 void preamble(auto callback) {
   RsIsolate isolate(v8System, kj::heap<jsg::IsolateObserver>());
   isolate.runInLockScope([&](RsIsolate::Lock& lock) {
-    JSG_WITHIN_CONTEXT_SCOPE(lock,
-        lock.newContext<RsContext>().getHandle(lock),
-        [&](jsg::Lock& js) {
-      callback(js);
-    });
+    JSG_WITHIN_CONTEXT_SCOPE(
+        lock, lock.newContext<RsContext>().getHandle(lock), [&](jsg::Lock& js) { callback(js); });
   });
 }
 
 v8::Local<v8::Value> toBytes(jsg::Lock& js, kj::String str) {
-  return jsg::BackingStore::from(str.asBytes().attach(kj::mv(str))).createHandle(js);
+  return jsg::BackingStore::from(js, str.asBytes().attach(kj::mv(str))).createHandle(js);
 }
 
 jsg::BufferSource toBufferSource(jsg::Lock& js, kj::String str) {
-  auto backing = jsg::BackingStore::from(str.asBytes().attach(kj::mv(str))).createHandle(js);
+  auto backing = jsg::BackingStore::from(js, str.asBytes().attach(kj::mv(str))).createHandle(js);
   return jsg::BufferSource(js, kj::mv(backing));
 }
 
 jsg::BufferSource toBufferSource(jsg::Lock& js, kj::Array<kj::byte> bytes) {
-  auto backing = jsg::BackingStore::from(kj::mv(bytes)).createHandle(js);
+  auto backing = jsg::BackingStore::from(js, kj::mv(bytes)).createHandle(js);
   return jsg::BufferSource(js, kj::mv(backing));
 }
 
@@ -45,8 +43,9 @@ jsg::BufferSource toBufferSource(jsg::Lock& js, kj::Array<kj::byte> bytes) {
 KJ_TEST("ReadableStream read all text (value readable)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
         // require at least three reads to complete: one for the first chunk, 'hello, ',
@@ -66,17 +65,18 @@ KJ_TEST("ReadableStream read all text (value readable)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllText(js, 20)
-      .then(js, [&](jsg::Lock& js, kj::String&& text) {
-        KJ_ASSERT(text == "Hello, world!"_kjc);
-        checked++;
-      });
+    auto promise =
+        rs->getController().readAllText(js, 20).then(js, [&](jsg::Lock& js, kj::String&& text) {
+      KJ_ASSERT(text == "Hello, world!"_kjc);
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -99,8 +99,9 @@ KJ_TEST("ReadableStream read all text (value readable)") {
 KJ_TEST("ReadableStream read all text, rs ref held (value readable)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
         // require at least three reads to complete: one for the first chunk, 'hello, ',
@@ -120,17 +121,18 @@ KJ_TEST("ReadableStream read all text, rs ref held (value readable)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllText(js, 20)
-      .then(js, [&](jsg::Lock& js, kj::String&& text) {
-        KJ_ASSERT(text == "Hello, world!"_kjc);
-        checked++;
-      });
+    auto promise =
+        rs->getController().readAllText(js, 20).then(js, [&](jsg::Lock& js, kj::String&& text) {
+      KJ_ASSERT(text == "Hello, world!"_kjc);
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -149,8 +151,9 @@ KJ_TEST("ReadableStream read all text, rs ref held (value readable)") {
 KJ_TEST("ReadableStream read all text (byte readable)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .type = kj::str("bytes"),
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
@@ -171,17 +174,18 @@ KJ_TEST("ReadableStream read all text (byte readable)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllText(js, 20)
-      .then(js, [&](jsg::Lock& js, kj::String&& text) {
-        KJ_ASSERT(text == "Hello, world!"_kjc);
-        checked++;
-      });
+    auto promise =
+        rs->getController().readAllText(js, 20).then(js, [&](jsg::Lock& js, kj::String&& text) {
+      KJ_ASSERT(text == "Hello, world!"_kjc);
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -204,8 +208,9 @@ KJ_TEST("ReadableStream read all text (byte readable)") {
 KJ_TEST("ReadableStream read all bytes (value readable)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
         // require at least three reads to complete: one for the first chunk, 'hello, ',
@@ -225,17 +230,18 @@ KJ_TEST("ReadableStream read all bytes (value readable)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [&](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_ASSERT(text == "Hello, world!"_kjc.asBytes());
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(
+        js, [&](jsg::Lock& js, jsg::BufferSource&& text) {
+      KJ_ASSERT(text.asArrayPtr() == "Hello, world!"_kjb);
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -258,8 +264,9 @@ KJ_TEST("ReadableStream read all bytes (value readable)") {
 KJ_TEST("ReadableStream read all bytes (byte readable)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .type = kj::str("bytes"),
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
@@ -280,17 +287,18 @@ KJ_TEST("ReadableStream read all bytes (byte readable)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [&](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_ASSERT(text == "Hello, world!"_kjc.asBytes());
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(
+        js, [&](jsg::Lock& js, jsg::BufferSource&& text) {
+      KJ_ASSERT(text.asArrayPtr() == "Hello, world!"_kjb);
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -314,23 +322,12 @@ KJ_TEST("ReadableStream read all bytes (value readable, more reads)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
     uint counter = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    auto chunks = kj::arr<kj::String>(
-      kj::str("H"),
-      kj::str("e"),
-      kj::str("l"),
-      kj::str("l"),
-      kj::str("o"),
-      kj::str(","),
-      kj::str(" "),
-      kj::str("w"),
-      kj::str("o"),
-      kj::str("r"),
-      kj::str("l"),
-      kj::str("d"),
-      kj::str("!")
-    );
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    auto chunks = kj::arr<kj::String>(kj::str("H"), kj::str("e"), kj::str("l"), kj::str("l"),
+        kj::str("o"), kj::str(","), kj::str(" "), kj::str("w"), kj::str("o"), kj::str("r"),
+        kj::str("l"), kj::str("d"), kj::str("!"));
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
         // require at least three reads to complete: one for the first chunk, 'hello, ',
@@ -352,17 +349,18 @@ KJ_TEST("ReadableStream read all bytes (value readable, more reads)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [&](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_ASSERT(text == "Hello, world!"_kjc.asBytes());
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(
+        js, [&](jsg::Lock& js, jsg::BufferSource&& text) {
+      KJ_ASSERT(text.asArrayPtr() == "Hello, world!"_kjb);
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -386,23 +384,12 @@ KJ_TEST("ReadableStream read all bytes (byte readable, more reads)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
     uint counter = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    auto chunks = kj::arr<kj::String>(
-      kj::str("H"),
-      kj::str("e"),
-      kj::str("l"),
-      kj::str("l"),
-      kj::str("o"),
-      kj::str(","),
-      kj::str(" "),
-      kj::str("w"),
-      kj::str("o"),
-      kj::str("r"),
-      kj::str("l"),
-      kj::str("d"),
-      kj::str("!")
-    );
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    auto chunks = kj::arr<kj::String>(kj::str("H"), kj::str("e"), kj::str("l"), kj::str("l"),
+        kj::str("o"), kj::str(","), kj::str(" "), kj::str("w"), kj::str("o"), kj::str("r"),
+        kj::str("l"), kj::str("d"), kj::str("!"));
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .type = kj::str("bytes"),
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
@@ -425,17 +412,18 @@ KJ_TEST("ReadableStream read all bytes (byte readable, more reads)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [&](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_ASSERT(text == "Hello, world!"_kjc.asBytes());
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(
+        js, [&](jsg::Lock& js, jsg::BufferSource&& text) {
+      KJ_ASSERT(text.asArrayPtr() == "Hello, world!"_kjb);
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -459,17 +447,15 @@ KJ_TEST("ReadableStream read all bytes (byte readable, large data)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
     uint counter = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
     static constexpr uint BASE = 4097;
-    auto chunks = kj::arr<kj::Array<kj::byte>>(
-      kj::heapArray<kj::byte>(BASE),
-      kj::heapArray<kj::byte>(BASE * 2),
-      kj::heapArray<kj::byte>(BASE * 4)
-    );
-    memset(chunks[0].begin(), 'A', chunks[0].size());
-    memset(chunks[1].begin(), 'B', chunks[1].size());
-    memset(chunks[2].begin(), 'C', chunks[2].size());
-    rs->getController().setup(js, UnderlyingSource {
+    auto chunks = kj::arr<kj::Array<kj::byte>>(kj::heapArray<kj::byte>(BASE),
+        kj::heapArray<kj::byte>(BASE * 2), kj::heapArray<kj::byte>(BASE * 4));
+    chunks[0].asPtr().fill('A');
+    chunks[1].asPtr().fill('B');
+    chunks[2].asPtr().fill('C');
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .type = kj::str("bytes"),
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
@@ -492,22 +478,24 @@ KJ_TEST("ReadableStream read all bytes (byte readable, large data)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, (BASE * 7) + 1)
-      .then(js, [&](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        kj::byte check[BASE * 7];
-        memset(&check[0], 'A', BASE);
-        memset(&check[0] + BASE, 'B', BASE * 2);
-        memset(&check[0] + (BASE * 3), 'C', BASE * 4);
-        KJ_ASSERT(text.size() == BASE * 7);
-        KJ_ASSERT(check == text);
-        checked++;
-      });
+    auto promise = rs->getController()
+                       .readAllBytes(js, (BASE * 7) + 1)
+                       .then(js, [&](jsg::Lock& js, jsg::BufferSource&& text) {
+      kj::byte check[BASE * 7]{};
+      kj::arrayPtr(check).first(BASE).fill('A');
+      kj::arrayPtr(check).slice(BASE).first(BASE * 2).fill('B');
+      kj::arrayPtr(check).slice(BASE * 3).fill('C');
+      KJ_ASSERT(text.size() == BASE * 7);
+      KJ_ASSERT(text.asArrayPtr() == check);
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -533,8 +521,9 @@ KJ_TEST("ReadableStream read all bytes (byte readable, large data)") {
 KJ_TEST("ReadableStream read all bytes (value readable, wrong type)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
         // require at least three reads to complete: one for the first chunk, 'hello, ',
@@ -557,20 +546,20 @@ KJ_TEST("ReadableStream read all bytes (value readable, wrong type)") {
         checked++;
         return js.resolvedPromise();
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_UNREACHABLE;
-      }, [&](jsg::Lock& js, jsg::Value&& exception) {
-        KJ_ASSERT(kj::str(exception.getHandle(js)) ==
-            "TypeError: This ReadableStream did not return bytes.");
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(js,
+        [](jsg::Lock& js, jsg::BufferSource&& text) { KJ_UNREACHABLE; },
+        [&](jsg::Lock& js, jsg::Value&& exception) {
+      KJ_ASSERT(kj::str(exception.getHandle(js)) ==
+          "TypeError: This ReadableStream did not return bytes.");
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -592,8 +581,9 @@ KJ_TEST("ReadableStream read all bytes (value readable, wrong type)") {
 KJ_TEST("ReadableStream read all bytes (value readable, to many bytes)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
         // require at least three reads to complete: one for the first chunk, 'hello, ',
@@ -611,20 +601,19 @@ KJ_TEST("ReadableStream read all bytes (value readable, to many bytes)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_UNREACHABLE;
-      }, [&](jsg::Lock& js, jsg::Value&& exception) {
-        KJ_ASSERT(kj::str(exception.getHandle(js)) ==
-            "TypeError: Memory limit exceeded before EOF.");
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(js,
+        [](jsg::Lock& js, jsg::BufferSource&& text) { KJ_UNREACHABLE; },
+        [&](jsg::Lock& js, jsg::Value&& exception) {
+      KJ_ASSERT(kj::str(exception.getHandle(js)) == "TypeError: Memory limit exceeded before EOF.");
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -646,8 +635,9 @@ KJ_TEST("ReadableStream read all bytes (value readable, to many bytes)") {
 KJ_TEST("ReadableStream read all bytes (byte readable, to many bytes)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .type = kj::str("bytes"),
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         // Because we're using a value-based stream, two enqueue operations will
@@ -666,20 +656,19 @@ KJ_TEST("ReadableStream read all bytes (byte readable, to many bytes)") {
         }
         KJ_UNREACHABLE;
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_UNREACHABLE;
-      }, [&](jsg::Lock& js, jsg::Value&& exception) {
-        KJ_ASSERT(kj::str(exception.getHandle(js)) ==
-            "TypeError: Memory limit exceeded before EOF.");
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(js,
+        [](jsg::Lock& js, jsg::BufferSource&& text) { KJ_UNREACHABLE; },
+        [&](jsg::Lock& js, jsg::Value&& exception) {
+      KJ_ASSERT(kj::str(exception.getHandle(js)) == "TypeError: Memory limit exceeded before EOF.");
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -701,26 +690,27 @@ KJ_TEST("ReadableStream read all bytes (byte readable, to many bytes)") {
 KJ_TEST("ReadableStream read all bytes (byte readable, failed read)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .type = kj::str("bytes"),
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         checked++;
         return js.rejectedPromise<void>(js.error("boom"));
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_UNREACHABLE;
-      }, [&](jsg::Lock& js, jsg::Value&& exception) {
-        KJ_ASSERT(kj::str(exception.getHandle(js)) == "Error: boom");
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(js,
+        [](jsg::Lock& js, jsg::BufferSource&& text) { KJ_UNREACHABLE; },
+        [&](jsg::Lock& js, jsg::Value&& exception) {
+      KJ_ASSERT(kj::str(exception.getHandle(js)) == "Error: boom");
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -742,25 +732,26 @@ KJ_TEST("ReadableStream read all bytes (byte readable, failed read)") {
 KJ_TEST("ReadableStream read all bytes (value readable, failed read)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .pull = [&](jsg::Lock& js, UnderlyingSource::Controller controller) {
         checked++;
         return js.rejectedPromise<void>(js.error("boom"));
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_UNREACHABLE;
-      }, [&](jsg::Lock& js, jsg::Value&& exception) {
-        KJ_ASSERT(kj::str(exception.getHandle(js)) == "Error: boom");
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(js,
+        [](jsg::Lock& js, jsg::BufferSource&& text) { KJ_UNREACHABLE; },
+        [&](jsg::Lock& js, jsg::Value&& exception) {
+      KJ_ASSERT(kj::str(exception.getHandle(js)) == "Error: boom");
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -782,26 +773,27 @@ KJ_TEST("ReadableStream read all bytes (value readable, failed read)") {
 KJ_TEST("ReadableStream read all bytes (byte readable, failed start)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .type = kj::str("bytes"),
       .start = [&](jsg::Lock& js, UnderlyingSource::Controller controller) -> jsg::Promise<void> {
         checked++;
         return js.rejectedPromise<void>(js.error("boom"));
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_UNREACHABLE;
-      }, [&](jsg::Lock& js, jsg::Value&& exception) {
-        KJ_ASSERT(kj::str(exception.getHandle(js)) == "Error: boom");
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(js,
+        [](jsg::Lock& js, jsg::BufferSource&& text) { KJ_UNREACHABLE; },
+        [&](jsg::Lock& js, jsg::Value&& exception) {
+      KJ_ASSERT(kj::str(exception.getHandle(js)) == "Error: boom");
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());
@@ -823,26 +815,27 @@ KJ_TEST("ReadableStream read all bytes (byte readable, failed start)") {
 KJ_TEST("ReadableStream read all bytes (byte readable, failed start 2)") {
   preamble([](jsg::Lock& js) {
     uint checked = 0;
-    auto rs = jsg::alloc<ReadableStream>(newReadableStreamJsController());
-    rs->getController().setup(js, UnderlyingSource {
+    auto rs = js.alloc<ReadableStream>(newReadableStreamJsController());
+    // clang-format off
+    rs->getController().setup(js, UnderlyingSource{
       .type = kj::str("bytes"),
       .start = [&](jsg::Lock& js, UnderlyingSource::Controller controller) -> jsg::Promise<void> {
         checked++;
         JSG_FAIL_REQUIRE(Error, "boom");
       }
-    // Setting a highWaterMark of 0 means the pull function above will not be called
-    // immediately on creation of the stream, but only when the first read in the
-    // readall call below happens.
-    }, StreamQueuingStrategy { .highWaterMark = 0 });
+      // Setting a highWaterMark of 0 means the pull function above will not be called
+      // immediately on creation of the stream, but only when the first read in the
+      // readall call below happens.
+    }, StreamQueuingStrategy{.highWaterMark = 0});
+    // clang-format on
 
     // Starts a read loop of javascript promises.
-    auto promise = rs->getController().readAllBytes(js, 20)
-      .then(js, [](jsg::Lock& js, kj::Array<kj::byte>&& text) {
-        KJ_UNREACHABLE;
-      }, [&](jsg::Lock& js, jsg::Value&& exception) {
-        KJ_ASSERT(kj::str(exception.getHandle(js)) == "Error: boom");
-        checked++;
-      });
+    auto promise = rs->getController().readAllBytes(js, 20).then(js,
+        [](jsg::Lock& js, jsg::BufferSource&& text) { KJ_UNREACHABLE; },
+        [&](jsg::Lock& js, jsg::Value&& exception) {
+      KJ_ASSERT(kj::str(exception.getHandle(js)) == "Error: boom");
+      checked++;
+    });
 
     // Reading left the stream locked and disturbed
     KJ_ASSERT(rs->isLocked());

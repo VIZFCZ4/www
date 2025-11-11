@@ -1,13 +1,12 @@
 from asgi import env
-
-async def on_fetch(request):
-    import asgi
-
-    return await asgi.fetch(app, request, env)
+from workers import WorkerEntrypoint
 
 
-def test():
-    import fastapi
+class Default(WorkerEntrypoint):
+    async def fetch(self, request, env):
+        import asgi
+
+        return await asgi.fetch(app, request, env)
 
 
 # Set up fastapi app
@@ -15,22 +14,21 @@ def test():
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-
 app = FastAPI()
 
 
 @app.get("/hello")
-async def root(env=env):
+async def hello(env=env):
     return {"message": "Hello World", "secret": env.secret}
 
 
 @app.get("/route")
-async def root():
+async def route():
     return {"message": "this is my custom route"}
 
 
 @app.get("/favicon.ico")
-async def root():
+async def favicon():
     return {"message": "here's a favicon I guess?"}
 
 
@@ -52,8 +50,8 @@ async def create_item(item: Item):
 
 
 @app.put("/items/{item_id}")
-async def create_item(item_id: int, item: Item, q: str | None = None):
-    result = {"item_id": item_id, **item.dict()}
+async def create_item2(item_id: int, item: Item, q: str | None = None):
+    result = {"item_id": item_id, **item.model_dump()}
     if q:
         result.update({"q": q})
     return result

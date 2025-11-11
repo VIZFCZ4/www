@@ -4,21 +4,22 @@
 
 #pragma once
 
-#include <kj/debug.h>
-#include <kj/time.h>
-
+#include <workerd/api/basics.h>
+#include <workerd/api/hibernation-event-params.h>
+#include <workerd/api/web-socket.h>
+#include <workerd/io/trace.h>
 #include <workerd/io/worker-interface.capnp.h>
 #include <workerd/io/worker-interface.h>
-#include <workerd/api/basics.h>
-#include <workerd/api/web-socket.h>
-#include <workerd/api/hibernation-event-params.h>
+#include <workerd/io/worker.h>
+
+#include <kj/debug.h>
 
 namespace workerd::api {
 
 using HibernationReader =
     rpc::HibernatableWebSocketEventDispatcher::HibernatableWebSocketEventParams::Reader;
 class HibernatableWebSocketEvent final: public ExtendableEvent {
-public:
+ public:
   explicit HibernatableWebSocketEvent();
 
   static jsg::Ref<HibernatableWebSocketEvent> constructor(kj::String type) = delete;
@@ -34,9 +35,7 @@ public:
     kj::Array<kj::String> tags;
 
     explicit ItemsForRelease(
-        jsg::Ref<WebSocket> ref,
-        kj::Own<kj::WebSocket> owned,
-        kj::Array<kj::String> tags);
+        jsg::Ref<WebSocket> ref, kj::Own<kj::WebSocket> owned, kj::Array<kj::String> tags);
   };
 
   // Call this when transferring ownership of the kj::WebSocket and tags to the api::WebSocket.
@@ -51,52 +50,50 @@ public:
   JSG_RESOURCE_TYPE(HibernatableWebSocketEvent) {
     JSG_INHERIT(ExtendableEvent);
   }
-private:
+
+ private:
   Worker::Actor::HibernationManager& getHibernationManager(jsg::Lock& lock);
 };
 
-class HibernatableWebSocketCustomEventImpl final: public WorkerInterface::CustomEvent,
-    public kj::Refcounted {
-public:
-  HibernatableWebSocketCustomEventImpl(
-      uint16_t typeId,
-      kj::TaskSet& waitUntilTasks,
+class HibernatableWebSocketCustomEvent final: public WorkerInterface::CustomEvent,
+                                              public kj::Refcounted {
+ public:
+  HibernatableWebSocketCustomEvent(uint16_t typeId,
       kj::Own<HibernationReader> params,
-      kj::Maybe<Worker::Actor::HibernationManager&> manager=kj::none);
-  HibernatableWebSocketCustomEventImpl(
-      uint16_t typeId,
-      kj::TaskSet& waitUntilTasks,
-      HibernatableSocketParams params,
-      Worker::Actor::HibernationManager& manager);
+      kj::Maybe<Worker::Actor::HibernationManager&> manager = kj::none);
+  HibernatableWebSocketCustomEvent(
+      uint16_t typeId, HibernatableSocketParams params, Worker::Actor::HibernationManager& manager);
 
-  kj::Promise<Result> run(
-      kj::Own<IoContext_IncomingRequest> incomingRequest,
+  kj::Promise<Result> run(kj::Own<IoContext_IncomingRequest> incomingRequest,
       kj::Maybe<kj::StringPtr> entrypointName,
+      Frankenvalue props,
       kj::TaskSet& waitUntilTasks) override;
 
-  kj::Promise<Result> sendRpc(
-      capnp::HttpOverCapnpFactory& httpOverCapnpFactory,
+  kj::Promise<Result> sendRpc(capnp::HttpOverCapnpFactory& httpOverCapnpFactory,
       capnp::ByteStreamFactory& byteStreamFactory,
-      kj::TaskSet& waitUntilTasks,
       rpc::EventDispatcher::Client dispatcher) override;
 
   uint16_t getType() override {
     return typeId;
   }
 
-private:
+  kj::Maybe<tracing::EventInfo> getEventInfo() const override;
+
+  kj::Promise<Result> notSupported() override {
+    KJ_UNIMPLEMENTED("hibernatable web socket event not supported");
+  }
+
+ private:
   // Returns `params`, but if we have a HibernationReader we convert it to a
   // HibernatableSocketParams first.
   HibernatableSocketParams consumeParams();
 
   uint16_t typeId;
-  kj::TaskSet& waitUntilTasks;
   kj::OneOf<HibernatableSocketParams, kj::Own<HibernationReader>> params;
   kj::Maybe<uint32_t> timeoutMs;
   kj::Maybe<Worker::Actor::HibernationManager&> manager;
 };
 
-#define EW_WEB_SOCKET_MESSAGE_ISOLATE_TYPES      \
-  api::HibernatableWebSocketEvent,       \
-  api::HibernatableWebSocketExportedHandler
+#define EW_WEB_SOCKET_MESSAGE_ISOLATE_TYPES                                                        \
+  api::HibernatableWebSocketEvent, api::HibernatableWebSocketExportedHandler
 }  // namespace workerd::api

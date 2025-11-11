@@ -25,7 +25,7 @@
 # to see and restrict what each Worker can access. Instead, the default is that a Worker has
 # access to no privileged resources at all, and you must explicitly declare "bindings" to give
 # it access to specific resources. A binding gives the Worker a JavaScript API object that points
-# to a specific resource. This means that by changing config alone, you can fully controll which
+# to a specific resource. This means that by changing config alone, you can fully control which
 # resources an Worker connects to. (You can even disallow access to the public internet, although
 # public internet access is granted by default.)
 #
@@ -35,7 +35,7 @@
 # to execute!
 
 # Any capnp files imported here must be:
-# 1. embedded into workerd-meta.capnp
+# 1. embedded using wd_cc_embed
 # 2. added to `tryImportBulitin` in workerd.c++ (grep for '"/workerd/workerd.capnp"').
 using Cxx = import "/capnp/c++.capnp";
 $Cxx.namespace("workerd::server::config");
@@ -84,6 +84,31 @@ struct Config {
   # A list of gates which are enabled.
   # These are used to gate features/changes in workerd and in our internal repo. See the equivalent
   # config definition in our internal repo for more details.
+
+  structuredLogging @5 :Bool = false;
+  # If true, logs will be emitted as JSON for structured logging.
+  # When false, logs use the traditional human-readable format.
+  # This affects the format of logs from KJ_LOG and exception reporting as well as js logs.
+  # This won't work for logs coming from service worker syntax workers with the old module registry.
+  # Note: This field is obsolete and deprecated. Use the logging struct instead.
+
+  logging @6 : LoggingOptions;
+  # Console and Stdio logging configuration options.
+}
+
+struct LoggingOptions {
+  structuredLogging @0 :Bool = false;
+  # Override of top-level structured logging (only when true).
+  # If true, logs will be emitted as JSON for structured logging.
+  # When false, logs use the traditional human-readable format.
+  # This affects the format of logs from KJ_LOG and exception reporting as well as js logs.
+  # This won't work for logs coming from service worker syntax workers with the old module registry.
+
+  stdoutPrefix @1 :Text;
+  # Set a custom prefix for process.stdout. Defaults to "stdout: ".
+
+  stderrPrefix @2 :Text;
+  # Set a custom prefix for process.stderr. Defaults to "stderr: ".
 }
 
 # ========================================================================================
@@ -192,6 +217,16 @@ struct ServiceDesignator {
   # `entrypoint` is specified here, it names an alternate entrypoint to use on the target worker,
   # otherwise the default is used.
 
+  props :union {
+    # Value to provide in `ctx.props` in the target worker.
+
+    empty @2 :Void;
+    # Empty object. (This is the default.)
+
+    json @3 :Text;
+    # A JSON-encoded value.
+  }
+
   # TODO(someday): Options to specify which event types are allowed.
   # TODO(someday): Allow adding an outgoing middleware stack here (see TODO in Service, above).
 }
@@ -207,7 +242,7 @@ struct Worker {
     # event handlers.
     #
     # The value of this field is the raw source code. When using Cap'n Proto text format, use the
-    # `embed` directive to read the code from an exnternal file:
+    # `embed` directive to read the code from an external file:
     #
     #     serviceWorkerScript = embed "worker.js"
 
@@ -257,11 +292,9 @@ struct Worker {
       json @6 :Text;
       # Importing this will produce the result of parsing the given text as JSON.
 
-      nodeJsCompatModule @7 :Text;
-      # A Node.js module is a specialization of a commonJsModule that:
-      # (a) allows for importing Node.js-compat built-ins without the node: specifier-prefix
-      # (b) exposes the subset of common Node.js globals such as process, Buffer, etc that
-      #     we implement in the workerd runtime.
+      obsolete @7 :Text;
+      # This position used to be the nodeJsCompatModule type that has now been
+      # obsoleted.
 
       pythonModule @8 :Text;
       # A Python module. All bundles containing this value type are converted into a JS/WASM Worker
@@ -271,7 +304,17 @@ struct Worker {
       # A Python package that is required by this bundle. The package must be supported by
       # Pyodide (https://pyodide.org/en/stable/usage/packages-in-pyodide.html). All packages listed
       # will be installed prior to the execution of the worker.
+      #
+      # The value of this field is ignored and should always be an empty string. Only the module
+      # name matters. The field should have been declared `Void`, but it's difficult to change now.
     }
+
+    namedExports @10 :List(Text);
+    # For commonJsModule modules, this is a list of named exports that the
+    # module expects to be exported once the evaluation is complete.
+    #
+    # (`commonJsModule` should have been a group containing the body and `namedExports`, but it's
+    # too late to change now.)
   }
 
   compatibilityDate @3 :Text;
@@ -336,6 +379,10 @@ struct Worker {
       service @9 :ServiceDesignator;
       # Binding to a named service (possibly, a worker).
 
+      durableObjectClass @26 :ServiceDesignator;
+      # A Durable Object class binding, without an actual storage namespace. This can be used to
+      # implement a facet.
+
       durableObjectNamespace @10 :DurableObjectNamespaceDesignator;
       # Binding to the durable object namespace implemented by the given class.
       #
@@ -346,7 +393,7 @@ struct Worker {
 
       kvNamespace @11 :ServiceDesignator;
       # A KV namespace, implemented by the named service. The Worker sees a KvNamespace-typed
-      # binding. Requests to the namespace will be converted into HTTP requests targetting the
+      # binding. Requests to the namespace will be converted into HTTP requests targeting the
       # given service name.
 
       r2Bucket @12 :ServiceDesignator;
@@ -359,7 +406,7 @@ struct Worker {
 
       queue @15 :ServiceDesignator;
       # A Queue binding, implemented by the named service. Requests to the
-      # namespace will be converted into HTTP requests targetting the given
+      # namespace will be converted into HTTP requests targeting the given
       # service name.
 
       fromEnvironment @16 :Text;
@@ -397,6 +444,22 @@ struct Worker {
         limits @25 :MemoryCacheLimits;
       }
 
+      workerLoader :group {
+        # A binding representing the ability to dynamically load Workers from code presented at
+        # runtime.
+        #
+        # A Worker loader is not just a function that loads a Worker, but also serves as a
+        # cache of Workers, automatically unloading Workers that are not in use. To that end, each
+        # Worker must have a name, and if a Worker with that name already exists, it'll be reused.
+
+        id @27 :Text;
+        # Optional: The identifier associated with this Worker loader. Multiple Workers can bind to
+        # the same ID in order to access the same loader, so that if they request the same name
+        # from it, they'll end up sharing the same loaded Worker.
+        #
+        # (If omitted, the binding will not share a cache with any other binding.)
+      }
+
       # TODO(someday): dispatch, other new features
     }
 
@@ -420,6 +483,7 @@ struct Worker {
         queue @11 :Void;
         analyticsEngine @12 : Void;
         hyperdrive @13: Void;
+        durableObjectClass @14: Void;
       }
     }
 
@@ -556,10 +620,10 @@ struct Worker {
       # Instances of this class are ephemeral -- they have no durable storage at all. The
       # `state.storage` API will not be present. Additionally, this namespace will allow arbitrary
       # strings as IDs. There are no `idFromName()` nor `newUniqueId()` methods; `get()` takes any
-      # string as a paremeter.
+      # string as a parameter.
       #
       # Ephemeral objects are NOT globally unique, only "locally" unique, for some definition of
-      # "local". For exmaple, on Cloudflare's network, these objects are unique per-colo.
+      # "local". For example, on Cloudflare's network, these objects are unique per-colo.
       #
       # WARNING: Cloudflare Workers currently limits this feature to Cloudflare-internal users
       #   only, because using them correctly requires deep understanding of Cloudflare network
@@ -575,6 +639,26 @@ struct Worker {
     # pinned to memory forever, so we provide this flag to change the default behavior.
     #
     # Note that this is only supported in Workerd; production Durable Objects cannot toggle eviction.
+
+    enableSql @4 :Bool;
+    # Whether or not Durable Objects in this namespace can use the `storage.sql` API to execute SQL
+    # queries.
+    #
+    # workerd uses SQLite to back all Durable Objects, but the SQL API is hidden by default to
+    # emulate behavior of traditional DO namespaces on Cloudflare that aren't SQLite-backed. This
+    # flag should be enabled when testing code that will run on a SQLite-backed namespace.
+
+    container @5 :ContainerOptions;
+    # If present, Durable Objects in this namespace have attached containers.
+    # workerd will talk to the configured container engine to start containers for each
+    # Durable Object based on the given image. The Durable Object can access the container via the
+    # ctx.container API. TODO(CloudChamber): add link to docs.
+
+    struct ContainerOptions {
+      imageName @0 :Text;
+      # Image name to be used to create the container using supported provider.
+      # By default, we pull the "latest" tag of this image.
+    }
   }
 
   durableObjectUniqueKeyModifier @8 :Text;
@@ -618,6 +702,27 @@ struct Worker {
 
   moduleFallback @13 :Text;
 
+  tails @14 :List(ServiceDesignator);
+  # List of tail worker services that should receive tail events for this worker.
+  # See: https://developers.cloudflare.com/workers/observability/logs/tail-workers/
+
+  streamingTails @15 :List(ServiceDesignator);
+  # List of streaming tail worker services that should receive tail events for this worker.
+  # NOTE: This will be deleted in a future refactor, do not depend on this.
+
+  containerEngine :union {
+    none @16 :Void;
+    # No container engine configured. Container operations will not be available.
+
+    localDocker @17 :DockerConfiguration;
+    # Use local Docker daemon for container operations.
+    # Only used for local development and testing purposes.
+  }
+
+  struct DockerConfiguration {
+    socketPath @0 :Text;
+    # Path to the Docker socket.
+  }
 }
 
 struct ExternalServer {
@@ -731,7 +836,7 @@ struct DiskDirectory {
   # particular, no attempt is made to guess the `Content-Type` header. You normally would wrap
   # this in a Worker that fills in the metadata in the way you want.
   #
-  # A GET request targetting a directory (rather than a file) will return a basic JSAN directory
+  # A GET request targeting a directory (rather than a file) will return a basic JSAN directory
   # listing like:
   #
   #     [{"name":"foo","type":"file"},{"name":"bar","type":"directory"}]
@@ -922,4 +1027,21 @@ struct Extension {
     esModule @2 :Text;
     # Raw source code of ES module.
   }
+}
+
+# ========================================================================================
+# Fallback Service Request
+#  Used only to define the JSON structure of a request to the fallback service.
+
+struct FallbackServiceRequest {
+  type @0 :Text;
+  specifier @1 :Text;
+  rawSpecifier @2 :Text;
+  referrer @3 :Text;
+
+  struct Attribute {
+    name @0: Text;
+    value @1: Text;
+  }
+  attributes @4 :List(Attribute);
 }

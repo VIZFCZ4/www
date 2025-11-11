@@ -1,9 +1,14 @@
 #include "inspector.h"
 
+#include "jsg.h"
+#include "jsvalue.h"
+#include "simdutf.h"
+#include "util.h"
+
+#include <v8-inspector.h>
+
 #include <kj/encoding.h>
 #include <kj/string.h>
-#include <v8-inspector.h>
-#include "jsg.h"
 
 namespace v8_inspector {
 kj::String KJ_STRINGIFY(const v8_inspector::StringView& view) {
@@ -23,32 +28,27 @@ kj::String KJ_STRINGIFY(const v8_inspector::StringView& view) {
     // Looks like it's all ASCII.
     return kj::str(bytes.asChars());
   } else {
-    return kj::decodeUtf16(kj::arrayPtr(
-        reinterpret_cast<const char16_t*>(view.characters16()), view.length()));
+    return kj::decodeUtf16(
+        kj::arrayPtr(reinterpret_cast<const char16_t*>(view.characters16()), view.length()));
   }
 }
-}
+}  // namespace v8_inspector
 
 namespace workerd::jsg {
 namespace {
 class StringViewWithScratch: public v8_inspector::StringView {
-public:
+ public:
   StringViewWithScratch(v8_inspector::StringView text, kj::Array<char16_t>&& scratch)
-      : v8_inspector::StringView(text), scratch(kj::mv(scratch)) {}
+      : v8_inspector::StringView(text),
+        scratch(kj::mv(scratch)) {}
 
-private:
+ private:
   kj::Array<char16_t> scratch;
 };
 }  // namespace
 
 v8_inspector::StringView toInspectorStringView(kj::StringPtr text) {
-  bool isAscii = true;
-  for (char c: text) {
-    if (c & 0x80) {
-      isAscii = false;
-      break;
-    }
-  }
+  bool isAscii = simdutf::validate_ascii(text.begin(), text.size());
 
   if (isAscii) {
     return StringViewWithScratch(
@@ -56,30 +56,25 @@ v8_inspector::StringView toInspectorStringView(kj::StringPtr text) {
   } else {
     kj::Array<char16_t> scratch = kj::encodeUtf16(text);
     return StringViewWithScratch(
-      v8_inspector::StringView(reinterpret_cast<uint16_t*>(scratch.begin()), scratch.size()),
-      kj::mv(scratch));
+        v8_inspector::StringView(reinterpret_cast<uint16_t*>(scratch.begin()), scratch.size()),
+        kj::mv(scratch));
   }
 }
 
 // Inform the inspector of a problem not associated with any particular exception object.
 //
 // Passes `description` as the exception's detailed message, dummy values for everything else.
-void sendExceptionToInspector(jsg::Lock& js,
-                              v8_inspector::V8Inspector& inspector,
-                              kj::StringPtr description) {
-  inspector.exceptionThrown(js.v8Context(),
-                            v8_inspector::StringView(),
-                            v8::Local<v8::Value>(),
-                            jsg::toInspectorStringView(description),
-                            v8_inspector::StringView(),
-                            0, 0, nullptr, 0);
+void sendExceptionToInspector(
+    jsg::Lock& js, v8_inspector::V8Inspector& inspector, kj::StringPtr description) {
+  inspector.exceptionThrown(js.v8Context(), v8_inspector::StringView(), v8::Local<v8::Value>(),
+      jsg::toInspectorStringView(description), v8_inspector::StringView(), 0, 0, nullptr, 0);
 }
 
 void sendExceptionToInspector(jsg::Lock& js,
-                              v8_inspector::V8Inspector& inspector,
-                              kj::String source,
-                              const jsg::JsValue& exception,
-                              jsg::JsMessage message) {
+    v8_inspector::V8Inspector& inspector,
+    kj::String source,
+    const jsg::JsValue& exception,
+    jsg::JsMessage message) {
   if (!message) {
     // This exception didn't come with a Message. This can happen for exceptions delivered via
     // v8::Promise::Catch(), or for exceptions which were tunneled through C++ promises. In the
@@ -98,17 +93,16 @@ void sendExceptionToInspector(jsg::Lock& js,
   auto stackTrace = msg->GetStackTrace();
 
   // The resource name is whatever we set in the Script ctor, e.g. "worker.js".
-  auto scriptResourceName = msg->GetScriptResourceName();
+  auto scriptResourceName = kj::str(msg->GetScriptResourceName());
+  auto detailedMessage = kj::str(msg->Get());
 
   auto lineNumber = msg->GetLineNumber(context).FromMaybe(0);
   auto startColumn = msg->GetStartColumn(context).FromMaybe(0);
 
   // TODO(soon): EW-2636 Pass a real "script ID" as the last parameter instead of 0. I suspect this
   //   has something to do with the incorrect links in the console when it logs uncaught exceptions.
-  inspector.exceptionThrown(context,
-      jsg::toInspectorStringView(kj::mv(source)), exception,
-      jsg::toInspectorStringView(kj::str(msg->Get())),
-      jsg::toInspectorStringView(kj::str(scriptResourceName)),
+  inspector.exceptionThrown(context, jsg::toInspectorStringView(source), exception,
+      jsg::toInspectorStringView(detailedMessage), jsg::toInspectorStringView(scriptResourceName),
       lineNumber, startColumn, inspector.createStackTrace(stackTrace), 0);
 }
 

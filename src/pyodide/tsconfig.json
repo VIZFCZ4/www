@@ -1,0 +1,22 @@
+{
+  "extends": "../../tools/base.tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "paths": {
+      "pyodide:*": ["./*"],
+      "pyodide-internal:*": ["./internal/*", "./types/*"],
+      // generated/emscriptenSetup is an esbuild-bundled version of pool/emscriptenSetup. They have
+      // the same exports, so tell TypeScript to redirect the import.
+      "pyodide-internal:generated/emscriptenSetup": [
+        "./internal/pool/emscriptenSetup.ts"
+      ],
+      "internal:*": ["./types/*"]
+    },
+    "typeRoots": ["./types"],
+    "noEmit": false,
+    "noEmitOnError": false,
+    "allowArbitraryExtensions": true
+  },
+  "include": ["./**/*"],
+  "exclude": ["./**/generated/**/*", "node_modules", "**/*.mjs"]
+}

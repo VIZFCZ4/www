@@ -1,172 +1,66 @@
-load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
-load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
-load("@capnp-cpp//src/capnp:cc_capnp_library.bzl", "cc_capnp_library")
-load("//:build/capnp_embed.bzl", "capnp_embed")
-load("//:build/wd_js_bundle.bzl", "wd_js_bundle")
+load("@rules_python//python:defs.bzl", "py_test")
+load("//:build/python_metadata.bzl", "BUNDLE_VERSION_INFO")
+load("//:build/wd_cc_embed.bzl", "wd_cc_embed")
+load(":helpers.bzl", "pyodide_extra", "pyodide_static", "python_bundles")
 
-copy_file(
-    name = "pyodide_packages_archive",
-    src = "@pyodide_packages//:pyodide_packages.tar",
-    out = "generated/pyodide_packages.tar",
-)
+pyodide_extra()
 
-capnp_embed(
-    name = "pyodide_packages_archive_embed",
-    src = "generated/pyodide_packages.tar",
-    deps = ["pyodide_packages_archive"],
-)
+python_bundles()
 
-copy_file(
-    name = "python_entrypoint_file",
-    src = "python-entrypoint.js",
-    out = "generated/python-entrypoint.js"
-)
+pyodide_static()
 
-capnp_embed(
-    name = "python_entrypoint_file_embed",
-    src = "generated/python-entrypoint.js",
-    deps = ["python_entrypoint_file"],
-)
+DEV_VERSION = BUNDLE_VERSION_INFO["development"]["real_pyodide_version"]
 
-copy_file(
-    name = "pyodide_extra_capnp_file",
-    src = "pyodide_extra.capnp",
-    out = "generated/pyodide_extra.capnp",
-)
-
-capnp_embed(
-    name = "pyodide_extra_file_embed",
-    src = "generated/pyodide_extra.capnp",
-    deps = ["pyodide_extra_capnp_file"],
-)
-
-capnp_embed(
-    name = "pyodide_lock_file_embed",
-    src = "generated/pyodide-lock.json",
-    deps = ["pyodide-lock.js@rule"],
-)
-
-cc_capnp_library(
-    name = "pyodide_extra_capnp",
-    srcs = ["generated/pyodide_extra.capnp"],
+alias(
+    name = "pyodide.capnp.bin",
+    actual = "pyodide.capnp.bin@rule@" + DEV_VERSION,
     visibility = ["//visibility:public"],
-    deps = [
-        ":pyodide_extra_file_embed",
-        ":pyodide_packages_archive_embed",
-        ":python_entrypoint_file_embed",
-        ":pyodide_lock_file_embed"
-    ],
 )
 
-copy_file(
-    name = "pyodide.asm.wasm@rule",
-    src = "@pyodide//:pyodide/pyodide.asm.wasm",
-    out = "generated/pyodide.asm.wasm",
+wd_cc_embed(
+    name = "python-entrypoint",
+    src = "python-entrypoint.js",
+    base_name = "python-entrypoint",
+    visibility = ["//visibility:public"],
 )
 
-copy_file(
-    name = "python_stdlib.zip@rule",
-    src = "@pyodide//:pyodide/python_stdlib.zip",
-    out = "generated/python_stdlib.zip",
+# In case we have a runner which doesn't support building pyodide.capnp.bin we
+# want to use a pre-built/cross-compiled artifact. This is just a bazel alias
+# serving as a redirect when referenced by other targets instead of changing
+# the output filename.
+alias(
+    name = "pyodide.capnp.bin_cross",
+    actual = select({
+        "@//build/config:prebuilt_binaries_arm64": "@//:bin.arm64/tmp/pyodide/pyodide.capnp.bin.aarch64-linux-gnu",
+        "//conditions:default": "pyodide.capnp.bin",
+    }),
+    visibility = ["//visibility:public"],
 )
 
-copy_file(
-    name = "pyodide-lock.js@rule",
-    src = "@pyodide-lock.json//file",
-    out = "generated/pyodide-lock.json",
+alias(
+    name = "pyodide.capnp.bin@rule",
+    actual = "pyodide.capnp.bin@rule@" + DEV_VERSION,
+    visibility = ["//visibility:public"],
 )
 
-# pyodide.asm.js patches
-# TODO: all of these should be fixed by linking our own Pyodide or by upstreaming.
-
-PRELUDE = """
-import { newWasmModule, monotonicDateNow, wasmInstantiate, getRandomValues } from "pyodide-internal:builtin_wrappers";
-
-// Pyodide uses `new URL(some_url, location)` to resolve the path in `loadPackage`. Setting
-// `location = undefined` makes this throw an error if some_url is not an absolute url. Which is what
-// we want here, it doesn't make sense to load a package from a relative URL.
-const location = undefined;
-
-function addEventListener(){}
-
-function reportUndefinedSymbolsNoOp() {}
-"""
-
-REPLACEMENTS = [
-    [
-        # Convert pyodide.asm.js into an es6 module.
-        # When we link our own we can pass `-sES6_MODULE` to the linker and it will do this for us
-        # automatically.
-        "var _createPyodideModule",
-        PRELUDE + "export const _createPyodideModule",
-    ],
-    [
-        "globalThis._createPyodideModule = _createPyodideModule;",
-        "",
-    ],
-    [
-        "new WebAssembly.Module",
-        "newWasmModule",
-    ],
-    [
-        "WebAssembly.instantiate",
-        "wasmInstantiate",
-    ],
-    [
-        "Date.now",
-        "monotonicDateNow",
-    ],
-    [
-        "crypto.getRandomValues",
-        "getRandomValues"
-    ],
-    [
-        "reportUndefinedSymbols()",
-        "reportUndefinedSymbolsNoOp()"
-    ],
-]
-
-load("//:build/pyodide_bucket.bzl", "PYODIDE_PACKAGE_BUCKET_URL")
-
-PYODIDE_BUCKET_MODULE = json.encode({
-    "PYODIDE_PACKAGE_BUCKET_URL": PYODIDE_PACKAGE_BUCKET_URL,
-})
+alias(
+    name = "pyodide",
+    actual = "pyodide@" + DEV_VERSION,
+    visibility = ["//visibility:public"],
+)
 
 write_file(
-    name = "pyodide-bucket.json@rule",
-    out = "generated/pyodide-bucket.json",
-    content = [PYODIDE_BUCKET_MODULE],
+    name = "bundle_version_info",
+    out = "bundle_version_info.json",
+    content = [json.encode(BUNDLE_VERSION_INFO)],
 )
 
-expand_template(
-    name = "pyodide.asm.js@rule",
-    out = "generated/pyodide.asm.js",
-    substitutions = dict(REPLACEMENTS),
-    template = "@pyodide//:pyodide/pyodide.asm.js",
-)
-
-wd_js_bundle(
-    name = "pyodide",
-    builtin_modules = ["python-entrypoint-helper.js"],
-    import_name = "pyodide",
-    internal_data_modules = ["generated/python_stdlib.zip"] + glob([
-        "internal/*.py",
-        "internal/patches/*.py",
-    ]),
-    internal_json_modules = ["generated/pyodide-lock.json", "generated/pyodide-bucket.json"],
-    internal_modules = [
-        "generated/pyodide.asm.js",
-    ] + glob([
-        "internal/*.js",
-    ]),
-    internal_wasm_modules = ["generated/pyodide.asm.wasm"],
-    schema_id = "0xbcc8f57c63814005",
-    deps = [
-        "pyodide.asm.js@rule",
-        "pyodide.asm.wasm@rule",
-        "pyodide-lock.js@rule",
-        "python_stdlib.zip@rule",
-        "pyodide-bucket.json@rule",
-    ],
+py_test(
+    name = "unit-test-introspection",
+    srcs = [
+        "internal/introspection.py",
+        "internal/test_introspection.py",
+    ] + glob(["internal/workers-api/src/workers/*"]),
+    main = "internal/test_introspection.py",
 )

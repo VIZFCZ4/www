@@ -15,7 +15,7 @@ class IoContext;
 // However, clearTimeout implementations are expected to only have access to timeouts set via that
 // same implementation.
 class TimeoutId {
-public:
+ public:
   // Use a double so that we can exceed the maximum value for uint32_t.
   using NumberType = double;
 
@@ -27,10 +27,10 @@ public:
   // Convert an externally provided double into a TimeoutId. If you are making a new TimeoutId,
   // use a Generator instead.
   inline static TimeoutId fromNumber(NumberType id) {
-    return TimeoutId(ValueType(id));
+    return TimeoutId(static_cast<ValueType>(id));
   }
 
-  // Convert a TimeoutId to an integer-covertable double for external consumption.
+  // Convert a TimeoutId to an integer-convertable double for external consumption.
   // Note that this is expected to be less than or equal to JavaScript Number.MAX_SAFE_INTEGER
   // (2^53 - 1). To reach greater than that value in normal operation, we'd need a Generator to
   // live far far longer than our normal release/restart cycle, be initialized with a large
@@ -43,28 +43,28 @@ public:
     return value < id.value;
   }
 
-private:
+ private:
   constexpr explicit TimeoutId(ValueType value): value(value) {}
 
   ValueType value;
 };
 
 class TimeoutId::Generator {
-public:
+ public:
   Generator() = default;
   KJ_DISALLOW_COPY_AND_MOVE(Generator);
 
   // Get the next TimeoutId for this generator. This function will never return a TimeoutId <= 0.
   TimeoutId getNext();
 
-private:
+ private:
   // We always skip 0 per the spec:
   // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#timers.
   TimeoutId::ValueType nextId = 1;
 };
 
 class TimeoutManager {
-public:
+ public:
   // Upper bound on the number of timeouts a user can *ever* have active.
   constexpr static auto MAX_TIMEOUTS = 10'000;
 
@@ -84,6 +84,7 @@ public:
   virtual void clearTimeout(IoContext& context, TimeoutId id) = 0;
   virtual size_t getTimeoutCount() const = 0;
   virtual kj::Maybe<kj::Date> getNextTimeout() const = 0;
+  virtual void cancelAll() = 0;
 };
 
 }  // namespace workerd

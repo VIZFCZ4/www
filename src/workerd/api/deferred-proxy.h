@@ -39,12 +39,12 @@ struct DeferredProxy {
 };
 
 inline DeferredProxy<void> newNoopDeferredProxy() {
-  return DeferredProxy<void> { kj::READY_NOW };
+  return DeferredProxy<void>{kj::READY_NOW};
 }
 
 template <typename T>
 inline DeferredProxy<T> newNoopDeferredProxy(T&& value) {
-  return DeferredProxy<T> { kj::mv(value) };
+  return DeferredProxy<T>{kj::mv(value)};
 }
 
 // Helper method to use when you need to return `Promise<DeferredProxy<T>>` but no part of the
@@ -101,13 +101,13 @@ namespace workerd::api {
 class BeginDeferredProxyingConstant final {};
 // A magic constant which a DeferredProxyPromise<T> coroutine can `KJ_CO_MAGIC` to indicate that the
 // deferred proxying phase of its operation has begun.
-constexpr BeginDeferredProxyingConstant BEGIN_DEFERRED_PROXYING {};
+constexpr BeginDeferredProxyingConstant BEGIN_DEFERRED_PROXYING{};
 
 // A concept which is true if C is a coroutine adapter which supports the `co_yield` operator for
 // type T. We could also check that the expression results in an awaitable, but that is already a
 // compile error in other ways.
 template <typename T, typename C>
-concept CoroutineYieldValue = requires (T&& v, C coroutineAdapter) {
+concept CoroutineYieldValue = requires(T&& v, C coroutineAdapter) {
   { coroutineAdapter.yield_value(kj::fwd<T>(v)) };
 };
 
@@ -119,7 +119,7 @@ class DeferredProxyCoroutine: public kj::_::PromiseNode,
   using InnerCoroutineAdapter =
       typename kj::_::stdcoro::coroutine_traits<kj::Promise<T>, Args...>::promise_type;
 
-public:
+ public:
   using Handle = kj::_::stdcoro::coroutine_handle<DeferredProxyCoroutine>;
 
   DeferredProxyCoroutine(kj::SourceLocation location = {})
@@ -136,20 +136,29 @@ public:
     // called. This gives us the opportunity (that is, in `destroy()`) to destroy our
     // `inner.get_return_object()` Promise, breaking the ownership cycle and destroying `this`.
 
-    result.value = DeferredProxy<T> { inner.get_return_object() };
+    result.value = DeferredProxy<T>{inner.get_return_object()};
     return kj::_::PromiseNode::to<kj::Promise<DeferredProxy<T>>>(kj::_::OwnPromiseNode(this));
   }
 
-  auto initial_suspend() { return inner.initial_suspend(); }
-  auto final_suspend() noexcept { return inner.final_suspend(); }
+  auto initial_suspend() {
+    return inner.initial_suspend();
+  }
+  auto final_suspend() noexcept {
+    return inner.final_suspend();
+  }
   // Just trivially forward these.
 
   void unhandled_exception() {
-    // Reject our outer promise if it hasn't yet been fulfilled, then forward to the inner
+    // Reject our outer promise if it hasn't yet been fulfilled, or forward to the inner
     // implementation.
 
-    rejectOuterPromise();
-    inner.unhandled_exception();
+    if (!deferredProxyingHasBegun) {
+      result.addException(kj::getCaughtExceptionAsKj());
+      onReadyEvent.arm();
+      deferredProxyingHasBegun = true;
+    } else {
+      inner.unhandled_exception();
+    }
   }
 
   kj::_::stdcoro::suspend_never yield_value(decltype(BEGIN_DEFERRED_PROXYING)) {
@@ -177,31 +186,23 @@ public:
   }
 
   template <typename U>
-  auto await_transform(U&& awaitable) {
+  decltype(auto) await_transform(U&& awaitable) {
     // Trivially forward everything, so we can await anything a kj::Promise<T> can.
     return inner.await_transform(kj::fwd<U>(awaitable));
   }
 
-  operator kj::_::CoroutineBase&() { return inner; }
+  operator kj::_::CoroutineBase&() {
+    return inner;
+  }
   // Required by Awaiter<T>::await_suspend() to support awaiting Promises.
 
-private:
+ private:
   void fulfillOuterPromise() {
     // Fulfill the outer promise if it hasn't already settled.
 
     if (!deferredProxyingHasBegun) {
       // Our `result` is put in place already by `get_return_object()`, so all we have to do is arm
       // the event.
-      onReadyEvent.arm();
-      deferredProxyingHasBegun = true;
-    }
-  }
-
-  void rejectOuterPromise() {
-    // Reject the outer promise if it hasn't already settled.
-
-    if (!deferredProxyingHasBegun) {
-      result.addException(kj::getCaughtExceptionAsKj());
       onReadyEvent.arm();
       deferredProxyingHasBegun = true;
     }

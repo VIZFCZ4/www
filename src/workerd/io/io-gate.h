@@ -21,10 +21,8 @@
 //   never be sent, so that the rest of the world cannot observe a prematurely-confirmed write.
 
 #include <kj/async.h>
-#include <kj/one-of.h>
 #include <kj/list.h>
-
-#include <type_traits>
+#include <kj/one-of.h>
 
 namespace workerd {
 
@@ -33,7 +31,7 @@ using kj::uint;
 // An InputGate blocks incoming events from being delivered to an actor while the lock is held.
 class InputGate {
 
-public:
+ public:
   // Hooks that can be used to customize InputGate behavior.
   //
   // Technically, everything implemented here could be accomplished by a class that wraps
@@ -43,7 +41,7 @@ public:
   // would kick in when ActorCache tried to use it.
   class Hooks {
 
-  public:
+   public:
     // Optionally track metrics. In practice these are implemented by MetricsCollector::Actor, but
     // we don't want to depend on that class from here.
     virtual void inputGateLocked() {}
@@ -51,24 +49,31 @@ public:
     virtual void inputGateWaiterAdded() {}
     virtual void inputGateWaiterRemoved() {}
 
-    static Hooks DEFAULT;
+    static const Hooks DEFAULT;
   };
 
-  InputGate(Hooks& hooks = Hooks::DEFAULT);
+  // Hooks has no member variables, so const_cast is acceptable.
+  InputGate(Hooks& hooks = const_cast<Hooks&>(Hooks::DEFAULT));
   ~InputGate() noexcept;
 
   class CriticalSection;
 
   // A lock that blocks all new events from being delivered while it exists.
   class Lock {
-  public:
+   public:
     KJ_DISALLOW_COPY(Lock);
-    Lock(Lock&& other): gate(other.gate), cs(kj::mv(other.cs)) { other.gate = nullptr; }
-    ~Lock() noexcept(false) { if (gate != nullptr) gate->releaseLock(); }
+    Lock(Lock&& other): gate(other.gate), cs(kj::mv(other.cs)) {
+      other.gate = nullptr;
+    }
+    ~Lock() noexcept(false) {
+      if (gate != nullptr) gate->releaseLock();
+    }
 
     // Increments the lock's refcount, returning a duplicate `Lock`. All `Lock`s must be dropped
     // before the gate is unlocked.
-    Lock addRef() { return Lock(*gate); }
+    Lock addRef() {
+      return Lock(*gate);
+    }
 
     // Start a new critical section from this lock. After `wait()` has been called on the returned
     // critical section for the first time, no further Locks will be handed out by
@@ -84,9 +89,11 @@ public:
 
     bool isFor(const InputGate& gate) const;
 
-    inline bool operator==(const Lock& other) const { return gate == other.gate; }
+    inline bool operator==(const Lock& other) const {
+      return gate == other.gate;
+    }
 
-  private:
+   private:
     // Becomes null on move.
     InputGate* gate;
 
@@ -103,7 +110,7 @@ public:
   // actor should be shut down in this case. This promise never resolves, only rejects.
   kj::Promise<void> onBroken();
 
-private:
+ private:
   Hooks& hooks;
 
   // How many instances of `Lock` currently exist? When this reaches zero, we'll release some
@@ -157,7 +164,7 @@ private:
 // top-level scope. E.g., if a critical section initiates a storage read and a fetch() at the
 // same time, the fetch() is prevented from returning until after the storage read has returned.
 class InputGate::CriticalSection: private InputGate, public kj::Refcounted {
-public:
+ public:
   CriticalSection(InputGate& parent);
   ~CriticalSection() noexcept(false);
 
@@ -179,7 +186,7 @@ public:
   // breaks the InputGate.
   void failed(const kj::Exception& e);
 
-private:
+ private:
   enum State {
     // wait() hasn't been called.
     NOT_STARTED,
@@ -212,7 +219,7 @@ private:
 // An OutputGate blocks outgoing messages from an Actor until writes which they might depend on
 // are confirmed.
 class OutputGate {
-public:
+ public:
   // Hooks that can be used to customize OutputGate behavior.
   //
   // Technically, everything implemented here could be accomplished by a class that wraps
@@ -221,11 +228,13 @@ public:
   // it was more convenient to give Worker::Actor a way to inject behavior into OutputGate which
   // would kick in when ActorCache tried to use it.
   class Hooks {
-  public:
+   public:
     // Optionally make a promise which should be exclusiveJoin()ed with the lock promise to
     // implement a timeout. The returned promise should be something that throws an exception
     // after some timeout has expired.
-    virtual kj::Promise<void> makeTimeoutPromise() { return kj::NEVER_DONE; }
+    virtual kj::Promise<void> makeTimeoutPromise() {
+      return kj::NEVER_DONE;
+    }
 
     // Optionally track metrics. In practice these are implemented by MetricsCollector::Actor, but
     // we don't want to depend on that class from here.
@@ -235,10 +244,11 @@ public:
     virtual void outputGateWaiterAdded() {}
     virtual void outputGateWaiterRemoved() {}
 
-    static Hooks DEFAULT;
+    static const Hooks DEFAULT;
   };
 
-  OutputGate(Hooks& hooks = Hooks::DEFAULT);
+  // Hooks has no member variables, so const_cast is acceptable.
+  OutputGate(Hooks& hooks = const_cast<Hooks&>(Hooks::DEFAULT));
   ~OutputGate() noexcept(false);
 
   // Block all future `wait()` calls until `promise` completes. Returns a wrapper around `promise`.
@@ -259,7 +269,7 @@ public:
 
   bool isBroken();
 
-private:
+ private:
   Hooks& hooks;
 
   kj::ForkedPromise<void> pastLocksPromise;
@@ -283,12 +293,11 @@ kj::Promise<T> OutputGate::lockWhile(kj::Promise<T> promise) {
   if constexpr (std::is_void_v<T>) {
     promise = promise.exclusiveJoin(hooks.makeTimeoutPromise());
   } else {
-    promise = promise.exclusiveJoin(hooks.makeTimeoutPromise()
-        .then([]() -> T { KJ_UNREACHABLE; }));
+    promise = promise.exclusiveJoin(hooks.makeTimeoutPromise().then([]() -> T { KJ_UNREACHABLE; }));
   }
 
   hooks.outputGateLocked();
-  auto rejectIfCanceled = kj::defer([this, &fulfiller](){
+  auto rejectIfCanceled = kj::defer([this, &fulfiller]() {
     hooks.outputGateReleased();
     if (fulfiller->isWaiting()) {
       auto e = makeUnfulfilledException();

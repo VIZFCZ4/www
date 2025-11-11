@@ -2,7 +2,10 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-import assert from "assert";
+// TODO(soon): Fallthrough have false positives here. Investigate this.
+/* eslint-disable no-fallthrough */
+
+import assert from 'node:assert';
 import {
   Constant,
   Member,
@@ -11,33 +14,35 @@ import {
   Method,
   Property,
   Structure,
-} from "@workerd/jsg/rtti.capnp.js";
-import ts, { factory as f } from "typescript";
-import { printNode } from "../print";
+} from '@workerd/jsg/rtti';
+import ts, { factory as f } from 'typescript';
+import { printNode } from '../print';
 import {
   createParamDeclarationNodes,
   createTypeNode,
   getTypeName,
   isUnsatisfiable,
   maybeUnwrapOptional,
-} from "./type";
+} from './type';
 
-function createMethodPartial(
+export const FULLY_QUALIFIED_NAME_PREFIX = 'fqn$';
+
+export function createMethodPartial(
   fullyQualifiedParentName: string,
   method: Method
 ): [ts.Modifier[], string, ts.ParameterDeclaration[], ts.TypeNode] {
   const modifiers: ts.Modifier[] = [];
-  if (method.getStatic()) {
+  if (method.static) {
     modifiers.push(f.createToken(ts.SyntaxKind.StaticKeyword));
   }
-  const name = method.getName();
+  const name = method.name;
   const params = createParamDeclarationNodes(
     fullyQualifiedParentName,
     name,
-    method.getArgs().toArray(),
+    method.args.toArray(),
     /* forMethod */ true
   );
-  const result = createTypeNode(method.getReturnType());
+  const result = createTypeNode(method.returnType);
   return [modifiers, name, params, result];
 }
 
@@ -51,8 +56,8 @@ function createIteratorMethodPartial(
     method
   );
   const symbolIteratorExpression = f.createPropertyAccessExpression(
-    f.createIdentifier("Symbol"),
-    isAsync ? "asyncIterator" : "iterator"
+    f.createIdentifier('Symbol'),
+    isAsync ? 'asyncIterator' : 'iterator'
   );
   const name = f.createComputedPropertyName(symbolIteratorExpression);
   return [modifiers, name, params, result];
@@ -61,13 +66,13 @@ function createIteratorMethodPartial(
 function createInstancePropertyPartial(
   prop: Property
 ): [ts.Modifier[], string, ts.QuestionToken | undefined, ts.TypeNode] {
-  assert(!prop.getPrototype());
+  assert(!prop.prototype);
   const modifiers: ts.Modifier[] = [];
-  if (prop.getReadonly()) {
+  if (prop.readonly) {
     modifiers.push(f.createToken(ts.SyntaxKind.ReadonlyKeyword));
   }
-  const name = prop.getName();
-  let value = createTypeNode(prop.getType());
+  const name = prop.name;
+  let value = createTypeNode(prop.type);
 
   // If this is an optional type, use an optional property with a `?`
   let questionToken: ts.QuestionToken | undefined;
@@ -85,9 +90,9 @@ function createPrototypeProperty(
 ):
   | ts.GetAccessorDeclaration
   | [ts.GetAccessorDeclaration, ts.SetAccessorDeclaration] {
-  assert(prop.getPrototype());
-  const name = prop.getName();
-  const value = createTypeNode(prop.getType());
+  assert(prop.prototype);
+  const name = prop.name;
+  const value = createTypeNode(prop.type);
 
   const getter = f.createGetAccessorDeclaration(
     /* modifiers */ undefined,
@@ -97,13 +102,13 @@ function createPrototypeProperty(
     /* body */ undefined
   );
 
-  if (prop.getReadonly()) {
+  if (prop.readonly) {
     return getter;
   } else {
     const param = f.createParameterDeclaration(
       /* modifiers */ undefined,
       /* dotDotToken */ undefined,
-      "value",
+      'value',
       /* questionToken */ undefined,
       value
     );
@@ -111,15 +116,15 @@ function createPrototypeProperty(
       /* modifiers */ undefined,
       name,
       [param],
-      undefined
+      /* body */ undefined
     );
     return [getter, setter];
   }
 }
 
 function createNestedPartial(nested: Member_Nested): [string, ts.TypeNode] {
-  const name = nested.getName();
-  const targetName = getTypeName(nested.getStructure());
+  const name = nested.name;
+  const targetName = getTypeName(nested.structure);
   const value = f.createTypeQueryNode(f.createIdentifier(targetName));
   // Custom `name` will be empty string if omitted, so `??` wouldn't work here
   return [name || targetName, value];
@@ -132,11 +137,11 @@ function createConstantPartial(
     f.createToken(ts.SyntaxKind.StaticKeyword),
     f.createToken(ts.SyntaxKind.ReadonlyKeyword),
   ];
-  const name = constant.getName();
+  const name = constant.name;
   // Rather than using the constant value as a literal type here, just type them
   // as `number` to encourage people to use them as constants. This is also what
   // TypeScript does in its official lib types.
-  const valueNode = f.createTypeReferenceNode("number");
+  const valueNode = f.createTypeReferenceNode('number');
   return [modifiers, name, valueNode];
 }
 
@@ -150,10 +155,11 @@ function createInterfaceMemberNode(
   let result: ts.TypeNode;
   let questionToken: ts.QuestionToken | undefined;
 
+  const which = member.which();
   // noinspection FallThroughInSwitchStatementJS
-  switch (member.which()) {
-    case Member_Which.METHOD:
-      const method = member.getMethod();
+  switch (which) {
+    case Member_Which.METHOD: {
+      const method = member.method;
       [modifiers, name, params, result] = createMethodPartial(
         fullyQualifiedInterfaceName,
         method
@@ -166,9 +172,10 @@ function createInterfaceMemberNode(
         params,
         result
       );
-    case Member_Which.PROPERTY:
-      const prop = member.getProperty();
-      if (prop.getPrototype()) {
+    }
+    case Member_Which.PROPERTY: {
+      const prop = member.property;
+      if (prop.prototype) {
         return createPrototypeProperty(prop);
       } else {
         [modifiers, name, questionToken, result] =
@@ -180,8 +187,9 @@ function createInterfaceMemberNode(
           result
         );
       }
-    case Member_Which.NESTED:
-      const nested = member.getNested();
+    }
+    case Member_Which.NESTED: {
+      const nested = member.nested;
       [name, result] = createNestedPartial(nested);
       return f.createPropertySignature(
         /* modifiers */ undefined,
@@ -189,12 +197,23 @@ function createInterfaceMemberNode(
         /* questionToken */ undefined,
         result
       );
-    case Member_Which.CONSTANT:
-      assert.fail("Unexpected constant inside interface");
-    case Member_Which.CONSTRUCTOR:
-      assert.fail("Unexpected constructor member inside interface");
-    default:
-      assert.fail(`Unknown member: ${member.which()}`);
+    }
+    case Member_Which.CONSTANT: {
+      const constant = member.constant;
+      [modifiers, name, result] = createConstantPartial(constant);
+      return f.createPropertySignature(
+        [f.createToken(ts.SyntaxKind.ReadonlyKeyword)],
+        name,
+        /* questionToken */ undefined,
+        result
+      );
+    }
+    case Member_Which.CONSTRUCTOR: {
+      assert.fail('Unexpected constructor member inside interface');
+    }
+    default: {
+      assert.fail(`Unknown member: ${which satisfies never}`);
+    }
   }
 }
 
@@ -228,9 +247,10 @@ function createClassMemberNode(
   let result: ts.TypeNode;
   let questionToken: ts.QuestionToken | undefined;
 
-  switch (member.which()) {
-    case Member_Which.METHOD:
-      const method = member.getMethod();
+  const which = member.which();
+  switch (which) {
+    case Member_Which.METHOD: {
+      const method = member.method;
       [modifiers, name, params, result] = createMethodPartial(
         fullyQualifiedClassName,
         method
@@ -245,9 +265,10 @@ function createClassMemberNode(
         result,
         /* body */ undefined
       );
-    case Member_Which.PROPERTY:
-      const prop = member.getProperty();
-      if (prop.getPrototype()) {
+    }
+    case Member_Which.PROPERTY: {
+      const prop = member.property;
+      if (prop.prototype) {
         return createPrototypeProperty(prop);
       } else {
         [modifiers, name, questionToken, result] =
@@ -257,35 +278,38 @@ function createClassMemberNode(
           name,
           questionToken,
           result,
-          /* initialiser */ undefined
+          /* initializer */ undefined
         );
       }
-    case Member_Which.NESTED:
-      const nested = member.getNested();
+    }
+    case Member_Which.NESTED: {
+      const nested = member.nested;
       [name, result] = createNestedPartial(nested);
       return f.createPropertyDeclaration(
         /* modifiers */ undefined,
         name,
         /* questionToken */ undefined,
         result,
-        /* initialiser */ undefined
+        /* initializer */ undefined
       );
-    case Member_Which.CONSTANT:
-      const constant = member.getConstant();
+    }
+    case Member_Which.CONSTANT: {
+      const constant = member.constant;
       [modifiers, name, result] = createConstantPartial(constant);
       return f.createPropertyDeclaration(
         modifiers,
         name,
         /* questionToken */ undefined,
         result,
-        /* initialiser */ undefined
+        /* initializer */ undefined
       );
-    case Member_Which.CONSTRUCTOR:
-      const constructor = member.getConstructor();
+    }
+    case Member_Which.CONSTRUCTOR: {
+      const constructor = member.$constructor;
       params = createParamDeclarationNodes(
         fullyQualifiedClassName,
-        "constructor",
-        constructor.getArgs().toArray(),
+        'constructor',
+        constructor.args.toArray(),
         /* forMethod */ true
       );
       return f.createConstructorDeclaration(
@@ -293,8 +317,9 @@ function createClassMemberNode(
         params,
         /* body */ undefined
       );
+    }
     default:
-      assert.fail(`Unknown member: ${member.which()}`);
+      assert.fail(`Unknown member: ${which satisfies never}`);
   }
 }
 
@@ -342,14 +367,22 @@ function filterUnimplementedProperties<
   });
 }
 
-export function createStructureNode(structure: Structure, asClass: boolean) {
-  const modifiers: ts.Modifier[] = [f.createToken(ts.SyntaxKind.ExportKeyword)];
+export interface CreateStructureNodeOptions {
+  asClass: boolean;
+  ambientContext?: boolean;
+}
+export function createStructureNode(
+  structure: Structure,
+  opts: CreateStructureNodeOptions
+): ts.InterfaceDeclaration | ts.ClassDeclaration {
+  const { asClass, ambientContext = false } = opts;
+  const modifiers: ts.Modifier[] = [];
   const name = getTypeName(structure);
-  const fullyQualifiedName = structure.getFullyQualifiedName();
+  const fullyQualifiedName = structure.fullyQualifiedName;
 
   const heritage: ts.HeritageClause[] = [];
-  if (structure.hasExtends()) {
-    const typeNode = createTypeNode(structure.getExtends());
+  if (structure._hasExtends()) {
+    const typeNode = createTypeNode(structure.extends);
     assert(
       ts.isTypeReferenceNode(typeNode) && ts.isIdentifier(typeNode.typeName),
       `Expected type reference, got "${printNode(typeNode)}"`
@@ -361,9 +394,13 @@ export function createStructureNode(structure: Structure, asClass: boolean) {
     heritage.push(f.createHeritageClause(ts.SyntaxKind.ExtendsKeyword, [expr]));
   }
 
-  const members = structure.getMembers();
+  const members = structure.members;
   if (asClass) {
-    modifiers.push(f.createToken(ts.SyntaxKind.DeclareKeyword));
+    // Should only add `declare` if we're not already in an ambient context
+    if (!ambientContext) {
+      modifiers.push(f.createToken(ts.SyntaxKind.DeclareKeyword));
+    }
+
     // Can't use `flatMap()` here as `members` is a `capnp.List`
     const classMembers = members
       .map((member) => createClassMemberNode(fullyQualifiedName, member))
@@ -383,14 +420,14 @@ export function createStructureNode(structure: Structure, asClass: boolean) {
     }
 
     // Add iterator members
-    if (structure.hasIterator()) {
-      const iterator = structure.getIterator();
+    if (structure._hasIterator()) {
+      const iterator = structure.iterator;
       classMembers.push(
         createIteratorClassMemberNode(fullyQualifiedName, iterator, false)
       );
     }
-    if (structure.hasAsyncIterator()) {
-      const iterator = structure.getAsyncIterator();
+    if (structure._hasAsyncIterator()) {
+      const iterator = structure.asyncIterator;
       classMembers.push(
         createIteratorClassMemberNode(fullyQualifiedName, iterator, true)
       );
@@ -410,14 +447,14 @@ export function createStructureNode(structure: Structure, asClass: boolean) {
       .flat();
 
     // Add iterator members
-    if (structure.hasIterator()) {
-      const iterator = structure.getIterator();
+    if (structure._hasIterator()) {
+      const iterator = structure.iterator;
       interfaceMembers.push(
         createIteratorInterfaceMemberNode(fullyQualifiedName, iterator, false)
       );
     }
-    if (structure.hasAsyncIterator()) {
-      const iterator = structure.getAsyncIterator();
+    if (structure._hasAsyncIterator()) {
+      const iterator = structure.asyncIterator;
       interfaceMembers.push(
         createIteratorInterfaceMemberNode(fullyQualifiedName, iterator, true)
       );

@@ -12,7 +12,7 @@ namespace workerd::api {
 class ReadableStreamDefaultReader;
 class ReadableStreamBYOBReader;
 
-class ReaderImpl {
+class ReaderImpl final {
 public:
   ReaderImpl(ReadableStreamController::Reader& reader);
 
@@ -42,9 +42,9 @@ public:
 private:
   struct Initial {};
   // While a Reader is attached to a ReadableStream, it holds a strong reference to the
-  // ReadableStream to prevent it from being GC'd so long as the Reader is available.
-  // Once the reader is closed, released, or GC'd the reference to the ReadableStream
-  // is cleared and the ReadableStream can be GC'd if there are no other references to
+  // ReadableStream to prevent it from being GC'ed so long as the Reader is available.
+  // Once the reader is closed, released, or GC'ed the reference to the ReadableStream
+  // is cleared and the ReadableStream can be GC'ed if there are no other references to
   // it being held anywhere. If the reader is still attached to the ReadableStream when
   // it is destroyed, the ReadableStream's reference to the reader is cleared but the
   // ReadableStream remains in the "reader locked" state, per the spec.
@@ -135,7 +135,7 @@ public:
 
   // Non-standard extension so that reads can specify a minimum number of bytes to read. It's a
   // struct so that we could eventually add things like timeouts if we need to. Since there's no
-  // existing spec that's a leading contendor, this is behind a different method name to avoid
+  // existing spec that's a leading contender, this is behind a different method name to avoid
   // conflicts with any changes to `read`. Fewer than `minBytes` may be returned if EOF is hit or
   // the underlying stream is closed/errors out. In all cases the read result is either
   // {value: theChunk, done: false} or {value: undefined, done: true} as with read.
@@ -203,7 +203,7 @@ private:
   static jsg::Promise<void> returnFunction(
       jsg::Lock& js,
       AsyncIteratorState& state,
-      jsg::Optional<jsg::Value> value);
+      jsg::Optional<jsg::Value>& value);
 
 public:
   explicit ReadableStream(IoContext& ioContext,
@@ -360,7 +360,7 @@ public:
     });
   }
 
-  // Detaches this ReadableStream from it's underlying controller state, returning a
+  // Detaches this ReadableStream from its underlying controller state, returning a
   // new ReadableStream instance that takes over the underlying state. This is used to
   // support the "create a proxy" of a ReadableStream algorithm in the streams spec
   // (see https://streams.spec.whatwg.org/#readablestream-create-a-proxy). In that
@@ -382,7 +382,7 @@ public:
                                           kj::Own<WritableStreamSink> sink,
                                           bool end);
 
-  // Initialises signalling mechanism for EOF detection. Returns a promise that will resolve when
+  // Initializes signalling mechanism for EOF detection. Returns a promise that will resolve when
   // EOF is reached.
   //
   // This method should only be called once.
@@ -424,8 +424,8 @@ class ByteLengthQueuingStrategy: public jsg::Object {
 public:
   ByteLengthQueuingStrategy(QueuingStrategyInit init) : init(init) {}
 
-  static jsg::Ref<ByteLengthQueuingStrategy> constructor(QueuingStrategyInit init) {
-    return jsg::alloc<ByteLengthQueuingStrategy>(init);
+  static jsg::Ref<ByteLengthQueuingStrategy> constructor(jsg::Lock& js, QueuingStrategyInit init) {
+    return js.alloc<ByteLengthQueuingStrategy>(init);
   }
 
   double getHighWaterMark() const { return init.highWaterMark; }
@@ -454,8 +454,8 @@ class CountQueuingStrategy: public jsg::Object {
 public:
   CountQueuingStrategy(QueuingStrategyInit init) : init(init) {}
 
-  static jsg::Ref<CountQueuingStrategy> constructor(QueuingStrategyInit init) {
-    return jsg::alloc<CountQueuingStrategy>(init);
+  static jsg::Ref<CountQueuingStrategy> constructor(jsg::Lock& js, QueuingStrategyInit init) {
+    return js.alloc<CountQueuingStrategy>(init);
   }
 
   double getHighWaterMark() const { return init.highWaterMark; }

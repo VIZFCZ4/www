@@ -2,10 +2,14 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include "jsg-test.h"
 #include <workerd/jsg/memory.h>
+#include <workerd/jsg/setup.h>
+#include <workerd/jsg/type-wrapper.h>
+
 #include <v8-profiler.h>
+
 #include <kj/map.h>
+#include <kj/test.h>
 
 namespace workerd::jsg::test {
 namespace {
@@ -30,16 +34,12 @@ JSG_DECLARE_ISOLATE_TYPE(MemoryTrackerIsolate, MemoryTrackerContext, Foo);
 void runTest(auto callback) {
   MemoryTrackerIsolate isolate(v8System, kj::heap<jsg::IsolateObserver>());
   isolate.runInLockScope([&](MemoryTrackerIsolate::Lock& lock) {
-    JSG_WITHIN_CONTEXT_SCOPE(lock,
-        lock.newContext<MemoryTrackerContext>().getHandle(lock),
-        [&](jsg::Lock& js) {
-      callback(js, lock.getTypeHandler<Ref<Foo>>());
-    });
+    JSG_WITHIN_CONTEXT_SCOPE(lock, lock.newContext<MemoryTrackerContext>().getHandle(lock),
+        [&](jsg::Lock& js) { callback(js, lock.getTypeHandler<Ref<Foo>>()); });
   });
 }
 
 KJ_TEST("MemoryTracker test") {
-
   // Verifies that workerd details are included in the heapsnapshot.
   // This is not a comprehensive test of the heapsnapshot content,
   // it is designed just to make sure that we are, in fact, publishing
@@ -47,9 +47,7 @@ KJ_TEST("MemoryTracker test") {
 
   runTest([&](jsg::Lock& js, const TypeHandler<Ref<Foo>>& fooHandler) {
     kj::Vector<char> serialized;
-    HeapSnapshotActivity activity([](auto, auto) {
-      return true;
-    });
+    HeapSnapshotActivity activity([](auto, auto) { return true; });
     HeapSnapshotWriter writer([&](kj::Maybe<kj::ArrayPtr<char>> maybeChunk) {
       KJ_IF_SOME(chunk, maybeChunk) {
         serialized.addAll(chunk);
@@ -57,10 +55,7 @@ KJ_TEST("MemoryTracker test") {
       return true;
     });
 
-    IsolateBase& base = IsolateBase::from(js.v8Isolate);
-    base.getUuid();
-
-    auto foo = fooHandler.wrap(js, alloc<Foo>());
+    auto foo = fooHandler.wrap(js, js.alloc<Foo>());
     KJ_ASSERT(foo->IsObject());
 
     auto profiler = js.v8Isolate->GetHeapProfiler();
@@ -68,8 +63,7 @@ KJ_TEST("MemoryTracker test") {
     HeapSnapshotDeleter deleter;
 
     auto snapshot = kj::Own<const v8::HeapSnapshot>(
-      profiler->TakeHeapSnapshot(&activity, nullptr, true, true),
-      deleter);
+        profiler->TakeHeapSnapshot(&activity, nullptr, true, true), deleter);
     snapshot->Serialize(&writer, v8::HeapSnapshot::kJSON);
 
     auto parsed = js.parseJson(serialized.asPtr());

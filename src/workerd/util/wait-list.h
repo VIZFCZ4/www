@@ -4,10 +4,10 @@
 
 #pragma once
 
-#include <kj/mutex.h>
 #include <kj/async.h>
 #include <kj/list.h>
 #include <kj/map.h>
+#include <kj/mutex.h>
 
 namespace workerd {
 
@@ -22,7 +22,7 @@ using kj::uint;
 //   turns out to be most convenient. But if you want a separate fulfiller, you can call the
 //   `makeSeparateFulfiller()` method.
 class CrossThreadWaitList {
-public:
+ public:
   struct Options {
     // Enable this if it is common for there to be multiple waiters in the same thread. This avoids
     // sending multiple cross-thread signals in this case, instead sending one signal that all
@@ -41,9 +41,12 @@ public:
   kj::Promise<void> addWaiter() const;
 
   // Wake all current *and future* waiters.
-  void fulfill() const { KJ_IREQUIRE(!createdFulfiller); state->fulfill(); }
+  void fulfill() const {
+    KJ_IREQUIRE(!createdFulfiller);
+    state->fulfill();
+  }
 
-    // Causes all past and future `addWaiter()` calls to reject with the given exception.
+  // Causes all past and future `addWaiter()` calls to reject with the given exception.
   void reject(kj::Exception&& e) const {
     KJ_IREQUIRE(!createdFulfiller);
     state->reject(kj::mv(e));
@@ -51,7 +54,9 @@ public:
 
   // Has `fulfill()` or `reject()` been called? Of course, the caller should consider if
   // `fulfill()` might be called in another thread concurrently.
-  bool isDone() const { return __atomic_load_n(&state->done, __ATOMIC_ACQUIRE); }
+  bool isDone() const {
+    return __atomic_load_n(&state->done, __ATOMIC_ACQUIRE);
+  }
 
   // Creates a PromiseFulfiller that will fulfill this wait list. Once this is called, it is no
   // longer the CrossThreadWaitList's responsibility to fulfill the waiters.
@@ -63,15 +68,15 @@ public:
   // explicitly.
   kj::Own<kj::CrossThreadPromiseFulfiller<void>> makeSeparateFulfiller();
 
-private:
+ private:
   // Forward declare our private structs so we can name the Map for public use in the source file.
   struct State;
   struct Waiter;
 
-public:
+ public:
   using WaiterMap = kj::HashMap<const CrossThreadWaitList::State*, Waiter*>;
 
-private:
+ private:
   struct Waiter: public kj::Refcounted {
     Waiter(const State& state, kj::Own<kj::CrossThreadPromiseFulfiller<void>> fulfiller);
     ~Waiter() noexcept(false);

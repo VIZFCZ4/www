@@ -4,6 +4,7 @@
 #pragma once
 
 #include "jsg.h"
+
 #include <v8.h>
 
 namespace workerd::jsg {
@@ -65,11 +66,11 @@ namespace workerd::jsg {
 // AsyncContextFrame::StorageKey is used to define a storage cell within the storage
 // context.
 class AsyncContextFrame final: public Wrappable {
-public:
+ public:
   // An opaque key that identifies an async-local storage cell within the frame.
   class StorageKey: public kj::Refcounted {
-  public:
-    StorageKey() : hash(kj::hashCode(this)) {}
+   public:
+    StorageKey(): hash(kj::hashCode(this)) {}
     KJ_DISALLOW_COPY_AND_MOVE(StorageKey);
 
     // The owner of the key should reset it when it goes away.
@@ -80,19 +81,25 @@ public:
     // the frame lazily. The lazy cleanup does mean that values may persist in
     // memory a bit longer so if it proves to be problematic we can make the cleanup
     // a bit more proactive.
-    void reset() { dead = true; }
+    void reset() {
+      dead = true;
+    }
     // TODO(later): We should also evaluate the relatively unlikely case where an
     // ALS is capturing a reference to itself and therefore can never be cleaned up.
 
-    bool isDead() const { return dead; }
-    inline uint hashCode() const { return hash; }
+    bool isDead() const {
+      return dead;
+    }
+    inline uint hashCode() const {
+      return hash;
+    }
     inline bool operator==(const StorageKey& other) const {
       return this == &other;
     }
 
     JSG_MEMORY_INFO(StorageKey) {}
 
-  private:
+   private:
     uint hash;
     bool dead = false;
   };
@@ -111,7 +118,9 @@ public:
 
   AsyncContextFrame(Lock& js, StorageEntry storageEntry);
 
-  inline Ref<AsyncContextFrame> addRef() { return JSG_THIS; }
+  inline Ref<AsyncContextFrame> addRef() {
+    return JSG_THIS;
+  }
 
   // Returns the reference to the AsyncContextFrame currently at the top of the stack, if any.
   static kj::Maybe<AsyncContextFrame&> current(Lock& js);
@@ -130,26 +139,29 @@ public:
   // Wraps the given JavaScript function such that whenever the wrapper function is called,
   // the root AsyncContextFrame will be entered.
   static v8::Local<v8::Function> wrapRoot(
-      Lock& js, v8::Local<v8::Function> fn,
-      kj::Maybe<v8::Local<v8::Value>> thisArg = kj::none);
+      Lock& js, v8::Local<v8::Function> fn, kj::Maybe<v8::Local<v8::Value>> thisArg = kj::none);
 
   // Returns a function that captures the current frame and calls the function passed
   // in as an argument within that captured context. Equivalent to wrapping a function
   // with the signature (cb, ...args) => cb(...args).
-  static v8::Local<v8::Function> wrapSnapshot(Lock& js);
+  // The validate function is called to ensure that the current frame is still valid.
+  // If the validate function throws, the wrapper will throw.
+  static v8::Local<v8::Function> wrapSnapshot(Lock& js, jsg::Function<void()> validate);
 
   // Associates the given JavaScript function with this AsyncContextFrame, returning
   // a wrapper function that will ensure appropriate propagation of the async context
   // when the wrapper function is called.
-  v8::Local<v8::Function> wrap(
-      Lock& js, V8Ref<v8::Function>& fn,
+  v8::Local<v8::Function> wrap(Lock& js,
+      V8Ref<v8::Function>& fn,
+      jsg::Function<void()> validate,
       kj::Maybe<v8::Local<v8::Value>> thisArg = kj::none);
 
   // Associates the given JavaScript function with this AsyncContextFrame, returning
   // a wrapper function that will ensure appropriate propagation of the async context
   // when the wrapper function is called.
-  v8::Local<v8::Function> wrap(
-      Lock& js, v8::Local<v8::Function> fn,
+  v8::Local<v8::Function> wrap(Lock& js,
+      v8::Local<v8::Function> fn,
+      jsg::Function<void()> validate,
       kj::Maybe<v8::Local<v8::Value>> thisArg = kj::none);
 
   // AsyncContextFrame::Scope makes the given AsyncContextFrame the current in the
@@ -191,14 +203,18 @@ public:
     KJ_DISALLOW_COPY(StorageScope);
   };
 
-  kj::StringPtr jsgGetMemoryName() const override { return "AsyncContextFrame"_kjc; }
-  size_t jsgGetMemorySelfSize() const override { return sizeof(AsyncContextFrame); }
+  kj::StringPtr jsgGetMemoryName() const override {
+    return "AsyncContextFrame"_kjc;
+  }
+  size_t jsgGetMemorySelfSize() const override {
+    return sizeof(AsyncContextFrame);
+  }
   void jsgGetMemoryInfo(MemoryTracker& tracker) const override {
     Wrappable::jsgGetMemoryInfo(tracker);
     tracker.trackField("storage", storage);
   }
 
-private:
+ private:
   struct StorageEntryCallbacks {
     StorageKey& keyForRow(StorageEntry& entry) const {
       return *entry.key;

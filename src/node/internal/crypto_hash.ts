@@ -23,9 +23,6 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-/* todo: the following is adopted code, enabling linting one day */
-/* eslint-disable */
-
 import { default as cryptoImpl } from 'node-internal:crypto';
 type ArrayLike = cryptoImpl.ArrayLike;
 
@@ -37,9 +34,7 @@ import {
   getStringOption,
 } from 'node-internal:crypto_util';
 
-import {
-  Buffer
-} from 'node-internal:internal_buffer';
+import { Buffer } from 'node-internal:internal_buffer';
 
 import {
   ERR_CRYPTO_HASH_FINALIZED,
@@ -48,15 +43,7 @@ import {
   ERR_INVALID_ARG_TYPE,
 } from 'node-internal:internal_errors';
 
-import {
-  validateEncoding,
-  validateString,
-  validateUint32,
-} from 'node-internal:validators';
-
-import {
-  normalizeEncoding
-} from 'node-internal:internal_utils';
+import { validateString, validateUint32 } from 'node-internal:validators';
 
 import {
   isArrayBufferView,
@@ -66,13 +53,11 @@ import {
 
 import {
   Transform,
-  TransformOptions,
-  TransformCallback,
+  type TransformOptions,
+  type TransformCallback,
 } from 'node-internal:streams_transform';
 
-import {
-  KeyObject,
-} from 'node-internal:crypto_keys';
+import { KeyObject } from 'node-internal:crypto_keys';
 
 export interface HashOptions extends TransformOptions {
   outputLength?: number;
@@ -82,9 +67,18 @@ interface _kState {
   [kFinalized]: boolean;
 }
 
-interface Hash extends Transform {
+declare class Hash extends Transform {
   [kHandle]: cryptoImpl.HashHandle;
   [kState]: _kState;
+
+  constructor(algorithm: string | cryptoImpl.HashHandle, options?: HashOptions);
+
+  copy(options?: HashOptions): Hash;
+  update(
+    data: string | Buffer | ArrayBufferView,
+    encoding?: string
+  ): Hash | Hmac;
+  digest(outputEncoding?: string): Buffer | string;
 }
 
 // These helper functions are needed because the constructors can
@@ -93,14 +87,17 @@ export function createHash(algorithm: string, options?: HashOptions): Hash {
   return new Hash(algorithm, options);
 }
 
-let Hash = function(this: Hash, algorithm: string | cryptoImpl.HashHandle,
-  options?: HashOptions): Hash {
-  if (!(this instanceof Hash))
+function Hash(
+  this: unknown,
+  algorithm: string | cryptoImpl.HashHandle,
+  options?: HashOptions
+): Hash {
+  if (!(this instanceof Hash)) {
     return new Hash(algorithm, options);
+  }
 
   const xofLen = typeof options === 'object' ? options.outputLength : undefined;
-  if (xofLen !== undefined)
-    validateUint32(xofLen, 'options.outputLength');
+  if (xofLen !== undefined) validateUint32(xofLen, 'options.outputLength');
   if (algorithm instanceof cryptoImpl.HashHandle) {
     this[kHandle] = algorithm.copy(xofLen as number);
   } else {
@@ -113,65 +110,72 @@ let Hash = function(this: Hash, algorithm: string | cryptoImpl.HashHandle,
 
   Transform.call(this, options);
   return this;
-} as any as { new (algorithm: string | cryptoImpl.HashHandle, options?: HashOptions): Hash; };
+}
 
 Object.setPrototypeOf(Hash.prototype, Transform.prototype);
 Object.setPrototypeOf(Hash, Transform);
 
-Hash.prototype.copy = function(this: Hash, options?: HashOptions): Hash {
+Hash.prototype.copy = function (this: Hash, options?: HashOptions): Hash {
   const state = this[kState];
-  if (state[kFinalized])
-    throw new ERR_CRYPTO_HASH_FINALIZED();
+  if (state[kFinalized]) throw new ERR_CRYPTO_HASH_FINALIZED();
 
   return new Hash(this[kHandle], options);
-}
+};
 
-Hash.prototype._transform = function(this: Hash | Hmac, chunk: string | Buffer | ArrayBufferView,
-                                     encoding: string, callback: TransformCallback): void {
+Hash.prototype._transform = function (
+  this: Hash | Hmac,
+  chunk: string | Buffer | ArrayBufferView,
+  encoding: string,
+  callback: TransformCallback
+): void {
   if (typeof chunk === 'string') {
-    encoding ??= 'utf-8';
-    validateEncoding(chunk, encoding);
-    encoding = normalizeEncoding(encoding)!;
     chunk = Buffer.from(chunk, encoding);
   }
   this[kHandle].update(chunk);
   callback();
-}
+};
 
-Hash.prototype._flush = function(this: Hash | Hmac, callback: TransformCallback): void {
+Hash.prototype._flush = function (
+  this: Hash | Hmac,
+  callback: TransformCallback
+): void {
   this.push(Buffer.from(this[kHandle].digest()));
   callback();
-}
+};
 
-Hash.prototype.update = function(this: Hash | Hmac, data: string | Buffer | ArrayBufferView,
-                                 encoding?: string): Hash | Hmac {
+Hash.prototype.update = function (
+  this: Hash | Hmac,
+  data: string | Buffer | ArrayBufferView,
+  encoding?: string
+): Hash | Hmac {
   encoding ??= 'utf8';
   if (encoding === 'buffer') {
     encoding = undefined;
   }
 
   const state = this[kState];
-  if (state[kFinalized])
-    throw new ERR_CRYPTO_HASH_FINALIZED();
+  if (state[kFinalized]) throw new ERR_CRYPTO_HASH_FINALIZED();
 
   if (typeof data === 'string') {
-    validateEncoding(data, encoding!);
-    encoding = normalizeEncoding(encoding);
     data = Buffer.from(data, encoding);
   } else if (!isArrayBufferView(data)) {
     throw new ERR_INVALID_ARG_TYPE(
-      'data', ['string', 'Buffer', 'TypedArray', 'DataView'], data);
+      'data',
+      ['string', 'Buffer', 'TypedArray', 'DataView'],
+      data
+    );
   }
 
-  if (!this[kHandle].update(data))
-    throw new ERR_CRYPTO_HASH_UPDATE_FAILED();
+  if (!this[kHandle].update(data)) throw new ERR_CRYPTO_HASH_UPDATE_FAILED();
   return this;
-}
+};
 
-Hash.prototype.digest = function(this: Hash, outputEncoding?: string): Buffer | string {
+Hash.prototype.digest = function (
+  this: Hash,
+  outputEncoding?: string
+): Buffer | string {
   const state = this[kState];
-  if (state[kFinalized])
-    throw new ERR_CRYPTO_HASH_FINALIZED();
+  if (state[kFinalized]) throw new ERR_CRYPTO_HASH_FINALIZED();
 
   // Explicit conversion for backward compatibility.
   const ret = Buffer.from(this[kHandle].digest());
@@ -181,22 +185,40 @@ Hash.prototype.digest = function(this: Hash, outputEncoding?: string): Buffer | 
   } else {
     return ret;
   }
-}
+};
 
 ///////////////////////////
 
-interface Hmac extends Transform {
+declare class Hmac extends Transform {
   [kHandle]: cryptoImpl.HmacHandle;
   [kState]: _kState;
+  constructor(
+    hmac: string,
+    key: ArrayLike | KeyObject | CryptoKey,
+    options?: TransformOptions
+  );
+  copy(options?: HashOptions): Hash;
+  update(
+    data: string | Buffer | ArrayBufferView,
+    encoding?: string
+  ): Hash | Hmac;
+  digest(outputEncoding?: string): Buffer | string;
 }
 
-export function createHmac(hmac: string, key: ArrayLike | KeyObject | CryptoKey,
-                           options?: TransformOptions): Hmac {
+export function createHmac(
+  hmac: string,
+  key: CryptoKey,
+  options?: TransformOptions
+): Hmac {
   return new Hmac(hmac, key, options);
 }
 
-let Hmac = function(this: Hmac, hmac: string, key: ArrayLike | KeyObject | cryptoImpl.CryptoKey,
-                    options?: TransformOptions): Hmac {
+function Hmac(
+  this: Hmac,
+  hmac: string,
+  key: CryptoKey,
+  options?: TransformOptions
+): Hmac {
   if (!(this instanceof Hmac)) {
     return new Hmac(hmac, key, options);
   }
@@ -209,20 +231,32 @@ let Hmac = function(this: Hmac, hmac: string, key: ArrayLike | KeyObject | crypt
     }
     this[kHandle] = new cryptoImpl.HmacHandle(hmac, key[kHandle]);
   } else if (isCryptoKey(key)) {
-    if ((key as cryptoImpl.CryptoKey).type !== 'secret') {
-      throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE((key as cryptoImpl.CryptoKey).type, 'secret');
+    if (key.type !== 'secret') {
+      throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(key.type, 'secret');
     }
     this[kHandle] = new cryptoImpl.HmacHandle(hmac, key);
-  } else if (typeof key !== 'string' &&
-  !isArrayBufferView(key) &&
-  !isAnyArrayBuffer(key)) {
+  } else if (
+    typeof key !== 'string' &&
+    !isArrayBufferView(key) &&
+    !isAnyArrayBuffer(key)
+  ) {
     throw new ERR_INVALID_ARG_TYPE(
       'key',
-      [ 'ArrayBuffer', 'Buffer', 'ArrayBufferView', 'string', 'KeyObject', 'CryptoKey'],
-      key);
+      [
+        'ArrayBuffer',
+        'Buffer',
+        'ArrayBufferView',
+        'string',
+        'KeyObject',
+        'CryptoKey',
+      ],
+      key
+    );
   } else {
-    this[kHandle] = new cryptoImpl.HmacHandle(hmac, getArrayBufferOrView(key as ArrayLike,
-                                              'key', encoding));
+    this[kHandle] = new cryptoImpl.HmacHandle(
+      hmac,
+      getArrayBufferOrView(key, 'key', encoding)
+    );
   }
 
   this[kState] = {
@@ -230,19 +264,22 @@ let Hmac = function(this: Hmac, hmac: string, key: ArrayLike | KeyObject | crypt
   };
   Transform.call(this, options);
   return this;
-} as any as { new (hmac: string, key: ArrayLike | KeyObject | CryptoKey,
-                   options?: TransformOptions): Hmac; };
-
+}
 Object.setPrototypeOf(Hmac.prototype, Transform.prototype);
 Object.setPrototypeOf(Hmac, Transform);
 
+// eslint-disable-next-line @typescript-eslint/unbound-method
 Hmac.prototype.update = Hash.prototype.update;
 
-Hmac.prototype.digest = function(this: Hmac, outputEncoding?: string): Buffer | string {
+Hmac.prototype.digest = function (
+  this: Hmac,
+  outputEncoding?: string
+): Buffer | string {
   const state = this[kState];
   if (state[kFinalized]) {
-    const buf = Buffer.from('');
-    return outputEncoding === 'buffer' ? buf : buf.toString(outputEncoding);
+    return !outputEncoding || outputEncoding === 'buffer'
+      ? Buffer.from('')
+      : '';
   }
 
   // Explicit conversion for backward compatibility.
@@ -255,7 +292,34 @@ Hmac.prototype.digest = function(this: Hmac, outputEncoding?: string): Buffer | 
   }
 };
 
+// eslint-disable-next-line @typescript-eslint/unbound-method
 Hmac.prototype._flush = Hash.prototype._flush;
+// eslint-disable-next-line @typescript-eslint/unbound-method
 Hmac.prototype._transform = Hash.prototype._transform;
 
-export {Hash, Hmac};
+export function hash(
+  algorithm: string,
+  data: string | ArrayBufferView,
+  outputEncoding: string = 'hex'
+): string | Buffer {
+  validateString(algorithm, 'algorithm');
+  validateString(outputEncoding, 'outputEncoding');
+
+  if (typeof data === 'string') {
+    const hash = createHash(algorithm);
+    hash.update(data, 'utf8');
+    return hash.digest(outputEncoding);
+  } else if (isArrayBufferView(data)) {
+    const hash = createHash(algorithm);
+    hash.update(data, 'utf8');
+    return hash.digest(outputEncoding);
+  }
+
+  throw new ERR_INVALID_ARG_TYPE(
+    'data',
+    ['string', 'Buffer', 'TypedArray', 'DataView'],
+    data
+  );
+}
+
+export { Hash, Hmac };

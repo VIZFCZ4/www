@@ -2,7 +2,8 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-#include "workerd/util/string-buffer.h"
+#include "string-buffer.h"
+
 #include <kj/test.h>
 
 namespace workerd {
@@ -10,7 +11,7 @@ namespace {
 
 KJ_TEST("append StringPtr") {
   StringBuffer<100> buffer(100);
-  buffer.append(kj::StringPtr("abcdef"));
+  buffer.append("abcdef"_kj);
   KJ_EXPECT("abcdef"_kj == buffer.toString());
 }
 
@@ -38,11 +39,11 @@ KJ_TEST("overflow") {
   }
   KJ_EXPECT(buffer.toString().size() == 300);
   KJ_EXPECT(
-    "abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc"
-    "abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc"
-    "abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc"
-    "abcabcabcabcabcabcabc"_kj == buffer.toString());
+      "abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc"
+      "abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc"
+      "abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc"
+      "abcabcabcabcabcabcabc"_kj == buffer.toString());
 }
 
-} // namespace
-} // namespace workerd
+}  // namespace
+}  // namespace workerd

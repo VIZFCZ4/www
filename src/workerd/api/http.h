@@ -6,16 +6,15 @@
 
 #include <workerd/jsg/jsg.h>
 #include <workerd/jsg/async-context.h>
-#include <workerd/util/abortable.h>
 #include <kj/compat/http.h>
 #include <map>
 #include "basics.h"
 #include "cf-property.h"
-#include "streams.h"
+#include <workerd/api/streams/readable.h>
 #include "form-data.h"
 #include "web-socket.h"
-#include "url.h"
-#include "url-standard.h"
+#include <workerd/api/url.h>
+#include <workerd/api/url-standard.h>
 #include "blob.h"
 #include <workerd/io/compatibility-date.capnp.h>
 #include "worker-rpc.h"
@@ -23,9 +22,7 @@
 
 namespace workerd::api {
 
-struct QueueResponse;
-
-class Headers: public jsg::Object {
+class Headers final: public jsg::Object {
 private:
   template <typename T>
   struct IteratorState {
@@ -49,16 +46,16 @@ public:
   };
 
   Headers(): guard(Guard::NONE) {}
-  explicit Headers(jsg::Dict<jsg::ByteString, jsg::ByteString> dict);
-  explicit Headers(const Headers& other);
-  explicit Headers(const kj::HttpHeaders& other, Guard guard);
+  explicit Headers(jsg::Lock& js, jsg::Dict<jsg::ByteString, jsg::ByteString> dict);
+  explicit Headers(jsg::Lock& js, const Headers& other);
+  explicit Headers(jsg::Lock& js, const kj::HttpHeaders& other, Guard guard);
 
   Headers(Headers&&) = delete;
   Headers& operator=(Headers&&) = delete;
 
   // Make a copy of this Headers object, and preserve the guard. The normal copy constructor sets
   // the copy's guard to NONE.
-  jsg::Ref<Headers> clone() const;
+  jsg::Ref<Headers> clone(jsg::Lock& js) const;
 
   // Fill in the given HttpHeaders with these headers. Note that strings are inserted by
   // reference, so the output must be consumed immediately.
@@ -89,7 +86,9 @@ public:
                                 jsg::Dict<jsg::ByteString, jsg::ByteString>>;
 
   static jsg::Ref<Headers> constructor(jsg::Lock& js, jsg::Optional<Initializer> init);
-  kj::Maybe<jsg::ByteString> get(jsg::ByteString name);
+  kj::Maybe<jsg::ByteString> get(jsg::Lock& js, jsg::ByteString name);
+
+  kj::Maybe<jsg::ByteString> getNoChecks(jsg::Lock& js, kj::StringPtr name);
 
   // getAll is a legacy non-standard extension API that we introduced before
   // getSetCookie() was defined. We continue to support it for backwards
@@ -102,13 +101,13 @@ public:
 
   bool has(jsg::ByteString name);
 
-  void set(jsg::ByteString name, jsg::ByteString value);
+  void set(jsg::Lock& js, jsg::ByteString name, jsg::ByteString value);
 
   // Like set(), but ignores the header guard if set. This can only be called from C++, and may be
   // used to mutate headers before dispatching a request.
-  void setUnguarded(jsg::ByteString name, jsg::ByteString value);
+  void setUnguarded(jsg::Lock& js, jsg::ByteString name, jsg::ByteString value);
 
-  void append(jsg::ByteString name, jsg::ByteString value);
+  void append(jsg::Lock& js, jsg::ByteString name, jsg::ByteString value);
 
   void delete_(jsg::ByteString name);
 
@@ -256,7 +255,8 @@ public:
   // from any of the other source types, Body can create a new ReadableStream from the source, and
   // the POST will successfully retransmit.
   using Initializer = kj::OneOf<jsg::Ref<ReadableStream>, kj::String, kj::Array<byte>,
-                                jsg::Ref<Blob>, jsg::Ref<URLSearchParams>, jsg::Ref<FormData>>;
+                                jsg::Ref<Blob>, jsg::Ref<FormData>,
+                                jsg::Ref<URLSearchParams>, jsg::Ref<url::URLSearchParams>>;
 
   struct RefcountedBytes final: public kj::Refcounted {
     kj::Array<kj::byte> bytes;
@@ -297,7 +297,7 @@ public:
         : ownBytes(kj::refcounted<RefcountedBytes>(string.releaseArray().releaseAsBytes())),
           view([this] {
             auto bytesIncludingNull = ownBytes.get<kj::Own<RefcountedBytes>>()->bytes.asPtr();
-            return bytesIncludingNull.slice(0, bytesIncludingNull.size() - 1);
+            return bytesIncludingNull.first(bytesIncludingNull.size() - 1);
           }()) {}
     Buffer(jsg::Ref<Blob> blob)
         : ownBytes(kj::mv(blob)),
@@ -339,7 +339,7 @@ public:
   // https://fetch.spec.whatwg.org/#concept-bodyinit-extract
   static ExtractedBody extractBody(jsg::Lock& js, Initializer init);
 
-  explicit Body(kj::Maybe<ExtractedBody> init, Headers& headers);
+  explicit Body(jsg::Lock& js, kj::Maybe<ExtractedBody> init, Headers& headers);
 
   kj::Maybe<Buffer> getBodyBuffer(jsg::Lock& js);
 
@@ -360,7 +360,8 @@ public:
 
   kj::Maybe<jsg::Ref<ReadableStream>> getBody();
   bool getBodyUsed();
-  jsg::Promise<kj::Array<byte>> arrayBuffer(jsg::Lock& js);
+  jsg::Promise<jsg::BufferSource> arrayBuffer(jsg::Lock& js);
+  jsg::Promise<jsg::BufferSource> bytes(jsg::Lock& js);
   jsg::Promise<kj::String> text(jsg::Lock& js);
   jsg::Promise<jsg::Ref<FormData>> formData(jsg::Lock& js);
   jsg::Promise<jsg::Value> json(jsg::Lock& js);
@@ -375,6 +376,7 @@ public:
       JSG_READONLY_INSTANCE_PROPERTY(bodyUsed, getBodyUsed);
     }
     JSG_METHOD(arrayBuffer);
+    JSG_METHOD(bytes);
     JSG_METHOD(text);
     JSG_METHOD(json);
     JSG_METHOD(formData);
@@ -383,7 +385,11 @@ public:
     JSG_TS_DEFINE(type BodyInit = ReadableStream<Uint8Array> | string | ArrayBuffer | ArrayBufferView | Blob | URLSearchParams | FormData);
     // All type aliases get inlined when exporting RTTI, but this type alias is included by
     // the official TypeScript types, so users might be depending on it.
-    JSG_TS_OVERRIDE({ json<T>(): Promise<T>; });
+    JSG_TS_OVERRIDE({
+      json<T>(): Promise<T>;
+      bytes(): Promise<Uint8Array>;
+      arrayBuffer(): Promise<ArrayBuffer>;
+    });
     // Allow JSON body type to be specified
   }
 
@@ -410,6 +416,12 @@ private:
   }
 };
 
+// Controls how response bodies are encoded/decoded according to Content-Encoding headers
+enum class Response_BodyEncoding {
+  AUTO,    // Automatically encode/decode based on Content-Encoding headers
+  MANUAL   // Treat Content-Encoding headers as opaque (no automatic encoding/decoding)
+};
+
 class Request;
 class Response;
 struct RequestInitializerDict;
@@ -417,7 +429,7 @@ struct RequestInitializerDict;
 class Socket;
 struct SocketOptions;
 struct SocketAddress;
-typedef kj::OneOf<SocketAddress, kj::String> AnySocketAddress;
+using AnySocketAddress = kj::OneOf<SocketAddress, kj::String>;
 
 // Represents a client to a remote "web service".
 //
@@ -449,11 +461,30 @@ public:
   explicit Fetcher(uint channel, RequiresHostAndProtocol requiresHost, bool isInHouse = false)
       : channelOrClientFactory(channel), requiresHost(requiresHost), isInHouse(isInHouse) {}
 
+  // Create a Fetcher bound to an IoChannelFactory::SubrequestChannel object rather than a numeric
+  // channel. This Fetcher will inherently be bound to the current I/O context.
+  explicit Fetcher(IoOwn<IoChannelFactory::SubrequestChannel> subrequestChannel,
+      RequiresHostAndProtocol requiresHost = RequiresHostAndProtocol::YES,
+      bool isInHouse = false)
+      : channelOrClientFactory(kj::mv(subrequestChannel)),
+        requiresHost(requiresHost),
+        isInHouse(isInHouse) {}
+
   // Used by Fetchers that use ad-hoc, single-use WorkerInterface instances, such as ones
   // created for Actors.
+  //
+  // TODO(cleanup): Consider removing this in favor of `IoChannelFactory::SubrequestChannel`, which
+  //   is almost the same thing.
   class OutgoingFactory {
   public:
     virtual kj::Own<WorkerInterface> newSingleUseClient(kj::Maybe<kj::String> cfStr) = 0;
+
+    // Get a `SubrequestChannel` representing this Fetcher. This is used especially when the
+    // Fetcher is being passed to another isolate.
+    virtual kj::Own<IoChannelFactory::SubrequestChannel> getSubrequestChannel() {
+      // TODO(soon): Update all implementations and remove this default implementation.
+      KJ_UNIMPLEMENTED("this Fetcher doesn't yet implement getSubrequestChannel()");
+    }
   };
 
   // Used by Fetchers that obtain their HttpClient in a custom way, but which aren't tied
@@ -462,6 +493,11 @@ public:
   class CrossContextOutgoingFactory {
   public:
     virtual kj::Own<WorkerInterface> newSingleUseClient(IoContext& context, kj::Maybe<kj::String> cfStr) = 0;
+
+    virtual kj::Own<IoChannelFactory::SubrequestChannel> getSubrequestChannel(IoContext& context) {
+      // TODO(soon): Update all implementations and remove this default implementation.
+      KJ_UNIMPLEMENTED("this Fetcher doesn't yet implement getSubrequestChannel()");
+    }
   };
 
   // `outgoingFactory` is used for Fetchers that use ad-hoc WorkerInterface instances, such as ones
@@ -489,6 +525,21 @@ public:
       kj::Maybe<kj::String> cfStr,
       kj::ConstString operationName);
 
+  // Result of getClient call that includes optional trace context
+  struct ClientWithTracing {
+    kj::Own<WorkerInterface> client;
+    kj::Maybe<TraceContext> traceContext;
+  };
+
+  // Get client and optionally create trace context, all in one call
+  ClientWithTracing getClientWithTracing(
+    IoContext& ioContext,
+    kj::Maybe<kj::String> cfStr,
+    kj::ConstString operationName);
+
+  // Get a SubrequestChannel representing this Fetcher.
+  kj::Own<IoChannelFactory::SubrequestChannel> getSubrequestChannel(IoContext& ioContext);
+
   // Wraps kj::Url::parse to take into account whether the Fetcher requires a host to be
   // specified on URLs, Fetcher-specific URL decoding options, and error handling.
   kj::Url parseUrl(jsg::Lock& js, kj::StringPtr url);
@@ -500,7 +551,7 @@ public:
       jsg::Lock& js, kj::OneOf<jsg::Ref<Request>, kj::String> requestOrUrl,
       jsg::Optional<kj::OneOf<RequestInitializerDict, jsg::Ref<Request>>> requestInit);
 
-  using GetResult = kj::OneOf<jsg::Ref<ReadableStream>, kj::Array<byte>, kj::String, jsg::Value>;
+  using GetResult = kj::OneOf<jsg::Ref<ReadableStream>, jsg::BufferSource, kj::String, jsg::Value>;
 
   jsg::Promise<GetResult> get(jsg::Lock& js, kj::String url, jsg::Optional<kj::String> type);
 
@@ -567,6 +618,8 @@ public:
   jsg::Promise<ScheduledResult> scheduled(jsg::Lock& js, jsg::Optional<ScheduledOptions> options);
 
   kj::Maybe<jsg::Ref<JsRpcProperty>> getRpcMethod(jsg::Lock& js, kj::String name);
+  // Internal method for use from bindings code. It skips compatibility flags checks.
+  kj::Maybe<jsg::Ref<JsRpcProperty>> getRpcMethodInternal(jsg::Lock& js, kj::String name);
   kj::Maybe<jsg::Ref<JsRpcProperty>> getRpcMethodForTestOnly(jsg::Lock& js, kj::String name) {
     return getRpcMethod(js, kj::mv(name));
   }
@@ -576,7 +629,7 @@ public:
 
   JSG_RESOURCE_TYPE(Fetcher, CompatibilityFlags::Reader flags) {
     // WARNING: New JSG_METHODs on Fetcher must be gated via compatibility flag to prevent
-    // confilcts with JS RPC methods (implemented via the wildcard property). Ideally, we do not
+    // conflicts with JS RPC methods (implemented via the wildcard property). Ideally, we do not
     // add any new methods here, and instead rely on RPC for all future needs.
     //
     // Similarly, subclasses of `Fetcher` (notably, `DurableObject`) must follow the same rule,
@@ -597,7 +650,7 @@ public:
           ? Rpc.Provider<T, Reserved | "fetch" | "connect" | "queue" | "scheduled">
           : unknown
       ) & {
-        fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
+        fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
         connect(address: SocketAddress | string, options?: SocketOptions): Socket;
         queue(queueName: string, messages: ServiceBindingQueueMessage[]): Promise<FetcherQueueResult>;
         scheduled(options?: FetcherScheduledOptions): Promise<FetcherScheduledResult>;
@@ -611,12 +664,21 @@ public:
           ? Rpc.Provider<T, Reserved | "fetch" | "connect">
           : unknown
       ) & {
-        fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
+        fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
         connect(address: SocketAddress | string, options?: SocketOptions): Socket;
       });
     }
     JSG_TS_DEFINE(
-      type Service<T extends Rpc.WorkerEntrypointBranded | undefined = undefined> = Fetcher<T>;
+      type Service<
+        T extends
+          | (new (...args: any[]) => Rpc.WorkerEntrypointBranded)
+          | Rpc.WorkerEntrypointBranded
+          | ExportedHandler<any, any, any>
+          | undefined = undefined,
+      > = T extends new (...args: any[]) => Rpc.WorkerEntrypointBranded ? Fetcher<InstanceType<T>>
+        : T extends Rpc.WorkerEntrypointBranded ? Fetcher<T>
+        : T extends Exclude<Rpc.EntrypointBranded, Rpc.WorkerEntrypointBranded> ? never
+        : Fetcher<undefined>
     );
 
     if (!flags.getFetcherNoGetPutDelete()) {
@@ -638,8 +700,18 @@ public:
     }
   }
 
-private:
-  kj::OneOf<uint, kj::Own<CrossContextOutgoingFactory>, IoOwn<OutgoingFactory>> channelOrClientFactory;
+  void serialize(jsg::Lock& js, jsg::Serializer& serializer);
+  static jsg::Ref<Fetcher> deserialize(
+      jsg::Lock& js, rpc::SerializationTag tag, jsg::Deserializer& deserializer);
+
+  JSG_SERIALIZABLE(rpc::SerializationTag::SERVICE_STUB);
+
+ private:
+  kj::OneOf<uint,
+      IoOwn<IoChannelFactory::SubrequestChannel>,
+      kj::Own<CrossContextOutgoingFactory>,
+      IoOwn<OutgoingFactory>>
+      channelOrClientFactory;
   RequiresHostAndProtocol requiresHost;
   bool isInHouse;
 };
@@ -672,40 +744,21 @@ struct RequestInitializerDict {
   //   and passed on to the next worker? Then `cf` is just one such field: it's not special,
   //   it's only named `cf` because the consumer is Cloudflare code.
 
-  // These control CORS policy. This doesn't matter on the edge because CSRF is not possible
-  // here:
-  // 1. We don't have the user's credentials (e.g. cookies) for any other origin, so we couldn't
-  //    forge a request from the user even if we wanted to.
-  // 2. We aren't behind the user's firewall, so we also can't forge requests to unauthenticated
-  //    internal network services.
-  jsg::WontImplement mode;
-
-  // These control CORS policy. This doesn't matter on the edge because CSRF is not possible
-  // here:
-  // 1. We don't have the user's credentials (e.g. cookies) for any other origin, so we couldn't
-  //    forge a request from the user even if we wanted to.
-  // 2. We aren't behind the user's firewall, so we also can't forge requests to unauthenticated
-  //    internal network services.
-  jsg::WontImplement credentials;
+  // The fetch standard defines additional properties that are really only relevant in browser
+  // implementations that implement CORS. The WinterTC has determined that for non-browser
+  // environments, these should be silently ignoredif the runtime has no use for them.
+  //  * mode
+  //  * credentials
+  //  * referrer
+  //  * referrerPolicy
+  //  * keepalive
+  //  * window
 
   // In browsers this controls the local browser cache. For Cloudflare Workers it could control the
-  // Cloudflare edge cache. Note that this setting is different from using the `Cache-Control`
-  // header since `Cache-Control` would be forwarded to the origin.
-  jsg::Unimplemented cache;
-
-  // These control how the `Referer` and `Origin` headers are initialized by the browser.
-  // Browser-side JavaScript is normally not permitted to set these headers, because servers
-  // sometimes use the headers to defend against CSRF. On the edge, CSRF is not a risk (see
-  // comments about `mode` and `credentials`, above), hence protecting the Referer and Origin
-  // headers is not necessary, so we treat them as regular-old headers instead.
-  jsg::WontImplement referrer;
-
-  // These control how the `Referer` and `Origin` headers are initialized by the browser.
-  // Browser-side JavaScript is normally not permitted to set these headers, because servers
-  // sometimes use the headers to defend against CSRF. On the edge, CSRF is not a risk (see
-  // comments about `mode` and `credentials`, above), hence protecting the Referer and Origin
-  // headers is not necessary, so we treat them as regular-old headers instead.
-  jsg::WontImplement referrerPolicy;
+  // Cloudflare edge cache. While the standard defines a number of values for this property, our
+  // implementation supports only three: undefined (identifying the default caching behavior that
+  // has been implemented by the runtime), "no-store", and "no-cache".
+  jsg::Optional<kj::String> cache;
 
   // Subresource integrity (check response against a given hash).
   // We do not implement integrity checking, however, we will accept either an undefined
@@ -722,12 +775,10 @@ struct RequestInitializerDict {
   // `null`.
   jsg::Optional<kj::Maybe<jsg::Ref<AbortSignal>>> signal;
 
-  // We do not support keepalive currently and may never?
-  // Per the spec, keepalive is "a boolean indicating whether or not request can
-  // outlive the global in which it was created." We could choose to explicitly indicate
-  // that we do not support this option but for now we'll just ignore it.
-  // jsg::Optional<bool> keepalive;
-  // TODO(conform): Won't support?
+  // Controls whether the response body is automatically decoded according to Content-Encoding
+  // headers. Default behavior is "automatic" which means bodies are decoded. Setting this to
+  // "manual" means the raw compressed bytes are returned.
+  jsg::Optional<kj::String> encodeResponseBody;
 
   // The duplex option controls whether or not a fetch is expected to send the entire request
   // before processing the response. The default value ("half"), which is currently the only
@@ -746,16 +797,52 @@ struct RequestInitializerDict {
   // jsg::Optional<kj::String> priority;
   // TODO(conform): Might support later?
 
-  JSG_STRUCT(method, headers, body, redirect, fetcher, cf, mode, credentials, cache,
-             referrer, referrerPolicy, integrity, signal);
-  JSG_STRUCT_TS_OVERRIDE(RequestInit<Cf = CfProperties> {
-    headers?: HeadersInit;
-    body?: BodyInit | null;
-    cf?: Cf;
-  });
+  JSG_STRUCT(method, headers, body, redirect, fetcher, cf, cache, integrity, signal, encodeResponseBody);
+  JSG_STRUCT_TS_OVERRIDE_DYNAMIC(CompatibilityFlags::Reader flags) {
+    if(flags.getCacheOptionEnabled()) {
+      if(flags.getCacheReload()) {
+        JSG_TS_OVERRIDE(RequestInit<Cf = CfProperties> {
+          headers?: HeadersInit;
+          body?: BodyInit | null;
+          cache?: 'no-store' | 'no-cache' | 'reload';
+          cf?: Cf;
+          encodeResponseBody?: "automatic" | "manual";
+        });
+
+      } else if(flags.getCacheNoCache()) {
+        JSG_TS_OVERRIDE(RequestInit<Cf = CfProperties> {
+          headers?: HeadersInit;
+          body?: BodyInit | null;
+          cache?: 'no-store' | 'no-cache';
+          cf?: Cf;
+          encodeResponseBody?: "automatic" | "manual";
+        });
+      } else {
+        JSG_TS_OVERRIDE(RequestInit<Cf = CfProperties> {
+          headers?: HeadersInit;
+          body?: BodyInit | null;
+          cache?: 'no-store';
+          cf?: Cf;
+          encodeResponseBody?: "automatic" | "manual";
+        });
+      }
+    } else {
+      JSG_TS_OVERRIDE(RequestInit<Cf = CfProperties> {
+        headers?: HeadersInit;
+        body?: BodyInit | null;
+        cache?: never;
+        cf?: Cf;
+        encodeResponseBody?: "automatic" | "manual";
+      });
+    }
+  }
+
+  // This method is called within tryUnwrap() when the type is unpacked from v8.
+  // See jsg Readme for more details.
+  void validate(jsg::Lock&);
 };
 
-class Request: public Body {
+class Request final: public Body {
 public:
   enum class Redirect {
     FOLLOW,
@@ -764,21 +851,32 @@ public:
   };
   static kj::Maybe<Redirect> tryParseRedirect(kj::StringPtr redirect);
 
-  Request(kj::HttpMethod method, kj::StringPtr url, Redirect redirect,
+  enum class CacheMode {
+    // CacheMode::NONE is set when cache is undefined. It represents the default cache
+    // mode that workers has supported.
+    NONE,
+    NOSTORE,
+    NOCACHE,
+    RELOAD,
+  };
+
+  Request(jsg::Lock& js, kj::HttpMethod method, kj::StringPtr url, Redirect redirect,
           jsg::Ref<Headers> headers, kj::Maybe<jsg::Ref<Fetcher>> fetcher,
           kj::Maybe<jsg::Ref<AbortSignal>> signal, CfProperty&& cf,
-          kj::Maybe<Body::ExtractedBody> body)
-    : Body(kj::mv(body), *headers), method(method), url(kj::str(url)),
+          kj::Maybe<Body::ExtractedBody> body, kj::Maybe<jsg::Ref<AbortSignal>> thisSignal,
+          CacheMode cacheMode = CacheMode::NONE,
+          Response_BodyEncoding responseBodyEncoding = Response_BodyEncoding::AUTO)
+    : Body(js, kj::mv(body), *headers), method(method), url(kj::str(url)),
       redirect(redirect), headers(kj::mv(headers)), fetcher(kj::mv(fetcher)),
-      cf(kj::mv(cf)) {
+      cacheMode(cacheMode), cf(kj::mv(cf)), responseBodyEncoding(responseBodyEncoding) {
     KJ_IF_SOME(s, signal) {
       // If the AbortSignal will never abort, assigning it to thisSignal instead ensures
       // that the cancel machinery is not used but the request.signal accessor will still
       // do the right thing.
       if (s->getNeverAborts()) {
-        this->thisSignal = kj::mv(s);
+        this->thisSignal = s.addRef();
       } else {
-        this->signal = kj::mv(s);
+        this->signal = s.addRef();
       }
     }
   }
@@ -799,7 +897,7 @@ public:
   // ---------------------------------------------------------------------------
   // JS API
 
-  typedef RequestInitializerDict InitializerDict;
+  using InitializerDict = RequestInitializerDict;
 
   using Info = kj::OneOf<jsg::Ref<Request>, kj::String>;
   using Initializer = kj::OneOf<InitializerDict, jsg::Ref<Request>>;
@@ -832,15 +930,15 @@ public:
   // request.signal to always return an AbortSignal even if one is not actively
   // used on this request.
   kj::Maybe<jsg::Ref<AbortSignal>> getSignal();
-
   jsg::Ref<AbortSignal> getThisSignal(jsg::Lock& js);
+
+  // Clear the request's signal if the 'ignoreForSubrequests' flag is set. This happens when
+  // a request from an incoming fetch is passed-through to another fetch. We want to avoid
+  // aborting the subrequest in that case.
+  void clearSignalIfIgnoredForSubrequest(jsg::Lock& js);
 
   // Returns the `cf` field containing Cloudflare feature flags.
   jsg::Optional<jsg::JsObject> getCf(jsg::Lock& js);
-
-  // We do not implement support for the keepalive option but we do want to at least provide
-  // the standard property, hard-coded to always be false.
-  bool getKeepalive() { return false; }
 
   // The duplex option controls whether or not a fetch is expected to send the entire request
   // before processing the response. The default value ("half"), which is currently the only
@@ -848,44 +946,45 @@ public:
   // the response. There are currently a proposal to add a "full" option which is the model
   // we support. Once "full" is added, we need to update this to accept either undefined or
   // "full", and possibly decide if we want to support the "half" option.
-  // jsg::JsValue getDuplex(jsg::Lock& js) { return js.v8Undefined(); }
+  // jsg::JsValue getDuplex(jsg::Lock& js) { return js.undefined(); }
   // TODO(conform): Might implement?
 
-  // These relate to CORS support, which we do not implement. In the
-  // Request initializer we will explicitly throw if any attempt is
-  // made to specify these. For the accessors tho, we want it to always
-  // just return undefined rather than throw, which helps with code
-  // portability across multiple runtimes. The spec says that the default
-  // value for mode when not specified *should* be 'no-cors`, but that
-  // value implies strict limitations that we do not follow. In discussion
-  // with other implementers with the same issues, it was decided that
-  // simply returning undefined for these was the best option.
-  // jsg::JsValue getMode(jsg::Lock& js) { return js.v8Undefined(); }
-  // jsg::JsValue getCredentials(jsg::Lock& js) { return js.v8Undefined(); }
-  // TODO(conform): Won't implement?
+  // These relate to CORS support, which we do not implement. WinterTC has determined that
+  // non-browser implementations that do not implement CORS support should ignore these
+  // entirely as if they were not defined.
+  //  * destination
+  //  * mode
+  //  * credentials
+  //  * referrer
+  //  * referrerPolicy
+  //  * isReloadNavigation
+  //  * isHistoryNavigation
+  //  * keepalive (see below)
+
+  // We do not implement support for the keepalive option but we do want to at least provide
+  // the standard property, hard-coded to always be false. WinterTC actually recommends that
+  // this one just be left undefined but we already had this returning false always and it
+  // would require a compat flag to remove. Just keep it as it's harmless.
+  bool getKeepalive() { return false; }
 
   // The cache mode determines how HTTP cache is used with the request.
-  // We currently do not fully implement this. Currently we will explicitly
-  // throw in the Request constructor if the option is set. For the accessor
-  // we want it to always just return undefined while it is not implemented.
-  // The spec does not provide a value to indicate "unimplemented" and all
-  // of the other values would imply semantics we do not follow. In discussion
-  // with other implementers with the same issues, it was decided that
-  // simply returning undefined for these was the best option.
-  // jsg::JsValue getCache(jsg::Lock& js) { return js.v8Undefined(); }
-  // TODO(conform): Won't implement?
+  jsg::Optional<kj::StringPtr> getCache(jsg::Lock& js);
+  CacheMode getCacheMode();
 
   // We do not implement integrity checking at all. However, the spec says that
   // the default value should be an empty string. When the Request object is
   // created we verify that the given value is undefined or empty.
   kj::String getIntegrity() { return kj::String(); }
 
+  // Get the response body encoding setting for this request
+  Response_BodyEncoding getResponseBodyEncoding() { return responseBodyEncoding; }
+
   JSG_RESOURCE_TYPE(Request, CompatibilityFlags::Reader flags) {
     JSG_INHERIT(Body);
 
     JSG_METHOD(clone);
 
-    JSG_TS_DEFINE(type RequestInfo<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> = Request<CfHostMetadata, Cf> | string | URL);
+    JSG_TS_DEFINE(type RequestInfo<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> = Request<CfHostMetadata, Cf> | string);
     // All type aliases get inlined when exporting RTTI, but this type alias is included by
     // the official TypeScript types, so users might be depending on it.
 
@@ -901,17 +1000,40 @@ public:
       // TODO(conform): These are standard properties that we do not implement (see descriptions
       // above).
       // JSG_READONLY_PROTOTYPE_PROPERTY(duplex, getDuplex);
-      // JSG_READONLY_PROTOTYPE_PROPERTY(mode, getMode);
-      // JSG_READONLY_PROTOTYPE_PROPERTY(credentials, getCredentials);
-      // JSG_READONLY_PROTOTYPE_PROPERTY(cache, getCache);
       JSG_READONLY_PROTOTYPE_PROPERTY(integrity, getIntegrity);
       JSG_READONLY_PROTOTYPE_PROPERTY(keepalive, getKeepalive);
+      if(flags.getCacheOptionEnabled()) {
+        JSG_READONLY_PROTOTYPE_PROPERTY(cache, getCache);
+        if(flags.getCacheReload()) {
+          JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
+            constructor(input: RequestInfo<CfProperties> | URL, init?: RequestInit<Cf>);
+            clone(): Request<CfHostMetadata, Cf>;
+            cache?: "no-store" | "no-cache" | "reload";
+            get cf(): Cf | undefined;
+          });
+        } else if(flags.getCacheNoCache()) {
+          JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
+            constructor(input: RequestInfo<CfProperties> | URL, init?: RequestInit<Cf>);
+            clone(): Request<CfHostMetadata, Cf>;
+            cache?: "no-store" | "no-cache";
+            get cf(): Cf | undefined;
+          });
+        } else {
+          JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
+            constructor(input: RequestInfo<CfProperties> | URL, init?: RequestInit<Cf>);
+            clone(): Request<CfHostMetadata, Cf>;
+            cache?: "no-store";
+            get cf(): Cf | undefined;
+          });
+        }
+      } else {
+        JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
+          constructor(input: RequestInfo<CfProperties> | URL, init?: RequestInit<Cf>);
+          clone(): Request<CfHostMetadata, Cf>;
+          get cf(): Cf | undefined;
+        });
+      }
 
-      JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
-        constructor(input: RequestInfo<CfProperties>, init?: RequestInit<Cf>);
-        clone(): Request<CfHostMetadata, Cf>;
-        get cf(): Cf | undefined;
-      });
       // Use `RequestInfo` and `RequestInit` type aliases in constructor instead of inlining.
       // `CfProperties` is defined in `/types/defines/cf.d.ts`. We only really need a single `Cf`
       // type parameter here, but it would be a breaking type change to remove `CfHostMetadata`.
@@ -927,14 +1049,11 @@ public:
       // TODO(conform): These are standard properties that we do not implement (see descriptions
       // above).
       // JSG_READONLY_INSTANCE_PROPERTY(duplex, getDuplex);
-      // JSG_READONLY_INSTANCE_PROPERTY(mode, getMode);
-      // JSG_READONLY_INSTANCE_PROPERTY(credentials, getCredentials);
-      // JSG_READONLY_INSTANCE_PROPERTY(cache, getCache);
       JSG_READONLY_INSTANCE_PROPERTY(integrity, getIntegrity);
       JSG_READONLY_INSTANCE_PROPERTY(keepalive, getKeepalive);
 
       JSG_TS_OVERRIDE(<CfHostMetadata = unknown, Cf = CfProperties<CfHostMetadata>> {
-        constructor(input: RequestInfo<CfProperties>, init?: RequestInit<Cf>);
+        constructor(input: RequestInfo<CfProperties> | URL, init?: RequestInit<Cf>);
         clone(): Request<CfHostMetadata, Cf>;
         readonly cf?: Cf;
       });
@@ -967,6 +1086,8 @@ private:
   kj::Maybe<jsg::Ref<Fetcher>> fetcher;
   kj::Maybe<jsg::Ref<AbortSignal>> signal;
 
+  CacheMode cacheMode = CacheMode::NONE;
+
   // The fetch spec definition of Request has a distinction between the "signal" (which is
   // an optional AbortSignal passed in with the options), and "this' signal", which is an
   // AbortSignal that is always available via the request.signal accessor. When signal is
@@ -975,23 +1096,24 @@ private:
 
   CfProperty cf;
 
+  // Controls how to handle Content-Encoding headers in the response
+  Response_BodyEncoding responseBodyEncoding = Response_BodyEncoding::AUTO;
+
   void visitForGc(jsg::GcVisitor& visitor) {
     visitor.visit(headers, fetcher, signal, thisSignal, cf);
   }
 };
 
-class Response: public Body {
+class Response final: public Body {
 public:
-  enum class BodyEncoding {
-    AUTO,
-    MANUAL
-  };
+  // Alias to the global Response_BodyEncoding enum for backward compatibility
+  using BodyEncoding = Response_BodyEncoding;
 
-  Response(jsg::Lock& js, int statusCode, kj::String statusText, jsg::Ref<Headers> headers,
-           CfProperty&& cf, kj::Maybe<Body::ExtractedBody> body,
+  Response(jsg::Lock& js, int statusCode, kj::Maybe<kj::String> statusText,
+           jsg::Ref<Headers> headers, CfProperty&& cf, kj::Maybe<Body::ExtractedBody> body,
            kj::Array<kj::String> urlList = {},
            kj::Maybe<jsg::Ref<WebSocket>> webSocket = kj::none,
-           Response::BodyEncoding bodyEncoding = Response::BodyEncoding::AUTO);
+           BodyEncoding bodyEncoding = BodyEncoding::AUTO);
 
   // ---------------------------------------------------------------------------
   // JS API
@@ -1047,13 +1169,7 @@ public:
   //
   // A network error is a response whose status is always 0, status message is always the empty
   // byte sequence, header list is always empty, body is always null, and trailer is always empty.
-  static jsg::Unimplemented error() { return {}; };
-  // TODO(conform): implementation is missing; two approaches where tested:
-  //  - returning a HTTP 5xx response but that doesn't match the spec and we didn't
-  //    find it useful.
-  //  - throwing/propagating a DISCONNECTED kj::Exception to actually disconnect the
-  //    client. However, we were concerned about possible side-effects and incorrect
-  //    error reporting.
+  static jsg::Ref<Response> error(jsg::Lock& js);
 
   jsg::Ref<Response> clone(jsg::Lock& js);
 
@@ -1086,9 +1202,11 @@ public:
 
   // This relates to CORS, which doesn't apply on the edge -- see Request::Initializer::mode.
   // In discussing with other runtime implementations that do not implement CORS, it was
-  // determined that just have this property as undefined is the best option.
-  // jsg::JsValue getType(jsg::Lock& js) { return js.v8Undefined(); }
-  // TODO(conform): Won't implement?
+  // determined that only the `'default'` and `'error'` properties should be implemented.
+  kj::StringPtr getType() {
+    if (statusCode == 0) return "error"_kj;
+    return "default"_kj;
+  }
 
   JSG_RESOURCE_TYPE(Response, CompatibilityFlags::Reader flags) {
     JSG_INHERIT(Body);
@@ -1111,9 +1229,7 @@ public:
 
       JSG_READONLY_PROTOTYPE_PROPERTY(cf, getCf);
 
-      // TODO(conform): This is a standard properties that we do not implement (see description
-      // above).
-      // JSG_READONLY_PROTOTYPE_PROPERTY(type, getType);
+      JSG_READONLY_PROTOTYPE_PROPERTY(type, getType);
     } else {
       JSG_READONLY_INSTANCE_PROPERTY(status, getStatus);
       JSG_READONLY_INSTANCE_PROPERTY(statusText, getStatusText);
@@ -1127,12 +1243,13 @@ public:
 
       JSG_READONLY_INSTANCE_PROPERTY(cf, getCf);
 
-      // TODO(conform): This is a standard properties that we do not implement (see description
-      // above).
-      // JSG_READONLY_INSTANCE_PROPERTY(type, getType);
+      JSG_READONLY_INSTANCE_PROPERTY(type, getType);
     }
 
-    JSG_TS_OVERRIDE({ constructor(body?: BodyInit | null, init?: ResponseInit); });
+    JSG_TS_OVERRIDE({
+      constructor(body?: BodyInit | null, init?: ResponseInit);
+      type: 'default' | 'error';
+    });
     // Use `BodyInit` and `ResponseInit` type aliases in constructor instead of inlining
   }
 
@@ -1160,7 +1277,9 @@ public:
 
 private:
   int statusCode;
-  kj::String statusText;
+  // If the statusText is empty, we will derive it from the statusCode. If there's no
+  // match, it will be empty.
+  kj::Maybe<kj::String> statusText;
   jsg::Ref<Headers> headers;
   CfProperty cf;
 
@@ -1182,8 +1301,6 @@ private:
   // body twice, they can specify encodeBody: "manual".
   Response::BodyEncoding bodyEncoding;
 
-  bool hasEnabledWebSocketCompression = false;
-
   // Capturing the AsyncContextFrame when the Response is created is necessary because there's
   // a natural separation that occurs between the moment the Response is created and when we
   // actually start consuming it. If a JS-backed ReadableStream is used, we end up losing the
@@ -1195,7 +1312,7 @@ private:
   }
 };
 
-class FetchEvent: public ExtendableEvent {
+class FetchEvent final: public ExtendableEvent {
 public:
   FetchEvent(jsg::Ref<Request> request)
       : ExtendableEvent("fetch"), request(kj::mv(request)),
@@ -1259,13 +1376,6 @@ jsg::Ref<Response> makeHttpResponse(
     kj::Own<kj::AsyncInputStream> body, kj::Maybe<jsg::Ref<WebSocket>> webSocket,
     Response::BodyEncoding bodyEncoding = Response::BodyEncoding::AUTO,
     kj::Maybe<jsg::Ref<AbortSignal>> signal = kj::none);
-
-bool isNullBodyStatusCode(uint statusCode);
-bool isRedirectStatusCode(uint statusCode);
-
-kj::String makeRandomBoundaryCharacters();
-// Make a boundary string for FormData serialization.
-// TODO(cleanup): Move to form-data.{h,c++}?
 
 #define EW_HTTP_ISOLATE_TYPES         \
   api::FetchEvent,                    \

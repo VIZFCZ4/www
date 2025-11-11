@@ -14,7 +14,7 @@ namespace workerd::api {
 // The string header is parsed on demand and the parsed value cached.
 class CfProperty {
 
-public:
+ public:
   KJ_DISALLOW_COPY(CfProperty);
 
   explicit CfProperty() {}
@@ -55,9 +55,8 @@ public:
     }
   }
 
-private:
+ private:
   kj::Maybe<kj::OneOf<kj::String, jsg::JsRef<jsg::JsObject>>> value;
 };
 
-
-} // namespace workerd::api
+}  // namespace workerd::api

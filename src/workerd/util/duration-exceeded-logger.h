@@ -4,9 +4,9 @@
 
 #pragma once
 
+#include <kj/debug.h>
 #include <kj/string.h>
 #include <kj/time.h>
-#include <kj/debug.h>
 
 namespace workerd::util {
 
@@ -16,14 +16,15 @@ namespace workerd::util {
 // thereby timing everything after the initialization of the timer, until the end of the scope where it was
 // instantiated.
 class DurationExceededLogger {
-public:
-  DurationExceededLogger(const kj::MonotonicClock& clock, kj::Duration warningDuration, kj::StringPtr logMessage)
-    : warningDuration(warningDuration),
-      logMessage(logMessage),
-      start(clock.now()),
-      clock(clock) {}
+ public:
+  DurationExceededLogger(
+      const kj::MonotonicClock& clock, kj::Duration warningDuration, kj::StringPtr logMessage)
+      : warningDuration(warningDuration),
+        logMessage(logMessage),
+        start(clock.now()),
+        clock(clock) {}
 
-    KJ_DISALLOW_COPY_AND_MOVE(DurationExceededLogger);
+  KJ_DISALLOW_COPY_AND_MOVE(DurationExceededLogger);
 
   ~DurationExceededLogger() noexcept(false) {
     kj::Duration actualDuration = clock.now() - start;
@@ -32,11 +33,11 @@ public:
     }
   }
 
-private:
+ private:
   kj::Duration warningDuration;
   kj::StringPtr logMessage;
   kj::TimePoint start;
   const kj::MonotonicClock& clock;
 };
 
-} // namespace workerd
+}  // namespace workerd::util

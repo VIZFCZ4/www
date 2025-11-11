@@ -3,11 +3,12 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #pragma once
-#include <kj/async-io.h>
+#include <kj/async.h>
 #include <kj/common.h>
 #include <kj/debug.h>
-#include <kj/refcount.h>
+#include <kj/function.h>
 #include <kj/list.h>
+#include <kj/refcount.h>
 
 namespace workerd {
 
@@ -19,18 +20,20 @@ namespace workerd {
 // to various other objects that will use it to wrap their
 // Promises.
 class RefcountedCanceler: public kj::Refcounted {
-public:
+ public:
   class Listener {
-  public:
+   public:
     explicit Listener(RefcountedCanceler& canceler, kj::Function<void()> fn)
-      : fn(kj::mv(fn)),
-        canceler(canceler) {
+        : fn(kj::mv(fn)),
+          canceler(canceler) {
       canceler.addListener(*this);
     }
 
-    ~Listener() { canceler.removeListener(*this); }
+    ~Listener() {
+      canceler.removeListener(*this);
+    }
 
-  private:
+   private:
     kj::Function<void()> fn;
     RefcountedCanceler& canceler;
     kj::ListLink<Listener> link;
@@ -61,8 +64,8 @@ public:
 
   void cancel(kj::StringPtr cancelReason) {
     if (reason == kj::none) {
-      cancel(kj::Exception(kj::Exception::Type::DISCONNECTED, __FILE__, __LINE__,
-                           kj::str(cancelReason)));
+      cancel(kj::Exception(
+          kj::Exception::Type::DISCONNECTED, __FILE__, __LINE__, kj::str(cancelReason)));
     }
   }
 
@@ -70,13 +73,15 @@ public:
     if (reason == kj::none) {
       reason = kj::cp(exception);
       canceler.cancel(exception);
-      for (auto& listener : listeners) {
+      for (auto& listener: listeners) {
         listener.fn();
       }
     }
   }
 
-  bool isEmpty() const { return canceler.isEmpty(); }
+  bool isEmpty() const {
+    return canceler.isEmpty();
+  }
 
   void throwIfCanceled() {
     KJ_IF_SOME(ex, reason) {
@@ -84,7 +89,9 @@ public:
     }
   }
 
-  bool isCanceled() const { return reason != kj::none; }
+  bool isCanceled() const {
+    return reason != kj::none;
+  }
 
   void addListener(Listener& listener) {
     listeners.add(listener);
@@ -94,7 +101,7 @@ public:
     listeners.remove(listener);
   }
 
-private:
+ private:
   kj::Canceler canceler;
   kj::Maybe<kj::Exception> reason;
 

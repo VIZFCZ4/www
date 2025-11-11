@@ -1,9 +1,5 @@
-import {
-  deepStrictEqual,
-  strictEqual,
-  throws,
-  ok,
-} from 'node:assert';
+import { deepStrictEqual, strictEqual, throws, ok } from 'node:assert';
+import { mock } from 'node:test';
 
 // Test for the Event and EventTarget standard Web API implementations.
 // The implementation for these are in api/basics.{h|c++}
@@ -14,18 +10,18 @@ export const event = {
     throws(() => new Event(Symbol('test')));
 
     // stringifiable values do work, however
-    strictEqual((new Event({})).type, '[object Object]');
-    strictEqual((new Event(null)).type, 'null');
-    strictEqual((new Event(1)).type, '1');
+    strictEqual(new Event({}).type, '[object Object]');
+    strictEqual(new Event(null).type, 'null');
+    strictEqual(new Event(1).type, '1');
 
     // Passing undefined explicitly works
-    strictEqual((new Event(undefined)).type, 'undefined');
+    strictEqual(new Event(undefined).type, 'undefined');
 
     // But not passing a value for type fails
     throws(() => new Event());
 
     // We can create an Event object with no options and it works as expected.
-    const event = new Event("foo");
+    const event = new Event('foo');
     strictEqual(event.type, 'foo');
     strictEqual(event.bubbles, false);
     strictEqual(event.cancelable, false);
@@ -45,7 +41,7 @@ export const event = {
     // by default, defaultPrevented still is false.
     strictEqual(event.defaultPrevented, false);
     strictEqual(event.cancelBubble, true);
-  }
+  },
 };
 
 export const eventWithOptions = {
@@ -55,10 +51,10 @@ export const eventWithOptions = {
     throws(() => new Event('foo', 'bar'));
 
     // We can create an Event object with no options and it works as expected.
-    const event = new Event("foo", {
+    const event = new Event('foo', {
       cancelable: true,
       bubbles: 'truthy values work also',
-      composed: true
+      composed: true,
     });
     strictEqual(event.type, 'foo');
     strictEqual(event.bubbles, true);
@@ -78,13 +74,15 @@ export const eventWithOptions = {
     // Because the event is cancelable, defaultPrevented is true.
     strictEqual(event.defaultPrevented, true);
     strictEqual(event.returnValue, false);
-  }
+  },
 };
 
 export const eventSubclass = {
   test() {
     class Foo extends Event {
-      constructor() { super("foo"); }
+      constructor() {
+        super('foo');
+      }
     }
     const event = new Foo();
     strictEqual(event.type, 'foo');
@@ -101,32 +99,39 @@ export const eventSubclass = {
 
     // Everything except cancelBubble is read only and will throw
     // if attempts are made to modify
-    throws(() => event.type = 'foo');
-    throws(() => event.bubbles = false);
-    throws(() => event.cancelable = false);
-    throws(() => event.composed = false);
-    throws(() => event.isTrusted = false);
-    throws(() => event.defaultPrevented = false);
-    throws(() => event.eventPhase = Event.NONE);
-    throws(() => event.returnValue = true);
-    throws(() => event.timeStamp = 0.0);
-    throws(() => event.currentTarget = undefined);
+    throws(() => (event.type = 'foo'));
+    throws(() => (event.bubbles = false));
+    throws(() => (event.cancelable = false));
+    throws(() => (event.composed = false));
+    throws(() => (event.isTrusted = false));
+    throws(() => (event.defaultPrevented = false));
+    throws(() => (event.eventPhase = Event.NONE));
+    throws(() => (event.returnValue = true));
+    throws(() => (event.timeStamp = 0.0));
+    throws(() => (event.currentTarget = undefined));
     event.cancelBubble = true;
     strictEqual(event.cancelBubble, true);
 
     // With the default compatibility flag set, the properties should
     // exist on the prototype and not as own properties on the event itself.
-    strictEqual(Reflect.getOwnPropertyDescriptor(event, 'cancelable'), undefined);
+    strictEqual(
+      Reflect.getOwnPropertyDescriptor(event, 'cancelable'),
+      undefined
+    );
 
     // Which means a subclass can replace the implementation successfully.
     class Bar extends Event {
-      constructor() { super('bar'); }
-      get bubbles() { return 'hello'; }
+      constructor() {
+        super('bar');
+      }
+      get bubbles() {
+        return 'hello';
+      }
     }
     const bar = new Bar();
     strictEqual(bar.bubbles, 'hello');
     strictEqual(bar.composed, false);
-  }
+  },
 };
 
 export const extendableEventNotConstructable = {
@@ -137,8 +142,8 @@ export const extendableEventNotConstructable = {
     // originate from the runtime. That is, user code cannot create their own trusted
     // events.
     strictEqual(typeof ExtendableEvent, 'function');
-    throws(() => new ExtendableEvent("foo"));
-  }
+    throws(() => new ExtendableEvent('foo'));
+  },
 };
 
 export const basicEventTarget = {
@@ -163,7 +168,7 @@ export const basicEventTarget = {
     };
 
     const handlerObj = {
-      handleEvent: handler
+      handleEvent: handler,
     };
 
     throws(() => target.addEventListener('foo', {}));
@@ -184,7 +189,7 @@ export const basicEventTarget = {
       handleEvent(event) {
         classCalled = true;
       }
-    });
+    })();
     target.addEventListener('foo', foo);
 
     target.dispatchEvent(event);
@@ -200,7 +205,7 @@ export const basicEventTarget = {
     target.dispatchEvent(event);
 
     strictEqual(dispatchCount, 3);
-  }
+  },
 };
 
 export const subclassedEventTarget = {
@@ -215,7 +220,7 @@ export const subclassedEventTarget = {
     });
     target.dispatchEvent(event);
     strictEqual(dispatchCount, 1);
-  }
+  },
 };
 
 export const onceListener = {
@@ -225,15 +230,19 @@ export const onceListener = {
 
     let dispatchCount = 0;
 
-    target.addEventListener('foo', () => {
-      dispatchCount++;
-    }, { once: true });
+    target.addEventListener(
+      'foo',
+      () => {
+        dispatchCount++;
+      },
+      { once: true }
+    );
 
     target.dispatchEvent(event);
     target.dispatchEvent(event);
 
     strictEqual(dispatchCount, 1);
-  }
+  },
 };
 
 export const cancelableListener = {
@@ -245,22 +254,30 @@ export const cancelableListener = {
 
     const ac = new AbortController();
 
-    target.addEventListener('foo', () => {
-      dispatchCount++;
-    }, { signal: ac.signal });
+    target.addEventListener(
+      'foo',
+      () => {
+        dispatchCount++;
+      },
+      { signal: ac.signal }
+    );
 
     // Passing an already aborted signal just works as expected.
     // No errors are thrown.
-    target.addEventListener('foo', () => {
-      dispatchCount++;
-    }, { signal: AbortSignal.abort() });
+    target.addEventListener(
+      'foo',
+      () => {
+        dispatchCount++;
+      },
+      { signal: AbortSignal.abort() }
+    );
 
     ac.abort();
 
     target.dispatchEvent(event);
 
     strictEqual(dispatchCount, 0);
-  }
+  },
 };
 
 export const cancelableListenerAbortPropagation = {
@@ -279,7 +296,7 @@ export const cancelableListenerAbortPropagation = {
     // }, { signal });
     // controller.abort();
     // et.dispatchEvent(new Event('foo'));
-  }
+  },
 };
 
 export const passiveCaptureListener = {
@@ -289,7 +306,7 @@ export const passiveCaptureListener = {
     // we allow them to be set for code portability reasons.
     throws(() => {
       target.addEventListener('foo', () => {}, {
-        capture: true
+        capture: true,
       });
     });
     throws(() => {
@@ -297,18 +314,18 @@ export const passiveCaptureListener = {
     });
     throws(() => {
       target.addEventListener('foo', () => {}, {
-        passive: true
+        passive: true,
       });
     });
     throws(() => {
       target.removeEventListener('foo', () => {}, {
-        capture: true
+        capture: true,
       });
     });
     throws(() => {
       target.removeEventListener('foo', () => {}, true);
     });
-  }
+  },
 };
 
 export const globalIsEventTarget = {
@@ -325,12 +342,16 @@ export const globalIsEventTarget = {
 
     const event = new Event('foo');
     let dispatchCount = 0;
-    addEventListener('foo', () => {
-      dispatchCount++;
-    }, { once: true });
+    addEventListener(
+      'foo',
+      () => {
+        dispatchCount++;
+      },
+      { once: true }
+    );
     dispatchEvent(event);
     strictEqual(dispatchCount, 1);
-  }
+  },
 };
 
 export const errorInHandler = {
@@ -343,7 +364,7 @@ export const errorInHandler = {
     target.addEventListener('foo', () => {
       dispatchCount++;
       throw new Error('boom');
-    })
+    });
     target.addEventListener('foo', () => {
       dispatchCount++;
     });
@@ -353,7 +374,7 @@ export const errorInHandler = {
     // The dispatchCount here should be 2, but with the current bug, it's only 1
     // strictEqual(dispatchCount, 2);
     strictEqual(dispatchCount, 1);
-  }
+  },
 };
 
 export const stopImmediatePropagation = {
@@ -372,7 +393,7 @@ export const stopImmediatePropagation = {
     });
     target.dispatchEvent(event);
     strictEqual(dispatchCount, 1);
-  }
+  },
 };
 
 export const nullUndefinedHandler = {
@@ -382,7 +403,7 @@ export const nullUndefinedHandler = {
     const target = new EventTarget();
     // target.addEventListener('foo', null);
     // target.addEventListener('foo', undefined);
-  }
+  },
 };
 
 export const customEvent = {
@@ -391,7 +412,7 @@ export const customEvent = {
     ok(event instanceof Event);
     strictEqual(event.type, 'foo');
     deepStrictEqual(event.detail, { a: 123 });
-  }
+  },
 };
 
 export const closeEvent = {
@@ -400,5 +421,26 @@ export const closeEvent = {
     // had it as required. Let's make sure we can create it without the second arg.
     new CloseEvent('foo');
     new CloseEvent('foo', { code: 1000, reason: 'bye' });
-  }
+  },
+};
+
+export const handlerThis = {
+  test() {
+    const et = new EventTarget();
+    const handler = mock.fn(function () {
+      strictEqual(this, et);
+    });
+    et.addEventListener('foo', handler);
+
+    const handlerObject = {
+      handleEvent: mock.fn(function () {
+        strictEqual(this, handlerObject);
+      }),
+    };
+    et.addEventListener('foo', handlerObject);
+
+    et.dispatchEvent(new Event('foo'));
+    strictEqual(handler.mock.callCount(), 1);
+    strictEqual(handlerObject.handleEvent.mock.callCount(), 1);
+  },
 };

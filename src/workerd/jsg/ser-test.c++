@@ -25,8 +25,8 @@ struct SerTestContext: public ContextGlobalObject {
     uint i;
     Foo(uint i): i(i) {}
 
-    static jsg::Ref<Foo> constructor(uint i) {
-      return jsg::alloc<Foo>(i);
+    static jsg::Ref<Foo> constructor(jsg::Lock& js, uint i) {
+      return js.alloc<Foo>(i);
     }
 
     int getI() {
@@ -44,7 +44,7 @@ struct SerTestContext: public ContextGlobalObject {
       KJ_ASSERT(tag == SerializationTag::FOO);
 
       // Intentionally deserialize differently so we can detect it.
-      return jsg::alloc<Foo>(deserializer.readRawUint32() + 2);
+      return js.alloc<Foo>(deserializer.readRawUint32() + 2);
     }
     JSG_SERIALIZABLE(SerializationTag::FOO);
   };
@@ -53,8 +53,8 @@ struct SerTestContext: public ContextGlobalObject {
     kj::String text;
     Bar(kj::String text): text(kj::mv(text)) {}
 
-    static jsg::Ref<Bar> constructor(kj::String text) {
-      return jsg::alloc<Bar>(kj::mv(text));
+    static jsg::Ref<Bar> constructor(jsg::Lock& js, kj::String text) {
+      return js.alloc<Bar>(kj::mv(text));
     }
 
     kj::String getText() {
@@ -75,7 +75,7 @@ struct SerTestContext: public ContextGlobalObject {
       size_t size = deserializer.readRawUint64();
       auto bytes = deserializer.readRawBytes(size);
       // Intentionally deserialize differently so we can detect it.
-      return jsg::alloc<Bar>(kj::str(bytes.asChars(), '!'));
+      return js.alloc<Bar>(kj::str(bytes.asChars(), '!'));
     }
     JSG_SERIALIZABLE(SerializationTag::BAR);
   };
@@ -83,8 +83,8 @@ struct SerTestContext: public ContextGlobalObject {
   struct Baz: public jsg::Object {
     bool serializeThrows;
     Baz(bool serializeThrows): serializeThrows(serializeThrows) {}
-    static jsg::Ref<Baz> constructor(bool serializeThrows) {
-      return jsg::alloc<Baz>(serializeThrows);
+    static jsg::Ref<Baz> constructor(jsg::Lock& js, bool serializeThrows) {
+      return js.alloc<Baz>(serializeThrows);
     }
 
     JSG_RESOURCE_TYPE(Baz) {}
@@ -103,8 +103,8 @@ struct SerTestContext: public ContextGlobalObject {
     kj::String text;
     Qux(kj::String text): text(kj::mv(text)) {}
 
-    static jsg::Ref<Qux> constructor(kj::String text) {
-      return jsg::alloc<Qux>(kj::mv(text));
+    static jsg::Ref<Qux> constructor(jsg::Lock& js, kj::String text) {
+      return js.alloc<Qux>(kj::mv(text));
     }
 
     kj::String getText() {
@@ -115,17 +115,19 @@ struct SerTestContext: public ContextGlobalObject {
       JSG_READONLY_PROTOTYPE_PROPERTY(text, getText);
     }
 
-    void serialize(jsg::Lock& js, jsg::Serializer& serializer,
-                   const TypeHandler<kj::String>& stringHandler) {
+    void serialize(
+        jsg::Lock& js, jsg::Serializer& serializer, const TypeHandler<kj::String>& stringHandler) {
       // V2 prefers to serialize the string as a JS value.
       serializer.write(js, JsValue(stringHandler.wrap(js, kj::str(text, '?'))));
     }
-    static jsg::Ref<Qux> deserialize(Lock& js, SerializationTag tag, Deserializer& deserializer,
-                                     const TypeHandler<kj::String>& stringHandler) {
+    static jsg::Ref<Qux> deserialize(Lock& js,
+        SerializationTag tag,
+        Deserializer& deserializer,
+        const TypeHandler<kj::String>& stringHandler) {
       KJ_ASSERT(tag == SerializationTag::QUX);
 
-      return jsg::alloc<Qux>(KJ_ASSERT_NONNULL(
-          stringHandler.tryUnwrap(js, deserializer.readValue(js))));
+      return js.alloc<Qux>(
+          KJ_ASSERT_NONNULL(stringHandler.tryUnwrap(js, deserializer.readValue(js))));
     }
     JSG_SERIALIZABLE(SerializationTag::QUX);
   };
@@ -156,27 +158,24 @@ struct SerTestContext: public ContextGlobalObject {
     JSG_METHOD(roundTrip);
   }
 };
-JSG_DECLARE_ISOLATE_TYPE(
-    SerTestIsolate, SerTestContext, SerTestContext::Foo, SerTestContext::Bar, SerTestContext::Baz,
+JSG_DECLARE_ISOLATE_TYPE(SerTestIsolate,
+    SerTestContext,
+    SerTestContext::Foo,
+    SerTestContext::Bar,
+    SerTestContext::Baz,
     SerTestContext::Qux);
 
 // Define a whole second JSG isolate type that contains "updated" code where Bar no longer wraps
 // a string, it wraps an arbitrary value.
 struct SerTestContextV2: public ContextGlobalObject {
-  enum class SerializationTag {
-    FOO,
-    BAR_OLD,
-    BAZ,
-    QUX,
-    BAR_V2
-  };
+  enum class SerializationTag { FOO, BAR_OLD, BAZ, QUX, BAR_V2 };
 
   struct Bar: public jsg::Object {
     JsRef<JsValue> val;
     Bar(JsRef<JsValue> val): val(kj::mv(val)) {}
 
-    static jsg::Ref<Bar> constructor(JsRef<JsValue> val) {
-      return jsg::alloc<Bar>(kj::mv(val));
+    static jsg::Ref<Bar> constructor(jsg::Lock& js, JsRef<JsValue> val) {
+      return js.alloc<Bar>(kj::mv(val));
     }
 
     JsRef<JsValue> getVal(Lock& js) {
@@ -197,11 +196,11 @@ struct SerTestContextV2: public ContextGlobalObject {
         size_t size = deserializer.readRawUint64();
         auto bytes = deserializer.readRawBytes(size);
 
-        return jsg::alloc<Bar>(JsRef<JsValue>(js, js.str(kj::str("old:", bytes.asChars()))));
+        return js.alloc<Bar>(JsRef<JsValue>(js, js.str(kj::str("old:", bytes.asChars()))));
       } else {
         KJ_ASSERT(tag == SerializationTag::BAR_V2);
 
-        return jsg::alloc<Bar>(JsRef<JsValue>(js, deserializer.readValue(js)));
+        return js.alloc<Bar>(JsRef<JsValue>(js, deserializer.readValue(js)));
       }
     }
     JSG_SERIALIZABLE(SerializationTag::BAR_V2, SerializationTag::BAR_OLD);
@@ -265,7 +264,7 @@ KJ_TEST("serialization") {
   // Also try round-tripping the new version. It now accepts arbitrary values, not just strings.
   e2.expectEval("roundTrip(new Bar(123)).val", "number", "123");
 
-  // Note that cycles through host objects are correcty serialized!
+  // Note that cycles through host objects are correctly serialized!
   //
   // V8 BUG ALERT: The below works if we use `obj` as the root of serialization, but NOT if we
   //   use `bar` as the root. The reason is a flaw in the design of V8's callbacks for parsing
@@ -278,12 +277,11 @@ KJ_TEST("serialization") {
   //   and only then parses its content -- and this is why everything works fine if we start with
   //   a native object as the root, as in this test. The API for host objects needs to be extended
   //   somehow to allow the object to be inserted into the table before parsing its content.
-  e2.expectEval(
-      "let obj = {i: 321};\n"
-      "let bar = new Bar(obj);\n"
-      "obj.bar = bar;\n"
-      "roundTrip(obj).bar.val.bar.val.bar.val.i", "number", "321");
+  e2.expectEval("let obj = {i: 321};\n"
+                "let bar = new Bar(obj);\n"
+                "obj.bar = bar;\n"
+                "roundTrip(obj).bar.val.bar.val.bar.val.i",
+      "number", "321");
 }
-
 }  // namespace
 }  // namespace workerd::jsg::test

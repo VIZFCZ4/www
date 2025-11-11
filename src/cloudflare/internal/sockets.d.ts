@@ -4,26 +4,33 @@
 
 // Type definitions for c++ implementation.
 
+import { type ServiceStub } from 'cloudflare-internal:workers';
+
 export class Socket {
-  public readonly readable: unknown
-  public readonly writable: unknown
-  public readonly closed: Promise<void>
-  public close(): Promise<void>
-  public startTls(options: TlsOptions): Socket
+  readonly readable: unknown;
+  readonly writable: unknown;
+  readonly closed: Promise<void>;
+  close(): Promise<void>;
+  startTls(options: TlsOptions): Socket;
 }
 
 export type TlsOptions = {
-  expectedServerHostname?: string
-}
+  expectedServerHostname?: string;
+};
 
 export type SocketAddress = {
-  hostname: string
-  port: number
-}
+  hostname: string;
+  port: number;
+};
 
 export type SocketOptions = {
-  secureTransport?: 'off' | 'on' | 'starttls'
-  allowHalfOpen?: boolean
-}
+  secureTransport?: 'off' | 'on' | 'starttls';
+  allowHalfOpen?: boolean;
+};
 
-export function connect(address: string | SocketAddress, options?: SocketOptions): Socket;
+export function connect(
+  address: string | SocketAddress,
+  options?: SocketOptions
+): Socket;
+
+export function internalNewHttpClient(socket: Socket): Promise<ServiceStub>;

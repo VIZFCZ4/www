@@ -4,13 +4,17 @@
 
 #include "scheduled.h"
 
+#include <workerd/io/io-context.h>
+
 namespace workerd::api {
 
 ScheduledEvent::ScheduledEvent(double scheduledTime, kj::StringPtr cron)
-    : ExtendableEvent("scheduled"), scheduledTime(scheduledTime), cron(kj::str(cron)) {}
+    : ExtendableEvent("scheduled"),
+      scheduledTime(scheduledTime),
+      cron(kj::str(cron)) {}
 
 void ScheduledEvent::noRetry() {
   IoContext::current().setNoRetryScheduled();
 }
 
-} // namespace workerd::api
+}  // namespace workerd::api

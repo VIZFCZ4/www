@@ -39,9 +39,26 @@ private:
   };
 
 public:
-  // Given a delimiter string `boundary`, serialize all fields in this form data to an array of
-  // bytes suitable for use as an HTTP message body.
-  kj::Array<kj::byte> serialize(kj::ArrayPtr<const char> boundary);
+
+  using ParseCallback = kj::FunctionParam<void(kj::StringPtr name,
+                                               kj::Maybe<kj::StringPtr> filename,
+                                               kj::Maybe<kj::StringPtr> type,
+                                               kj::ArrayPtr<const kj::byte> data)>;
+
+  static void parseFormDataImpl(kj::ArrayPtr<const char> rawText,
+                                kj::StringPtr boundary,
+                                ParseCallback callback);
+  struct EntryWithoutLock {
+    kj::String name;
+    kj::Maybe<kj::String> filename;
+    kj::Maybe<kj::String> type;
+    kj::OneOf<kj::Array<kj::byte>, kj::String> value;
+  };
+
+  // Provided for cases where parsing FormData outside of any direct JS
+  // API usage (such as in fiddle internally).
+  static kj::Array<EntryWithoutLock> parseWithoutLock(kj::ArrayPtr<const char> rawText,
+                                                      kj::StringPtr contentType);
 
   // Parse `rawText`, storing the results in this FormData object. `contentType` must be either
   // multipart/form-data or application/x-www-form-urlencoded.
@@ -49,8 +66,18 @@ public:
   // `convertFilesToStrings` is for backwards-compatibility. The first implementation of this
   // class in Workers incorrectly represented files as strings (of their content). Changing this
   // could break deployed code, so this has to be controlled by a compatibility flag.
-  void parse(kj::ArrayPtr<const char> rawText, kj::StringPtr contentType,
+  //
+  // Parsing may or may not pass a jsg::Lock. If a lock is passed, any File objects created will
+  // track their internal allocated memory in the associated isolate. If a lock is not passed,
+  // the internal allocated memory will not be tracked.
+  void parse(jsg::Lock& js,
+             kj::ArrayPtr<const char> rawText,
+             kj::StringPtr contentType,
              bool convertFilesToStrings);
+
+  // Given a delimiter string `boundary`, serialize all fields in this form data to an array of
+  // bytes suitable for use as an HTTP message body.
+  kj::Array<kj::byte> serialize(kj::ArrayPtr<const char> boundary);
 
   struct Entry {
     kj::String name;
@@ -77,20 +104,22 @@ public:
   // for obvious reasons, so this constructor doesn't take any parameters. If someone tries to use
   // FormData to represent a <form> element we probably don't have to worry about making the error
   // message they receive too pretty: they won't get farther than `document.getElementById()`.
-  static jsg::Ref<FormData> constructor();
+  static jsg::Ref<FormData> constructor(jsg::Lock& js);
 
-  void append(kj::String name, kj::OneOf<jsg::Ref<File>, jsg::Ref<Blob>, kj::String> value,
+  void append(jsg::Lock& js, kj::String name,
+              kj::OneOf<jsg::Ref<File>, jsg::Ref<Blob>, kj::String> value,
               jsg::Optional<kj::String> filename);
 
   void delete_(kj::String name);
 
-  kj::Maybe<kj::OneOf<jsg::Ref<File>, kj::String>> get(kj::String name);
+  kj::Maybe<kj::OneOf<jsg::Ref<File>, kj::String>> get(jsg::Lock& js, kj::String name);
 
-  kj::Array<kj::OneOf<jsg::Ref<File>, kj::String>> getAll(kj::String name);
+  kj::Array<kj::OneOf<jsg::Ref<File>, kj::String>> getAll(jsg::Lock& js, kj::String name);
 
   bool has(kj::String name);
 
-  void set(kj::String name, kj::OneOf<jsg::Ref<File>, jsg::Ref<Blob>, kj::String> value,
+  void set(jsg::Lock& js, kj::String name,
+           kj::OneOf<jsg::Ref<File>, jsg::Ref<Blob>, kj::String> value,
            jsg::Optional<kj::String> filename);
 
   JSG_ITERATOR(EntryIterator, entries,
@@ -165,7 +194,7 @@ public:
 private:
   kj::Vector<Entry> data;
 
-  static EntryType clone(EntryType& value);
+  static EntryType clone(jsg::Lock& js, EntryType& value);
 
   template <typename Type>
   static kj::Maybe<Type> iteratorNext(jsg::Lock& js, IteratorState& state) {
@@ -174,11 +203,11 @@ private:
     }
     auto& [key, value] = state.parent->data[state.index++];
     if constexpr (kj::isSameType<Type, EntryIteratorType>()) {
-      return kj::arr<EntryType>(kj::str(key), clone(value));
+      return kj::arr<EntryType>(kj::str(key), clone(js, value));
     } else if constexpr (kj::isSameType<Type, KeyIteratorType>()) {
       return kj::str(key);
     } else if constexpr (kj::isSameType<Type, ValueIteratorType>()) {
-      return clone(value);
+      return clone(js, value);
     } else {
       KJ_UNREACHABLE;
     }

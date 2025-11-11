@@ -3,97 +3,209 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "sql.h"
+
 #include "actor-state.h"
-#include "workerd/io/io-context.h"
+
+#include <workerd/io/io-context.h>
 
 namespace workerd::api {
 
-SqlStorage::SqlStorage(SqliteDatabase& sqlite, jsg::Ref<DurableObjectStorage> storage)
-    : sqlite(IoContext::current().addObject(sqlite)), storage(kj::mv(storage)) {}
+// Maximum total size of all cached statements (measured in size of the SQL code). If cached
+// statements exceed this, we remove the LRU statement(s).
+//
+// Hopefully most apps don't ever hit this, but it's important to have a limit in case of
+// queries containing dynamic content or excessively large one-off queries.
+static constexpr uint SQL_STATEMENT_CACHE_MAX_SIZE = 1024 * 1024;
+
+SqlStorage::SqlStorage(jsg::Ref<DurableObjectStorage> storage)
+    : storage(kj::mv(storage)),
+      statementCache(IoContext::current().addObject(kj::heap<StatementCache>())) {}
 
 SqlStorage::~SqlStorage() {}
 
-jsg::Ref<SqlStorage::Cursor> SqlStorage::exec(jsg::Lock& js, kj::String querySql,
-                                              jsg::Arguments<BindingValue> bindings) {
+jsg::Ref<SqlStorage::Cursor> SqlStorage::exec(
+    jsg::Lock& js, jsg::JsString querySql, jsg::Arguments<BindingValue> bindings) {
+  auto userSpan = IoContext::current().makeUserTraceSpan("durable_object_storage_exec"_kjc);
+  userSpan.setTag("db.system.name"_kjc, kj::str("cloudflare-durable-object-sql"_kjc));
+  userSpan.setTag("db.operation.name"_kjc, kj::str("exec"_kjc));
+  userSpan.setTag("db.query.text"_kjc, kj::str(querySql));
+  userSpan.setTag(
+      "cloudflare.durable_object.query.bindings"_kjc, static_cast<int64_t>(bindings.size()));
+
+  // Internalize the string, so that the cache can be keyed by string identity rather than content.
+  // Any string we put into the cache is expected to live there for a while anyway, so even if it
+  // is a one-off, internalizing it (which moves it to the old generation) shouldn't hurt.
+  querySql = querySql.internalize(js);
+
+  auto& db = getDb(js);
+  auto& statementCache = *this->statementCache;
+
+  kj::Rc<CachedStatement>& slot = statementCache.map.findOrCreate(querySql, [&]() {
+    auto result = kj::rc<CachedStatement>(js, *this, db, querySql, js.toString(querySql));
+    statementCache.totalSize += result->statementSize;
+    return result;
+  });
+
+  // Move cached statement to end of LRU queue.
+  if (slot->lruLink.isLinked()) {
+    statementCache.lru.remove(*slot.get());
+  }
+  statementCache.lru.add(*slot.get());
+
+  if (slot->isShared()) {
+    // Oops, this CachedStatement is currently in-use (presumably by a Cursor).
+    //
+    // SQLite only allows one instance of a statement to run at a time, so we will have to compile
+    // the statement again as a one-off.
+    //
+    // In theory we could try to cache multiple copies of the statement, but as this is probably
+    // exceedingly rare, it is not worth the added code complexity.
+    SqliteDatabase::Regulator& regulator = *this;
+    return js.alloc<Cursor>(js, db, regulator, js.toString(querySql), kj::mv(bindings));
+  }
+
+  auto result = js.alloc<Cursor>(js, slot.addRef(), kj::mv(bindings));
+
+  // If the statement cache grew too big, drop the least-recently-used entry.
+  while (statementCache.totalSize > SQL_STATEMENT_CACHE_MAX_SIZE) {
+    auto& toRemove = *statementCache.lru.begin();
+    auto oldQuery = jsg::JsString(toRemove.query.getHandle(js));
+    statementCache.totalSize -= toRemove.statementSize;
+    statementCache.lru.remove(toRemove);
+    KJ_ASSERT(statementCache.map.eraseMatch(oldQuery));
+  }
+
+  userSpan.setTag("cloudflare.durable_object.response.rows_read"_kjc,
+      static_cast<int64_t>(result->getRowsRead()));
+  userSpan.setTag("cloudflare.durable_object.response.rows_written"_kjc,
+      static_cast<int64_t>(result->getRowsWritten()));
+  return result;
+}
+
+SqlStorage::IngestResult SqlStorage::ingest(jsg::Lock& js, kj::String querySql) {
+  auto userSpan = IoContext::current().makeUserTraceSpan("durable_object_storage_ingest"_kjc);
   SqliteDatabase::Regulator& regulator = *this;
-  return jsg::alloc<Cursor>(*sqlite, regulator, querySql, kj::mv(bindings));
+  auto result = getDb(js).ingestSql(regulator, querySql);
+  userSpan.setTag(
+      "cloudflare.durable_object.response.rows_read"_kjc, static_cast<int64_t>(result.rowsRead));
+  userSpan.setTag("cloudflare.durable_object.response.rows_written"_kjc,
+      static_cast<int64_t>(result.rowsWritten));
+  userSpan.setTag("cloudflare.durable_object.response.statement_count"_kjc,
+      static_cast<int64_t>(result.statementCount));
+  return IngestResult(
+      kj::str(result.remainder), result.rowsRead, result.rowsWritten, result.statementCount);
 }
 
-kj::String SqlStorage::ingest(jsg::Lock& js, kj::String querySql) {
-  SqliteDatabase::Regulator& regulator = *this;
-  return kj::str(sqlite->ingestSql(regulator, querySql));
+void SqlStorage::setMaxPageCountForTest(jsg::Lock& js, int count) {
+  auto& db = getDb(js);
+  db.run({.regulator = SqliteDatabase::TRUSTED}, kj::str("PRAGMA max_page_count = ", count));
 }
 
-jsg::Ref<SqlStorage::Statement> SqlStorage::prepare(jsg::Lock& js, kj::String query) {
-  return jsg::alloc<Statement>(sqlite->prepare(*this, query));
+jsg::Ref<SqlStorage::Statement> SqlStorage::prepare(jsg::Lock& js, jsg::JsString query) {
+  return js.alloc<Statement>(js, JSG_THIS, query);
 }
 
-double SqlStorage::getDatabaseSize() {
-  int64_t pages = execMemoized(
-      pragmaPageCount,
-      "select (select * from pragma_page_count) - (select * from pragma_freelist_count);"
-  ).getInt64(0);
-  return pages * getPageSize();
+double SqlStorage::getDatabaseSize(jsg::Lock& js) {
+  auto userSpan =
+      IoContext::current().makeUserTraceSpan("durable_object_storage_getDatabaseSize"_kjc);
+  userSpan.setTag("db.operation.name"_kjc, kj::str("getDatabaseSize"_kjc));
+  auto& db = getDb(js);
+  int64_t pages = execMemoized(db, pragmaPageCount,
+      "select (select * from pragma_page_count) - (select * from pragma_freelist_count);")
+                      .getInt64(0);
+  auto dbSize = pages * getPageSize(db);
+  userSpan.setTag("cloudflare.durable_object.response.db_size"_kjc, static_cast<int64_t>(dbSize));
+  return dbSize;
 }
 
-bool SqlStorage::isAllowedName(kj::StringPtr name) {
+bool SqlStorage::isAllowedName(kj::StringPtr name) const {
   return !name.startsWith("_cf_");
 }
 
-bool SqlStorage::isAllowedTrigger(kj::StringPtr name) {
+bool SqlStorage::isAllowedTrigger(kj::StringPtr name) const {
   return true;
 }
 
-void SqlStorage::onError(kj::StringPtr message) {
+void SqlStorage::onError(kj::Maybe<int> sqliteErrorCode, kj::StringPtr message) const {
   JSG_ASSERT(false, Error, message);
 }
 
-bool SqlStorage::allowTransactions() {
-  if (IoContext::hasCurrent()) {
-    IoContext::current().logWarningOnce(
-        "To execute a transaction, please use the state.storage.transaction() API instead of the "
-        "SQL BEGIN TRANSACTION or SAVEPOINT statements. The JavaScript API is safer because it "
-        "will automatically roll back on exceptions, and because it interacts correctly with "
-        "Durable Objects' automatic atomic write coalescing.");
-  }
-  return false;
+bool SqlStorage::allowTransactions() const {
+  JSG_FAIL_REQUIRE(Error,
+      "To execute a transaction, please use the state.storage.transaction() or "
+      "state.storage.transactionSync() APIs instead of the SQL BEGIN TRANSACTION or SAVEPOINT "
+      "statements. The JavaScript API is safer because it will automatically roll back on "
+      "exceptions, and because it interacts correctly with Durable Objects' automatic atomic "
+      "write coalescing.");
 }
 
-SqlStorage::Cursor::State::State(
-    kj::RefcountedWrapper<SqliteDatabase::Statement>& statement,
+bool SqlStorage::shouldAddQueryStats() const {
+  // Bill for queries executed from JavaScript.
+  return true;
+}
+
+SqlStorage::StatementCache::~StatementCache() noexcept(false) {
+  for (auto& entry: lru) {
+    lru.remove(entry);
+  }
+}
+
+jsg::JsValue SqlStorage::wrapSqlValue(jsg::Lock& js, SqlValue value) {
+  KJ_IF_SOME(v, value) {
+    KJ_SWITCH_ONEOF(v) {
+      KJ_CASE_ONEOF(bytes, kj::Array<byte>) {
+        return jsg::JsValue(js.wrapBytes(kj::mv(bytes)));
+      }
+      KJ_CASE_ONEOF(text, kj::StringPtr) {
+        return js.str(text);
+      }
+      KJ_CASE_ONEOF(number, double) {
+        return js.num(number);
+      }
+    }
+    KJ_UNREACHABLE;
+  } else {
+    return js.null();
+  }
+}
+
+SqlStorage::Cursor::State::State(SqliteDatabase& db,
+    SqliteDatabase::Regulator& regulator,
+    kj::StringPtr sqlCode,
     kj::Array<BindingValue> bindingsParam)
-    : dependency(statement.addWrappedRef()),
-      bindings(kj::mv(bindingsParam)),
-      query(statement.getWrapped().run(mapBindings(bindings).asPtr())) {}
+    : bindings(kj::mv(bindingsParam)),
+      query(db.run({.regulator = regulator}, sqlCode, mapBindings(bindings).asPtr())) {}
 
 SqlStorage::Cursor::State::State(
-    SqliteDatabase& db, SqliteDatabase::Regulator& regulator,
-    kj::StringPtr sqlCode, kj::Array<BindingValue> bindingsParam)
+    kj::Rc<CachedStatement> cachedStatementParam, kj::Array<BindingValue> bindingsParam)
     : bindings(kj::mv(bindingsParam)),
-      query(db.run(regulator, sqlCode, mapBindings(bindings).asPtr())) {}
+      query(cachedStatement.emplace(kj::mv(cachedStatementParam))
+                ->statement.run(mapBindings(bindings).asPtr())) {}
 
 SqlStorage::Cursor::~Cursor() noexcept(false) {
   // If this Cursor was created from a Statement, clear the Statement's currentCursor weak ref.
   KJ_IF_SOME(s, selfRef) {
     KJ_IF_SOME(p, s) {
       if (&p == this) {
-        s = nullptr;
+        s = kj::none;
       }
     }
   }
 }
 
-void SqlStorage::Cursor::CachedColumnNames::ensureInitialized(
-    jsg::Lock& js, SqliteDatabase::Query& source) {
-  if (names == kj::none) {
-    js.withinHandleScope([&] {
-      auto builder = kj::heapArrayBuilder<jsg::JsRef<jsg::JsString>>(source.columnCount());
-      for (auto i: kj::zeroTo(builder.capacity())) {
-        builder.add(js, js.str(source.getColumnName(i)));
-      }
-      names = builder.finish();
-    });
+void SqlStorage::Cursor::initColumnNames(jsg::Lock& js, State& stateRef) {
+  KJ_IF_SOME(cached, stateRef.cachedStatement) {
+    reusedCachedQuery = cached->useCount++ > 0;
   }
+
+  js.withinHandleScope([&]() {
+    v8::LocalVector<v8::Value> vec(js.v8Isolate);
+    for (auto i: kj::zeroTo(stateRef.query.columnCount())) {
+      vec.push_back(js.str(stateRef.query.getColumnName(i)));
+    }
+    auto array = jsg::JsArray(v8::Array::New(js.v8Isolate, vec.data(), vec.size()));
+    columnNames = jsg::JsRef<jsg::JsArray>(js, array);
+  });
 }
 
 double SqlStorage::Cursor::getRowsRead() {
@@ -112,62 +224,86 @@ double SqlStorage::Cursor::getRowsWritten() {
   }
 }
 
-jsg::Ref<SqlStorage::Cursor::RowIterator> SqlStorage::Cursor::rows(jsg::Lock& js) {
-  KJ_IF_SOME(s, state) {
-    cachedColumnNames.ensureInitialized(js, s->query);
+SqlStorage::Cursor::RowIterator::Next SqlStorage::Cursor::next(jsg::Lock& js) {
+  auto self = JSG_THIS;
+  auto maybeRow = rowIteratorNext(js, self);
+  bool done = maybeRow == kj::none;
+  return {
+    .done = done,
+    .value = kj::mv(maybeRow),
+  };
+}
+
+jsg::JsArray SqlStorage::Cursor::toArray(jsg::Lock& js) {
+  auto self = JSG_THIS;
+  v8::LocalVector<v8::Value> results(js.v8Isolate);
+  for (;;) {
+    auto maybeRow = rowIteratorNext(js, self);
+    KJ_IF_SOME(row, maybeRow) {
+      results.push_back(row);
+    } else {
+      break;
+    }
   }
-  return jsg::alloc<RowIterator>(JSG_THIS);
+
+  return jsg::JsArray(v8::Array::New(js.v8Isolate, results.data(), results.size()));
 }
 
-kj::Maybe<SqlStorage::Cursor::RowDict> SqlStorage::Cursor::rowIteratorNext(
-    jsg::Lock& js, jsg::Ref<Cursor>& obj) {
-  auto names = obj->cachedColumnNames.get();
-  return iteratorImpl(js, obj,
-      [&](State& state, uint i, Value&& value) {
-    return RowDict::Field{
-      // A little trick here: We know there are no HandleScopes on the stack between JSG and here,
-      // so we can return a dict keyed by local handles, which avoids constructing new V8Refs here
-      // which would be relatively slower.
-      .name = names[i].getHandle(js),
-      .value = kj::mv(value)
-    };
-  }).map([&](kj::Array<RowDict::Field>&& fields) {
-    return RowDict { .fields = kj::mv(fields) };
-  });
+jsg::JsValue SqlStorage::Cursor::one(jsg::Lock& js) {
+  auto self = JSG_THIS;
+  auto result = JSG_REQUIRE_NONNULL(rowIteratorNext(js, self), Error,
+      "Expected exactly one result from SQL query, but got no results.");
+
+  KJ_IF_SOME(s, state) {
+    // It appears that the query had more results, otherwise we would have set `state` to `none`
+    // inside `iteratorImpl()`.
+    endQuery(*s);
+    JSG_FAIL_REQUIRE(
+        Error, "Expected exactly one result from SQL query, but got multiple results.");
+  }
+
+  return result;
 }
 
-jsg::Ref<SqlStorage::Cursor::RawIterator> SqlStorage::Cursor::raw(jsg::Lock&) {
-  return jsg::alloc<RawIterator>(JSG_THIS);
+jsg::Ref<SqlStorage::Cursor::RowIterator> SqlStorage::Cursor::rows(jsg::Lock& js) {
+  return js.alloc<RowIterator>(JSG_THIS);
+}
+
+kj::Maybe<jsg::JsObject> SqlStorage::Cursor::rowIteratorNext(jsg::Lock& js, jsg::Ref<Cursor>& obj) {
+  KJ_IF_SOME(values, iteratorImpl(js, obj)) {
+    auto names = obj->columnNames.getHandle(js);
+    jsg::JsObject result = js.obj();
+    KJ_ASSERT(names.size() == values.size());
+    for (auto i: kj::zeroTo(names.size())) {
+      result.set(js, names.get(js, i), jsg::JsValue(values[i]));
+    }
+    return result;
+  } else {
+    return kj::none;
+  }
+}
+
+jsg::Ref<SqlStorage::Cursor::RawIterator> SqlStorage::Cursor::raw(jsg::Lock& js) {
+  return js.alloc<RawIterator>(JSG_THIS);
 }
 
 // Returns the set of column names for the current Cursor. An exception will be thrown if the
 // iterator has already been fully consumed. The resulting columns may contain duplicate entries,
 // for instance a `SELECT *` across a join of two tables that share a column name.
-kj::Array<jsg::JsRef<jsg::JsString>> SqlStorage::Cursor::getColumnNames(jsg::Lock& js) {
-  KJ_IF_SOME(s, state) {
-    cachedColumnNames.ensureInitialized(js, s->query);
-    return KJ_MAP(name, this->cachedColumnNames.get()) {
-      return name.addRef(js);
-    };
+jsg::JsArray SqlStorage::Cursor::getColumnNames(jsg::Lock& js) {
+  return columnNames.getHandle(js);
+}
+
+kj::Maybe<jsg::JsArray> SqlStorage::Cursor::rawIteratorNext(jsg::Lock& js, jsg::Ref<Cursor>& obj) {
+  KJ_IF_SOME(values, iteratorImpl(js, obj)) {
+    return jsg::JsArray(v8::Array::New(js.v8Isolate, values.data(), values.size()));
   } else {
-    JSG_FAIL_REQUIRE(Error, "Cannot call .getColumnNames after Cursor iterator has been consumed.");
+    return kj::none;
   }
 }
 
-kj::Maybe<kj::Array<SqlStorage::Cursor::Value>> SqlStorage::Cursor::rawIteratorNext(
+kj::Maybe<v8::LocalVector<v8::Value>> SqlStorage::Cursor::iteratorImpl(
     jsg::Lock& js, jsg::Ref<Cursor>& obj) {
-  return iteratorImpl(js, obj,
-      [&](State& state, uint i, Value&& value) {
-    return kj::mv(value);
-  });
-}
-
-template <typename Func>
-auto SqlStorage::Cursor::iteratorImpl(jsg::Lock& js, jsg::Ref<Cursor>& obj, Func&& func)
-    -> kj::Maybe<kj::Array<
-        decltype(func(kj::instance<State&>(), uint(), kj::instance<Value&&>()))>> {
-  using Element = decltype(func(kj::instance<State&>(), uint(), kj::instance<Value&&>()));
-
   auto& state = *KJ_UNWRAP_OR(obj->state, {
     if (obj->canceled) {
       JSG_FAIL_REQUIRE(Error,
@@ -180,28 +316,18 @@ auto SqlStorage::Cursor::iteratorImpl(jsg::Lock& js, jsg::Ref<Cursor>& obj, Func
     }
   });
 
-  if (state.isFirst) {
-    // Little hack: We don't want to call query.nextRow() at the end of this method because it
-    // may invalidate the backing buffers of StringPtrs that we haven't returned to JS yet.
-    state.isFirst = false;
-  } else {
-    state.query.nextRow();
-  }
-
   auto& query = state.query;
 
   if (query.isDone()) {
-    // Save off row counts before the query goes away.
-    obj->rowsRead = query.getRowsRead();
-    obj->rowsWritten = query.getRowsWritten();
-    // Clean up the query proactively.
-    obj->state = kj::none;
+    obj->endQuery(state);
     return kj::none;
   }
 
-  auto results = kj::heapArrayBuilder<Element>(query.columnCount());
-  for (auto i: kj::zeroTo(results.capacity())) {
-    Value value;
+  auto n = query.columnCount();
+  v8::LocalVector<v8::Value> results(js.v8Isolate);
+  results.reserve(n);
+  for (auto i: kj::zeroTo(n)) {
+    SqlValue value;
     KJ_SWITCH_ONEOF(query.getValue(i)) {
       KJ_CASE_ONEOF(data, kj::ArrayPtr<const byte>) {
         value.emplace(kj::heapArray(data));
@@ -222,14 +348,37 @@ auto SqlStorage::Cursor::iteratorImpl(jsg::Lock& js, jsg::Ref<Cursor>& obj, Func
         // leave value null
       }
     }
-    results.add(func(state, i, kj::mv(value)));
+    results.push_back(wrapSqlValue(js, kj::mv(value)));
   }
-  return results.finish();
+
+  // Proactively iterate to the next row and, if it turns out the query is done, discard it. This
+  // is an optimization to make sure that the statement can be returned to the statement cache once
+  // the application has iterated over all results, even if the application fails to call next()
+  // one last time to get `{done: true}`. A common case where this could happen is if the app is
+  // expecting zero or one results, so it calls `exec(...).next()`. In the case that one result
+  // was returned, the application may not bother calling `next()` again. If we hadn't proactively
+  // iterated ahead by one, then the statement would not be returned to the cache until it was
+  // GC'ed, which might prevent the cache from being effective in the meantime.
+  //
+  // Unfortunately, this does not help with the case where the application stops iterating with
+  // results still available from the cursor. There's not much we can do about that case since
+  // there's no way to know if the app might come back and try to use the cursor again later.
+  query.nextRow();
+  if (query.isDone()) {
+    obj->endQuery(state);
+  }
+
+  return kj::mv(results);
 }
 
-SqlStorage::Statement::Statement(SqliteDatabase::Statement&& statement)
-    : statement(IoContext::current().addObject(
-        kj::refcountedWrapper<SqliteDatabase::Statement>(kj::mv(statement)))) {}
+void SqlStorage::Cursor::endQuery(State& stateRef) {
+  // Save off row counts before the query goes away.
+  rowsRead = stateRef.query.getRowsRead();
+  rowsWritten = stateRef.query.getRowsWritten();
+
+  // Clean up the query proactively.
+  state = kj::none;
+}
 
 kj::Array<const SqliteDatabase::Query::ValuePtr> SqlStorage::Cursor::mapBindings(
     kj::ArrayPtr<BindingValue> values) {
@@ -253,45 +402,21 @@ kj::Array<const SqliteDatabase::Query::ValuePtr> SqlStorage::Cursor::mapBindings
   };
 }
 
-jsg::Ref<SqlStorage::Cursor> SqlStorage::Statement::run(jsg::Arguments<BindingValue> bindings) {
-  auto& statementRef = *statement;  // validate we're in the right IoContext
-
-  KJ_IF_SOME(c, currentCursor) {
-    // Invalidate previous cursor if it's still running. We have to do this because SQLite only
-    // allows one execution of a statement at a time.
-    //
-    // If this is a problem, we could consider a scheme where we dynamically instantiate copies of
-    // the statement as needed. However, that risks wasting memory if the app commonly leaves
-    // cursors open and the GC doesn't run proactively enough.
-    KJ_IF_SOME(s, c.state) {
-      c.canceled = !s->query.isDone();
-      c.state = kj::none;
-    }
-    c.selfRef = kj::none;
-    c.statement = kj::none;
-    currentCursor = kj::none;
-  }
-
-  auto result = jsg::alloc<Cursor>(cachedColumnNames, statementRef, kj::mv(bindings));
-  result->statement = JSG_THIS;
-
-  result->selfRef = currentCursor;
-  currentCursor = *result;
-
-  return result;
+jsg::Ref<SqlStorage::Cursor> SqlStorage::Statement::run(
+    jsg::Lock& js, jsg::Arguments<BindingValue> bindings) {
+  return sqlStorage->exec(js, jsg::JsString(query.getHandle(js)), kj::mv(bindings));
 }
 
 void SqlStorage::visitForMemoryInfo(jsg::MemoryTracker& tracker) const {
   tracker.trackField("storage", storage);
-  tracker.trackFieldWithSize("IoPtr<SqliteDatabase>",
-      sizeof(IoPtr<SqliteDatabase>));
+  tracker.trackFieldWithSize("IoPtr<SqliteDatabase>", sizeof(IoPtr<SqliteDatabase>));
   if (pragmaPageCount != kj::none) {
-    tracker.trackFieldWithSize("IoPtr<SqllitDatabase::Statement>",
-        sizeof(IoPtr<SqliteDatabase::Statement>));
+    tracker.trackFieldWithSize(
+        "IoPtr<SqllitDatabase::Statement>", sizeof(IoPtr<SqliteDatabase::Statement>));
   }
   if (pragmaGetMaxPageCount != kj::none) {
-    tracker.trackFieldWithSize("IoPtr<SqllitDatabase::Statement>",
-        sizeof(IoPtr<SqliteDatabase::Statement>));
+    tracker.trackFieldWithSize(
+        "IoPtr<SqllitDatabase::Statement>", sizeof(IoPtr<SqliteDatabase::Statement>));
   }
 }
 

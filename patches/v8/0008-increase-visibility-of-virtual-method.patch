@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mike Aizatsky <maizatskyi@cloudflare.com>
+Date: Tue, 6 Feb 2024 12:55:07 -0800
+Subject: increase visibility of virtual method
+
+Methods were marked as protected, which conflicts with
+v8-platform-wrapper.h implementation.
+
+Signed-off-by: James M Snell <jsnell@cloudflare.com>
+
+diff --git a/include/v8-platform.h b/include/v8-platform.h
+index 6aadcab4ba987ed20d0ff3df76f54b1052713b2a..bbabb4b472095868ca1f66a7accde51aee10bca2 100644
+--- a/include/v8-platform.h
++++ b/include/v8-platform.h
+@@ -1407,7 +1407,7 @@ class Platform {
+     return &default_observer;
+   }
+ 
+- protected:
++ public:
+   /**
+    * Default implementation of current wall-clock time in milliseconds
+    * since epoch. Useful for implementing |CurrentClockTimeMillis| if

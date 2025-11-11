@@ -2,13 +2,8 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 //
-
-/* eslint-disable */
-
-import {
-  posix,
-  win32,
-} from 'node-internal:internal_path';
+/* eslint-disable @typescript-eslint/unbound-method */
+import { posix, win32 } from 'node-internal:internal_path';
 
 const {
   resolve,
@@ -24,6 +19,7 @@ const {
   parse,
   sep,
   delimiter,
+  matchesGlob,
 } = posix;
 
 export {
@@ -42,6 +38,7 @@ export {
   delimiter,
   posix,
   win32,
+  matchesGlob,
 };
 
 export { default } from 'node-internal:internal_path';

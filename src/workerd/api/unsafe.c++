@@ -1,5 +1,9 @@
 #include "unsafe.h"
 
+#include <workerd/io/io-context.h>
+#include <workerd/jsg/jsg.h>
+#include <workerd/jsg/script.h>
+
 namespace workerd::api {
 
 namespace {
@@ -13,19 +17,105 @@ static constexpr auto ASYNC_FN_SUFFIX = "}"_kjc;
 inline kj::StringPtr getName(jsg::Optional<kj::String>& name, kj::StringPtr def) {
   return name.map([](kj::String& str) { return str.asPtr(); }).orDefault(def);
 }
-} // namespace
+}  // namespace
+
+#ifdef WORKERD_FUZZILLI
+void Stdin::reprl(jsg::Lock& js) {
+  js.setAllowEval(true);
+  /*
+  cov_init_builtins_edges(static_cast<uint32_t>(
+      v8::internal::BasicBlockProfiler::Get()
+          ->GetCoverageBitmap(reinterpret_cast<v8::Isolate*>(js.v8Isolate))
+          .size()));
+  */
+
+  char helo[] = "HELO";
+  if (write(REPRL_CWFD, helo, 4) != 4 || read(REPRL_CRFD, helo, 4) != 4) {
+    printf("Invalid HELO response from parent\n");
+  }
+
+  if (memcmp(helo, "HELO", 4) != 0) {
+    printf("Invalid response from parent\n");
+  }
+
+  do {
+    v8::HandleScope handle_scope(js.v8Isolate);
+    v8::TryCatch try_catch(js.v8Isolate);
+    try_catch.SetVerbose(true);
+
+    size_t script_size = 0;
+    unsigned action = 0;
+    ssize_t nread = read(REPRL_CRFD, &action, 4);
+    fflush(0);
+    fflush(stderr);
+    if (nread != 4 || action != 0x63657865) {  // 'exec'
+      fprintf(stderr, "Unknown action: %x\n", action);
+      exit(-1);
+    }
+
+    CHECK(read(REPRL_CRFD, &script_size, 8) == 8);
+
+    char* script_ = (char*)malloc(script_size + 1);
+    CHECK(script_ != nullptr);
+
+    char* source_buffer_tail = script_;
+    ssize_t remaining = (ssize_t)script_size;
+
+    while (remaining > 0) {
+      ssize_t rv = read(REPRL_DRFD, source_buffer_tail, (size_t)remaining);
+      if (rv <= 0) {
+        fprintf(stderr, "Failed to load script\n");
+        exit(-1);
+      }
+      remaining -= rv;
+      source_buffer_tail += rv;
+    }
+
+    script_[script_size] = '\0';
+
+    int status = 0;
+    unsigned res_val = 0;
+    const kj::String script = kj::str(script_);
+    const kj::String wrapped = kj::str("{", script_, "}");
+    auto compiled = jsg::NonModuleScript::compile(js, wrapped, "reprl"_kj);
+    try {
+      auto result = compiled.runAndReturn(js);
+      res_val = jsg::check(v8::Local<v8::Value>(result)->Int32Value(js.v8Context()));
+      // if we reach that point execution was successful -> return 0
+      res_val = 0;
+    } catch (jsg::JsExceptionThrown&) {
+      res_val = 11;
+      if (try_catch.HasCaught()) {
+        auto str = workerd::jsg::check(try_catch.Message()->Get()->ToDetailString(js.v8Context()));
+        v8::String::Utf8Value utf8String(js.v8Isolate, str);
+        fflush(stdout);
+      }
+    }
+
+    fflush(stdout);
+    fflush(stderr);
+    status = (res_val & 0xFF) << 8;
+    CHECK(write(REPRL_CWFD, &status, 4) == 4);
+    __sanitizer_cov_reset_edgeguards();
+    free(script_);
+    //cleanup context
+
+  } while (true);
+}
+#endif
 
 jsg::JsValue UnsafeEval::eval(jsg::Lock& js, kj::String script, jsg::Optional<kj::String> name) {
   js.setAllowEval(true);
   KJ_DEFER(js.setAllowEval(false));
-  auto compiled = jsg::NonModuleScript::compile(script, js, getName(name, EVAL_STR));
-  return jsg::JsValue(compiled.runAndReturn(js.v8Context()));
+  auto compiled = jsg::NonModuleScript::compile(js, script, getName(name, EVAL_STR));
+  return compiled.runAndReturn(js);
 }
 
-UnsafeEval::UnsafeEvalFunction
-UnsafeEval::newFunction(jsg::Lock& js, jsg::JsString script, jsg::Optional<kj::String> name,
-                        jsg::Arguments<jsg::JsRef<jsg::JsString>> args,
-                        const jsg::TypeHandler<UnsafeEvalFunction>& handler) {
+UnsafeEval::UnsafeEvalFunction UnsafeEval::newFunction(jsg::Lock& js,
+    jsg::JsString script,
+    jsg::Optional<kj::String> name,
+    jsg::Arguments<jsg::JsRef<jsg::JsString>> args,
+    const jsg::TypeHandler<UnsafeEvalFunction>& handler) {
   js.setAllowEval(true);
   KJ_DEFER(js.setAllowEval(false));
 
@@ -33,21 +123,24 @@ UnsafeEval::newFunction(jsg::Lock& js, jsg::JsString script, jsg::Optional<kj::S
   v8::ScriptOrigin origin(nameStr);
   v8::ScriptCompiler::Source source(script, origin);
 
-  auto argNames = KJ_MAP(arg, args) {
-    return v8::Local<v8::String>(arg.getHandle(js));
-  };
+  v8::LocalVector<v8::String> argNames(js.v8Isolate);
+  argNames.reserve(args.size());
+  for (auto& arg: args) {
+    argNames.push_back(arg.getHandle(js));
+  }
 
-  auto fn = jsg::check(v8::ScriptCompiler::CompileFunction(js.v8Context(), &source, argNames.size(),
-                                                           argNames.begin(), 0, nullptr));
+  auto fn = jsg::check(v8::ScriptCompiler::CompileFunction(
+      js.v8Context(), &source, argNames.size(), argNames.data(), 0, nullptr));
   fn->SetName(nameStr);
 
   return KJ_ASSERT_NONNULL(handler.tryUnwrap(js, fn));
 }
 
-UnsafeEval::UnsafeEvalFunction
-UnsafeEval::newAsyncFunction(jsg::Lock& js, jsg::JsString script, jsg::Optional<kj::String> name,
-                             jsg::Arguments<jsg::JsRef<jsg::JsString>> args,
-                             const jsg::TypeHandler<UnsafeEvalFunction>& handler) {
+UnsafeEval::UnsafeEvalFunction UnsafeEval::newAsyncFunction(jsg::Lock& js,
+    jsg::JsString script,
+    jsg::Optional<kj::String> name,
+    jsg::Arguments<jsg::JsRef<jsg::JsString>> args,
+    const jsg::TypeHandler<UnsafeEvalFunction>& handler) {
   js.setAllowEval(true);
   KJ_DEFER(js.setAllowEval(false));
 
@@ -69,7 +162,7 @@ UnsafeEval::newAsyncFunction(jsg::Lock& js, jsg::JsString script, jsg::Optional<
   auto prepared = v8::String::Concat(js.v8Isolate, js.strIntern(ASYNC_FN_PREFIX), nameStr);
   prepared = v8::String::Concat(js.v8Isolate, prepared, js.strIntern(ASYNC_FN_ARG_OPEN));
 
-  for (auto& arg : args) {
+  for (auto& arg: args) {
     prepared = v8::String::Concat(js.v8Isolate, prepared, arg.getHandle(js));
     prepared = v8::String::Concat(js.v8Isolate, prepared, js.strIntern(","));
   }
@@ -101,9 +194,20 @@ jsg::JsValue UnsafeEval::newWasmModule(jsg::Lock& js, kj::Array<kj::byte> src) {
 
 jsg::Promise<void> UnsafeModule::abortAllDurableObjects(jsg::Lock& js) {
   auto& context = IoContext::current();
-  // Abort all actors asynchronously to avoid recursively taking isolate lock in actor destructor
-  auto promise = kj::evalLater([&] () { return context.abortAllActors(); });
-  return context.awaitIo(js, kj::mv(promise));
+
+  auto exception = JSG_KJ_EXCEPTION(FAILED, Error, "Application called abortAllDurableObjects().");
+  context.abortAllActors(exception);
+
+  // We used to perform the abort asynchronously, but that became no longer necessary when
+  // `Worker::Actor`'s destructor stopped requiring taking the isolate lock.
+  return js.resolvedPromise();
 }
 
-} // namespace workerd::api
+#ifdef WORKERD_FUZZILLI
+void Fuzzilli::fuzzilli(jsg::Lock& js, jsg::Arguments<jsg::Value> args) {
+  // Delegate to the fuzzilli_handler in fuzzilli.c++
+  fuzzilli_handler(js, args);
+}
+#endif
+
+}  // namespace workerd::api

@@ -8,17 +8,61 @@
 // This file defines basic helpers involved in wrapping C++ objects for JavaScript consumption,
 // including garbage-collecting those objects.
 
+#include <v8-context.h>
+#include <v8-object.h>
+#include <v8-version.h>
+
 #include <kj/common.h>
 #include <kj/debug.h>
+#include <kj/list.h>
 #include <kj/refcount.h>
 #include <kj/vector.h>
-#include <kj/list.h>
-#include <v8.h>
-#include <workerd/jsg/memory.h>
 
-namespace cppgc { class Visitor; }
+namespace cppgc {
+class Visitor;
+}
 
 namespace workerd::jsg {
+
+// The ContextPointerSlot enum defines the embedder slots we use in v8::Context for
+// storing pointers to various important objects.
+enum class ContextPointerSlot : int {
+  // Pointer slot 0 is special and should never be used by us.
+  RESERVED = 0,
+  GLOBAL_WRAPPER = 1,
+  MODULE_REGISTRY = 2,
+  EXTENDED_CONTEXT_WRAPPER = 3,
+  VIRTUAL_FILE_SYSTEM = 4,
+  // Keep the MAX_POINTER_SLOT as the last entry and always set to
+  // to the highest value of the other entries. We use this to
+  // ensure that the highest used index is always initialized in
+  // every context we create without having to update the specific
+  // callsites whenever we add a new slot. We can just make the
+  // change here.
+  MAX_POINTER_SLOT = VIRTUAL_FILE_SYSTEM,
+};
+
+inline void setAlignedPointerInEmbedderData(
+    v8::Local<v8::Context> context, ContextPointerSlot slot, void* ptr) {
+  // The type tag is a small integer that should be different for every pointer
+  // type to avoid type confusion attacks.  We just use the slot index for now,
+  // since we have a different pointer type for each slot.
+  KJ_DASSERT(slot != ContextPointerSlot::RESERVED, "Attempt to use reserved embedder data slot.");
+  context->SetAlignedPointerInEmbedderData(
+      static_cast<int>(slot), ptr, static_cast<v8::EmbedderDataTypeTag>(slot));
+}
+
+template <typename T>
+kj::Maybe<T&> getAlignedPointerFromEmbedderData(
+    v8::Local<v8::Context> context, ContextPointerSlot slot) {
+  KJ_DASSERT(slot != ContextPointerSlot::RESERVED, "Attempt to use reserved embedder data slot.");
+  void* ptr = context->GetAlignedPointerFromEmbedderData(
+      static_cast<int>(slot), static_cast<v8::EmbedderDataTypeTag>(slot));
+  if (ptr == nullptr) return kj::none;
+  return *reinterpret_cast<T*>(ptr);
+}
+
+class MemoryTracker;
 
 using kj::uint;
 
@@ -46,30 +90,31 @@ class HeapTracer;
 // For resource types, this wrapper refcount counts the number of Ref<T>s that point to the
 // Wrappable and are not visible to GC tracing.
 class Wrappable: public kj::Refcounted {
-public:
-  // Number of internal fields in a wrapper object.
-  static constexpr uint INTERNAL_FIELD_COUNT = 3;
+ public:
+  enum InternalFields : int {
+    // Field must contain a pointer to `WORKERD_WRAPPABLE_TAG`. This is a workerd-specific
+    // tag that helps us to identify a v8 API object as one of our own.
+    WRAPPABLE_TAG_FIELD_INDEX,
 
-  // Index of the internal field that points back to the `Wrappable`.
-  static constexpr uint WRAPPED_OBJECT_FIELD_INDEX = 2;
+    // Index of the internal field that points back to the `Wrappable`.
+    WRAPPED_OBJECT_FIELD_INDEX,
 
-  // Index of the internal field that contains a pointer to the cppgc shim object, used to get
-  // tracing callback from V8 and get notification when the wrapper is collected.
-  static constexpr uint CPPGC_SHIM_FIELD_INDEX = 1;
+    // Number of internal fields in a wrapper object.
+    INTERNAL_FIELD_COUNT,
+  };
 
-  // Field must contain a pointer to `WRAPPABLE_TAG`. This is a requirement of v8::CppHeap. The
-  // purpose is not clear.
-  //
-  // Note that although V8 lets us configure which slot this tag is in, in practice if we set it
-  // to anything other than zero, we see crashes inside V8. It appears that V8 allocates some
-  // objects of its own which have internal fields, and then GC doesn't check that the index is
-  // in-bounds before reading it...
-  static constexpr uint WRAPPABLE_TAG_FIELD_INDEX = 0;
+  static constexpr v8::CppHeapPointerTag WRAPPABLE_TAG = v8::CppHeapPointerTag::kDefaultTag;
 
   // The value pointed to by the internal field field `WRAPPABLE_TAG_FIELD_INDEX`.
   //
   // This value was chosen randomly.
-  static constexpr uint16_t WRAPPABLE_TAG = 0xeb04;
+  static constexpr uint16_t WORKERD_WRAPPABLE_TAG = 0xeb04;
+
+  static bool isWorkerdApiObject(v8::Local<v8::Object> object) {
+    return object->GetAlignedPointerFromInternalField(WRAPPABLE_TAG_FIELD_INDEX,
+               static_cast<v8::EmbedderDataTypeTag>(WRAPPABLE_TAG_FIELD_INDEX)) ==
+        &WORKERD_WRAPPABLE_TAG;
+  }
 
   void addStrongRef();
   void removeStrongRef();
@@ -82,9 +127,7 @@ public:
   v8::Local<v8::Object> getHandle(v8::Isolate* isolate);
 
   kj::Maybe<v8::Local<v8::Object>> tryGetHandle(v8::Isolate* isolate) {
-    return wrapper.map([&](v8::TracedReference<v8::Object>& ref) {
-      return ref.Get(isolate);
-    });
+    return wrapper.map([&](v8::TracedReference<v8::Object>& ref) { return ref.Get(isolate); });
   }
 
   // Visits a Ref<T> pointing at this Wrappable. `refParent` and `refStrong` are the members of
@@ -129,7 +172,9 @@ public:
 
   virtual void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
 
-  virtual bool jsgGetMemoryInfoIsRootNode() const { return strongRefcount > 0; }
+  virtual bool jsgGetMemoryInfoIsRootNode() const {
+    return strongRefcount > 0;
+  }
 
   virtual v8::Local<v8::Object> jsgGetMemoryInfoWrapperObject(v8::Isolate* isolate) {
     KJ_IF_SOME(handle, tryGetHandle(isolate)) {
@@ -145,7 +190,7 @@ public:
   // Called by HeapTracer when V8 tells us that it found a reference to this object.
   void traceFromV8(cppgc::Visitor& cppgcVisitor);
 
-private:
+ private:
   class CppgcShim;
 
   // If a JS wrapper is currently allocated, this point to the cppgc shim object.
@@ -187,7 +232,7 @@ private:
 
 // For historical reasons, this is actually implemented in setup.c++.
 class HeapTracer: public v8::EmbedderRootsHandler {
-public:
+ public:
   explicit HeapTracer(v8::Isolate* isolate);
 
   ~HeapTracer() noexcept {
@@ -205,8 +250,12 @@ public:
   // object, which implies that we are collecting unreachable objects.
   static bool isInCppgcDestructor();
 
-  void addWrapper(kj::Badge<Wrappable>, Wrappable& wrappable) { wrappers.add(wrappable); }
-  void removeWrapper(kj::Badge<Wrappable>, Wrappable& wrappable) { wrappers.remove(wrappable); }
+  void addWrapper(kj::Badge<Wrappable>, Wrappable& wrappable) {
+    wrappers.add(wrappable);
+  }
+  void removeWrapper(kj::Badge<Wrappable>, Wrappable& wrappable) {
+    wrappers.remove(wrappable);
+  }
   void clearWrappers();
 
   void addToFreelist(Wrappable::CppgcShim& shim);
@@ -214,16 +263,21 @@ public:
   void clearFreelistedShims();
 
   // implements EmbedderRootsHandler -------------------------------------------
-  bool IsRoot(const v8::TracedReference<v8::Value>& handle) override;
   void ResetRoot(const v8::TracedReference<v8::Value>& handle) override;
   bool TryResetRoot(const v8::TracedReference<v8::Value>& handle) override;
 
-  kj::StringPtr jsgGetMemoryName() const { return "HeapTracer"_kjc; }
-  size_t jsgGetMemorySelfSize() const { return sizeof(*this); }
+  kj::StringPtr jsgGetMemoryName() const {
+    return "HeapTracer"_kjc;
+  }
+  size_t jsgGetMemorySelfSize() const {
+    return sizeof(*this);
+  }
   void jsgGetMemoryInfo(jsg::MemoryTracker& tracker) const;
-  bool jsgGetMemoryInfoIsRootNode() const { return false; }
+  bool jsgGetMemoryInfoIsRootNode() const {
+    return false;
+  }
 
-private:
+ private:
   v8::Isolate* isolate;
   kj::Vector<Wrappable*> wrappersToTrace;
 
@@ -242,16 +296,16 @@ private:
 // they don't hold disallowed references to KJ I/O objects. IoOwn's destructor will explicitly
 // create AllowAsyncDestructorsScope to permit holding such objects via IoOwn. This is meant to
 // help catch bugs.
-#define DISALLOW_KJ_IO_DESTRUCTORS_SCOPE \
-  kj::DisallowAsyncDestructorsScope disallow( \
+#define DISALLOW_KJ_IO_DESTRUCTORS_SCOPE                                                           \
+  kj::DisallowAsyncDestructorsScope disallow(                                                      \
       "JavaScript heap objects must not contain KJ I/O objects without a IoOwn")
 // TODO(soon):
 // - Track memory usage of native objects.
 
 // Given a handle to a resource type, extract the raw C++ object pointer.
 template <typename T, bool isContext>
-T& extractInternalPointer(const v8::Local<v8::Context>& context,
-                          const v8::Local<v8::Object>& object) {
+T& extractInternalPointer(
+    const v8::Local<v8::Context>& context, const v8::Local<v8::Object>& object) {
   // Due to bugs in V8, we can't use internal fields on the global object:
   //   https://groups.google.com/d/msg/v8-users/RET5b3KOa5E/3EvpRBzwAQAJ
   //
@@ -260,11 +314,13 @@ T& extractInternalPointer(const v8::Local<v8::Context>& context,
 
   if constexpr (isContext) {
     // V8 docs say EmbedderData slot 0 is special, so we use slot 1. (See comments in newContext().)
-    return *reinterpret_cast<T*>(context->GetAlignedPointerFromEmbedderData(1));
+    return KJ_ASSERT_NONNULL(
+        getAlignedPointerFromEmbedderData<T>(context, ContextPointerSlot::GLOBAL_WRAPPER));
   } else {
     KJ_ASSERT(object->InternalFieldCount() == Wrappable::INTERNAL_FIELD_COUNT);
-    return *reinterpret_cast<T*>(object->GetAlignedPointerFromInternalField(
-        Wrappable::WRAPPED_OBJECT_FIELD_INDEX));
+    return *reinterpret_cast<T*>(
+        object->GetAlignedPointerFromInternalField(Wrappable::WRAPPED_OBJECT_FIELD_INDEX,
+            static_cast<v8::EmbedderDataTypeTag>(Wrappable::WRAPPED_OBJECT_FIELD_INDEX)));
   }
 }
 

@@ -2,51 +2,111 @@ name: Tests
 
 on:
   pull_request:
-    paths-ignore:
-    - 'doc/**'
+  merge_group:
   push:
     branches:
-    - main
+      - main
 
+concurrency:
+  # Cancel existing builds for the same PR.
+  # Otherwise, all other builds will be allowed to run through.
+  group: test.yml-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  # Read repo
+  contents: read
+  # Read/write artifacts
+  actions: write
+  # Required for adding comments to PR.
+  # Specifically for sticky-pull-request-comment workflow action.
+  pull-requests: write
 jobs:
+  fixup:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/fixup.yml
+  labels:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/labels.yml
   test:
     strategy:
       matrix:
         os:
           [
-            { name : linux, image : ubuntu-20.04 },
-            { name : macOS, image : macos-13 },
-            { name : windows, image : windows-2022 }
+            { name: linux, arch: X64, image: ubuntu-22.04 },
+            { name: linux-arm, arch: ARM64, image: ubuntu-22.04-arm },
+            { name: macOS, arch: ARM64, image: macos-26 },
+            { name: windows, arch: X64, image: windows-2025 },
           ]
-        config:
-          [
+        config: [
             # Default build: no suffix or additional bazel arguments
-            { suffix: '', bazel-args: '' },
+            { suffix: '' },
             # Debug build
-            { suffix: -debug, bazel-args: --config=debug }
+            { suffix: -debug },
           ]
         include:
           # Add an Address Sanitizer (ASAN) build on Linux for additional checking.
-          - os:     { name: linux, image: ubuntu-20.04 }
-            config: { suffix: -asan, bazel-args: --config=asan }
-          # Windows has a custom non-debug bazel config.
-          - os:     { name : windows, image : windows-2022 }
-            config: { suffix: '', bazel-args: --config=windows_no_dbg }
+          - os: { name: linux, arch: X64, image: ubuntu-22.04 }
+            config: { suffix: -asan }
           # TODO (later): The custom Windows-debug configuration consistently runs out of disk
           # space on CI, disable it for now. Once https://github.com/bazelbuild/bazel/issues/21615
           # has been resolved we can likely re-enable it and possibly fold up the custom
           # configurations, as we can more easily disable PDB file generation.
-          # - os:     { name : windows, image : windows-2022 }
+          # - os:     { name : windows, image : windows-2025 }
           #   config: { suffix: -debug, bazel-args: --config=windows_dbg }
         exclude:
-          # Skip the matrix generated Windows non-debug config to use the one added above.
-          - os:     { name : windows, image : windows-2022 }
-            config: { suffix: '', bazel-args: '' }
-          - os:     { name : windows, image : windows-2022 }
-            config: { suffix: -debug, bazel-args: --config=debug }
+          - os: { name: windows, arch: X64, image: windows-2025 }
+            config: { suffix: -debug }
+          # due to resource constraints, exclude the macOS and x64 Linux debug runners for now.
+          # linux-asan and arm64 linux-debug should provide sufficient coverage for building in the
+          # debug configuration.
+          - os: { name: macOS, arch: ARM64, image: macos-26 }
+            config: { suffix: -debug }
+          - os: { name: linux, arch: X64, image: ubuntu-22.04 }
+            config: { suffix: -debug }
+            # linux release is handled by separate test-linux job
+          - os: { name: linux, arch: X64, image: ubuntu-22.04 }
+            config: { suffix: '' }
       fail-fast: false
-    runs-on: ${{ matrix.os.image }}
-    name: test (${{ matrix.os.name }}${{ matrix.config.suffix }})
+    name: test (${{ matrix.os.name }}, ${{ matrix.os.image}}${{matrix.config.suffix != '' && format(', {0}', matrix.config.suffix) || ''}})
+    uses: ./.github/workflows/_bazel.yml
+    with:
+      image: ${{ matrix.os.image }}
+      os_name: ${{ matrix.os.name }}
+      arch_name: ${{ matrix.os.arch }}
+      suffix: ${{ matrix.config.suffix }}
+      extra_bazel_args: '--config=ci-test --config=ci-${{matrix.os.name}}${{matrix.config.suffix}}'
+    secrets:
+      BAZEL_CACHE_KEY: ${{ secrets.BAZEL_CACHE_KEY }}
+      WORKERS_MIRROR_URL: ${{ secrets.WORKERS_MIRROR_URL }}
+
+  # Handled separately from `test` to speed up execution of workers-sdk-test which depends on it.
+  test-linux:
+    uses: ./.github/workflows/_bazel.yml
+    with:
+      image: ubuntu-22.04
+      os_name: linux
+      arch_name: 'X64'
+      suffix: ''
+      extra_bazel_args: '--config=ci-test --config=ci-linux'
+      upload_test_logs: true
+      upload_binary: true
+    secrets:
+      BAZEL_CACHE_KEY: ${{ secrets.BAZEL_CACHE_KEY }}
+      WORKERS_MIRROR_URL: ${{ secrets.WORKERS_MIRROR_URL }}
+
+  lint:
+    uses: ./.github/workflows/_bazel.yml
+    with:
+      extra_bazel_args: '--config=lint --config=clang-tidy --config=ci-test --config=ci-linux'
+      run_tests: false
+      parse_headers: true
+    secrets:
+      BAZEL_CACHE_KEY: ${{ secrets.BAZEL_CACHE_KEY }}
+      WORKERS_MIRROR_URL: ${{ secrets.WORKERS_MIRROR_URL }}
+
+  check-snapshot:
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,125 +114,117 @@ jobs:
       - name: Cache
         id: cache
         uses: actions/cache@v4
+        # Use same cache and build configuration as release build, this allows us to keep download
+        # sizes small and generate types with optimization enabled, should be slightly faster.
         with:
           path: ~/bazel-disk-cache
-          key: bazel-disk-cache-${{ matrix.os.name }}-${{ runner.arch }}${{ matrix.config.suffix }}-${{ hashFiles('.bazelversion', '.bazelrc', 'WORKSPACE') }}
-          # Intentionally not reusing an older cache entry using a key prefix, bazel frequently
-          # ends up with a larger cache at the end when starting with an available cache entry,
-          # resulting in a snowballing cache size and cache download/upload times.
-      - name: Setup Linux
-        if: matrix.os.name == 'linux'
-        # Install dependencies, including clang via through LLVM APT repository. Note that this
-        # will also install lldb and clangd alongside dependencies, which can be removed with
-        # `sudo apt-get remove -y lldb-15 clangd-15; sudo apt-get autoremove -y` if space is
-        # limited.
-        # libunwind, libc++abi1 and libc++1 should be automatically installed as dependencies of
-        # libc++, but this appears to cause errors so they are also being explicitly installed.
-        # Since the GitHub runner image comes with a number of preinstalled packages, we don't need
-        # to use APT much otherwise.
-        # TODO(cleanup): Upgrade this to LLVM 16 as soon as it is available on the latest Ubuntu
-        # LTS release. Debian includes LLVM 16 since the Bookworm 12.4 point release.
+          key: bazel-disk-cache-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'WORKSPACE') }}
+      - name: Setup Runner
+        uses: ./.github/actions/setup-runner
+      - name: build types
         run: |
-          export DEBIAN_FRONTEND=noninteractive
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 15
-          sudo apt-get install -y libunwind-15 libc++abi1-15 libc++1-15 libc++-15-dev libclang-rt-15-dev
-          echo "build:linux --action_env=CC=/usr/lib/llvm-15/bin/clang --action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
-          echo "build:linux --host_action_env=CC=/usr/lib/llvm-15/bin/clang --host_action_env=CXX=/usr/lib/llvm-15/bin/clang++" >> .bazelrc
-          sed -i -e "s%llvm-symbolizer%/usr/lib/llvm-15/bin/llvm-symbolizer%" .bazelrc
-      - name: Setup macOS
-        if: matrix.os.name == 'macOS'
-        # TODO: We want to symbolize stacks for crashes on CI. Xcode is currently based on LLVM 16
-        # and the macos-13 image has llvm@15 installed:
-        # https://github.com/actions/runner-images/blob/main/images/macos/macos-13-Readme.md
-        #
-        # Not enabled because symbolication does not work on workerd macOS builds yet and running
-        # llvm-symbolizer in the currently broken state causes some tests to time out on the
-        # runner.
-        # Use latest available Xcode version – runner still defaults to 15.0.1.
+          bazel build --strip=always --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --config=ci --config=release_linux //types
+      - name: Check snapshot diff
         run: |
-          sudo xcode-select -s "/Applications/Xcode_15.1.app"
-          # export LLVM_SYMBOLIZER=$(brew --prefix llvm@15)/bin/llvm-symbolizer
-          # sed -i -e "s%llvm-symbolizer%${LLVM_SYMBOLIZER}%" .bazelrc
-      - name: Setup Windows
-        if: matrix.os.name == 'windows'
-        # Set a custom output root directory to avoid long file name issues.
+          diff -r types/generated-snapshot/latest bazel-bin/types/definitions/latest > types.diff
+          diff -r types/generated-snapshot/experimental bazel-bin/types/definitions/experimental >> types.diff
+      - name: 'Put diff on the environment'
+        if: failure()
+        id: types_diff
         run: |
-          [System.IO.File]::WriteAllLines((Join-Path -Path $env:USERPROFILE -ChildPath '.bazelrc'), 'startup --output_user_root=C:/tmp')
-      - name: Configure download mirrors
-        shell: bash
+          {
+            echo 'TYPES_DIFF<<EOF'
+            cat types.diff
+            echo EOF
+          } >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        id: artifact-upload-step
+        with:
+          name: generated-snapshot
+          path: bazel-bin/types/definitions/
+      - name: 'Comment on PR with error details'
+        if: failure()
+        uses: marocchino/sticky-pull-request-comment@52423e01640425a022ef5fd42c6fb5f633a02728
+        with:
+          message: |
+            The generated output of `@cloudflare/workers-types` has been changed by this PR. If this is intentional, run `just generate-types` to update the snapshot. Alternatively, you can download the full generated types: ${{ steps.artifact-upload-step.outputs.artifact-url }}
+
+            <details>
+            <summary>Full Type Diff</summary>
+
+            ```diff
+            ${{ env.TYPES_DIFF }}
+            ```
+
+            </details>
+      - name: 'Comment on PR with error details'
+        if: success()
+        uses: marocchino/sticky-pull-request-comment@52423e01640425a022ef5fd42c6fb5f633a02728
+        with:
+          only_update: true
+          message: |
+            The generated output of `@cloudflare/workers-types` matches the snapshot in `types/generated-snapshot` :tada:
+
+  workers-sdk-test:
+    needs: [test-linux, check-snapshot]
+    name: Run workers-sdk tests
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout workers-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: cloudflare/workers-sdk
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Match workers-sdk node version
+          node-version: 20.19.1
+          cache: 'pnpm'
+      - name: Install workers-sdk dependencies
+        run: pnpm install
+
+      - name: Download workerd binary
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-X64-binary
+          path: /tmp
+
+      - name: Make workerd binary executable
+        run: chmod +x /tmp/workerd
+
+      - name: Download generated types
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-snapshot
+          path: /tmp/test-types
+
+      - name: Create and install workers-types package
         run: |
-          if [ ! -z "${{ secrets.WORKERS_MIRROR_URL }}" ] ; then
-            # Strip comment in front of WORKERS_MIRROR_URL, then substitute secret to use it.
-            sed -e '/WORKERS_MIRROR_URL/ { s@# *@@; s@WORKERS_MIRROR_URL@${{ secrets.WORKERS_MIRROR_URL }}@; }' -i.bak WORKSPACE
-          fi
-      - name: Generate list of excluded Bazel targets
-        # Exclude large benchmarking binaries created in debug and asan configurations to avoid
-        # running out of disk space on the runner (nominally 14GB). We typically have two copies
-        # of generated artifacts: one under bazel output-base and one in the bazel disk cache.
-        # Also only generate limited debug info – these binaries are only used for testing and
-        # don't need to run within a debugger, so information needed for symbolication is
-        # sufficient. The host configuration compiles in opt mode/without debug info by default, so
-        # there's no need to set host_copt here.
-        # LLVM produces a bit more debug info on macOS by default to facilitate debugging with
-        # LLDB. This is not needed for this use case, so disable it using -fno-standalone-debug –
-        # this is already the default for Linux/Windows.
-        if: contains(matrix.config.suffix, 'debug') || contains(matrix.config.suffix, 'asan')
-        shell: bash
-        run: |
-          cat <<EOF >> .bazelrc
-          build:limit-storage --build_tag_filters=-off-by-default,-benchmark
-          build:limit-storage --copt="-g1"
-          build:limit-storage --copt="-fno-standalone-debug"
-          build:limit-storage --@rules_rust//:extra_rustc_flags=-C,panic=unwind,-C,debug-assertions=y,-C,debuginfo=limited,-C,embed-bitcode=n
-          build:asan --config=limit-storage
-          build:debug --config=limit-storage
+          cp /tmp/test-types/oldest/* /tmp/test-types
+          cat > /tmp/test-types/package.json << EOF
+          {
+              "name": "@cloudflare/workers-types"
+            }
           EOF
-      - name: Configure git hooks
-        # Configure git to quell an irrelevant warning for runners (they never commit / push).
-        run: git config core.hooksPath githooks
-      - name: Bazel build
-        # timestamps are no longer being added here, the GitHub logs include timestamps (Use
-        # 'Show timestamps' on the web interface)
-        run: |
-          bazelisk build ${{ matrix.config.bazel-args }} --disk_cache=~/bazel-disk-cache --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --verbose_failures //...
-      - name: Bazel test
-        run: |
-          bazelisk test ${{ matrix.config.bazel-args }} --disk_cache=~/bazel-disk-cache --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --keep_going --verbose_failures --test_output=errors //...
-      - name: Report disk usage
-        if: always()
-        shell: bash
-        run: |
-          BAZEL_OUTPUT_BASE=$(bazel info --ui_event_filters=-WARNING output_base)
-          BAZEL_REPOSITORY_CACHE=$(bazel info --ui_event_filters=-WARNING repository_cache)
-          echo "Bazel cache usage statistics"
-          du -hs -t 1 ~/bazel-disk-cache/* $BAZEL_REPOSITORY_CACHE
-          echo "Bazel output usage statistics"
-          du -hs -t 1 $BAZEL_OUTPUT_BASE
-          echo "Workspace usage statistics"
-          du -hs -t 1 $GITHUB_WORKSPACE
-      - name: Drop large Bazel cache files
-        if: always()
-        # Github has a nominal 10GB of storage for all cached builds associated with a project.
-        # Drop large files (>100MB) in our cache to improve shared build cache efficiency. This is
-        # particularly helpful for asan and debug builds that produce larger executables. Also
-        # the process of saving the Bazel disk cache generates a tarball on the runners disk, and
-        # it is possible to run out of storage in that process (does not fail the workflow).
-        shell: bash
-        run: |
-          if [ -d ~/bazel-disk-cache ]; then
-            find ~/bazel-disk-cache -size +100M -type f -exec rm {} \;
-            echo "Trimmed Bazel cache usage statistics"
-            du -hs -t 1 ~/bazel-disk-cache/*
-          else
-            echo "Disk cache does not exist: ~/bazel-disk-cache"
-          fi
-      - name: Bazel clean (expunge)
-        # Only files in the disk cache are needed at this point, but generating the tarball created
-        # of the bazel disk cache requires disk space. This step blows away build outputs and leaves
-        # the Bazel disk cache untouched.
-        run: bazelisk clean --expunge
-      - name: Bazel shutdown
-        # Check that there are no .bazelrc issues that prevent shutdown.
-        run: bazelisk shutdown
+          pnpm add /tmp/test-types -w
+
+      - name: Run Wrangler, Miniflare, Vitest, Vite unit tests
+        run: pnpm test:ci --concurrency 1 --filter miniflare --filter wrangler --filter @cloudflare/vite-plugin --filter="./fixtures/vitest-pool-workers-examples"
+        env:
+          MINIFLARE_WORKERD_PATH: /tmp/workerd
+
+      - name: Run Wrangler Node.js e2e tests
+        run: pnpm test:e2e --filter wrangler -- unenv-preset
+        env:
+          MINIFLARE_WORKERD_PATH: /tmp/workerd
+
+  wpt-report:
+    needs: [test-linux]
+    uses: ./.github/workflows/_wpt.yml
+    with:
+      image: 'ubuntu-22.04'
+      logs_artifact: 'test-logs-linux-X64.zip'
+      report_artifact: 'wpt-report-linux-X64.json'

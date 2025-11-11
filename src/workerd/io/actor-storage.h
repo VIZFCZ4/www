@@ -7,12 +7,10 @@
 #include <kj/common.h>
 #include <kj/string.h>
 
-#include <workerd/io/actor-storage.capnp.h>
-
 namespace workerd {
 // This class wraps common values and functions for interacting durable object (actor) storage.
 class ActorStorageLimits {
-public:
+ public:
   // We grant some extra cushion on top of the advertised max size in order
   // to avoid penalizing people for pushing right up against the advertised size.
   // The v8 serialization method we use can add a few extra bytes for its type tag
@@ -32,8 +30,8 @@ public:
   static constexpr size_t MAX_KEY_SIZE = 2048;
 
   static void checkMaxKeySize(kj::StringPtr key);
-  static void checkMaxValueSize(kj::StringPtr key, kj::ArrayPtr<kj::byte> value);
+  static void checkMaxValueSize(kj::StringPtr key, kj::ArrayPtr<const kj::byte> value);
   static void checkMaxPairsCount(size_t count);
 };
 
-} // namespace workerd
+}  // namespace workerd

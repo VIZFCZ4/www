@@ -1,0 +1,13 @@
+{
+  "$schema": "deps.schema.json",
+  "repositories": [
+    {
+      "name": "capnp-cpp",
+      "type": "github_tarball",
+      "owner": "capnproto",
+      "repo": "capnproto",
+      "branch": "v2",
+      "extra_strip_prefix": "/c++"
+    }
+  ]
+}
