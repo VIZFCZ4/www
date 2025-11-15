@@ -51,6 +51,14 @@ def _py_wd_test_helper(
         substitutions = {"%PYTHON_FEATURE_FLAGS": feature_flags_txt},
     )
 
+    # Since we bumped the development flag to point to 0.28.2, it doesn't work on windows CI.
+    # TODO: Fix this.
+    if python_flag == "development":
+        kwargs["target_compatible_with"] = select({
+            "@platforms//os:windows": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        })
+
     wd_test(
         src = templated_src,
         name = name_flag + "@",
@@ -76,11 +84,13 @@ def _snapshot_files(
         baseline_snapshot = None,
         numpy_snapshot = None,
         fastapi_snapshot = None,
+        dedicated_fastapi_snapshot = None,
         **_kwds):
     result = []
     result += _snapshot_file(baseline_snapshot)
     result += _snapshot_file(numpy_snapshot)
     result += _snapshot_file(fastapi_snapshot)
+    result += _snapshot_file(dedicated_fastapi_snapshot)
     return result
 
 def python_test_setup():

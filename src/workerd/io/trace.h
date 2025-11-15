@@ -302,7 +302,7 @@ kj::String KJ_STRINGIFY(const TraceId& id);
 kj::String KJ_STRINGIFY(const InvocationSpanContext& context);
 kj::String KJ_STRINGIFY(const SpanContext& context);
 
-// The various structs defined below are used in both legacy tail workers
+// The various structs defined below are used in both buffered tail workers
 // and streaming tail workers to report tail events.
 
 // Describes a fetch request
@@ -422,7 +422,7 @@ struct EmailEventInfo final {
   EmailEventInfo clone() const;
 };
 
-// Describes a legacy tail worker request
+// Describes a buffered tail worker request
 struct TraceEventInfo final {
   struct TraceItem;
 
@@ -1150,6 +1150,42 @@ struct TraceContext {
   TraceContext(TraceContext&& other) = default;
   TraceContext& operator=(TraceContext&& other) = default;
   KJ_DISALLOW_COPY(TraceContext);
+
+  // Set a tag on both the internal span and user span.
+  void setTag(kj::ConstString key, SpanBuilder::TagInitValue value) {
+    // We need to duplicate the key and value since both are move-only types.
+    // Clone the value based on its type.
+    KJ_SWITCH_ONEOF(value) {
+      KJ_CASE_ONEOF(s, kj::StringPtr) {
+        span.setTag(key.clone(), s);
+        userSpan.setTag(kj::mv(key), s);
+      }
+      KJ_CASE_ONEOF(s, kj::String) {
+        span.setTag(key.clone(), kj::str(s));
+        userSpan.setTag(kj::mv(key), kj::mv(s));
+      }
+      KJ_CASE_ONEOF(s, kj::LiteralStringConst) {
+        span.setTag(key.clone(), s);
+        userSpan.setTag(kj::mv(key), s);
+      }
+      KJ_CASE_ONEOF(s, kj::ConstString) {
+        span.setTag(key.clone(), s.clone());
+        userSpan.setTag(kj::mv(key), kj::mv(s));
+      }
+      KJ_CASE_ONEOF(b, bool) {
+        span.setTag(key.clone(), b);
+        userSpan.setTag(kj::mv(key), b);
+      }
+      KJ_CASE_ONEOF(d, double) {
+        span.setTag(key.clone(), d);
+        userSpan.setTag(kj::mv(key), d);
+      }
+      KJ_CASE_ONEOF(i, int64_t) {
+        span.setTag(key.clone(), i);
+        userSpan.setTag(kj::mv(key), i);
+      }
+    }
+  }
 
   SpanBuilder span;
   SpanBuilder userSpan;

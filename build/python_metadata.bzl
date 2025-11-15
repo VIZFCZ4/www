@@ -97,8 +97,8 @@ def _make_bundle_version_info(versions):
 
     dev = result["development"]
 
-    # Uncomment to test with development = 0.28.2
-    # dev["real_pyodide_version"] = "0.28.2"
+    # Uncomment to test with development = 0.26.0a2
+    # dev["real_pyodide_version"] = "0.26.0a2"
     result["development"] = result[dev["real_pyodide_version"]] | dev
     _check_pyodide_versions(result)
     return result
@@ -116,8 +116,8 @@ BUNDLE_VERSION_INFO = _make_bundle_version_info([
         "enable_flag_name": "python_workers",
         "emscripten_version": "3.1.52",
         "python_version": "3.12.1",
-        "baseline_snapshot": "baseline-d13ce2f4a.bin",
-        "baseline_snapshot_hash": "d13ce2f4a0ade2e09047b469874dacf4d071ed3558fec4c26f8d0b99d95f77b5",
+        "baseline_snapshot": "baseline-61eedf943.bin",
+        "baseline_snapshot_hash": "61eedf9432d635bdf091b26efece020b3543429a609fad7af9e8d4de2ec44f47",
         "numpy_snapshot": "ew-py-package-snapshot_numpy-v2.bin",
         "numpy_snapshot_hash": "5055deb53f404afacba73642fd10e766b123e661847e8fdf4f1ec92d8ca624dc",
         "fastapi_snapshot": "ew-py-package-snapshot_fastapi-v2.bin",
@@ -158,12 +158,14 @@ BUNDLE_VERSION_INFO = _make_bundle_version_info([
         "enable_flag_name": "python_workers_20250116",
         "emscripten_version": "4.0.9",
         "python_version": "3.13.2",
-        "baseline_snapshot": "baseline-32a2de5f7.bin",
-        "baseline_snapshot_hash": "32a2de5f759cd0e7b6aaa5a9292e0c54c3605b9f626ff6c88dc95f49cd98105d",
+        "baseline_snapshot": "baseline-4569679fb.bin",
+        "baseline_snapshot_hash": "4569679fb78a3c5c8dbfa73d57c61c6a5394617632fbac7b5873ba322c85463d",
         "numpy_snapshot": "package_snapshot_numpy-60c9cb28e.bin",
         "numpy_snapshot_hash": "60c9cb28e6dc1ea6ab38b25471ddaa315b667637c9dd6f94aceb2acc6519c623",
         "fastapi_snapshot": "package_snapshot_fastapi-a6ccb56fe.bin",
         "fastapi_snapshot_hash": "a6ccb56fe9eac265d139727d0134e8d6432c5fe25c8c0b8ec95252b13493b297",
+        "dedicated_fastapi_snapshot": "snapshot_a6b652a95810783f5078b9a5dbd4a07c30718acb4ff724e82c25db7353dd7f2d.bin",
+        "dedicated_fastapi_snapshot_hash": "4af6f012a5fb32f31a426e6f109e88ae85b18ee3dd131e1caaaad989cd962bbe",
         "vendored_packages_for_tests": [
             {
                 # Downloaded from https://pub-25a5b2f2f1b84655b185a505c7a3ad23.r2.dev/beautifulsoup4-vendored-for-ew-testing.zip
@@ -194,7 +196,7 @@ BUNDLE_VERSION_INFO = _make_bundle_version_info([
         ],
     },
     {
-        "real_pyodide_version": "0.26.0a2",
+        "real_pyodide_version": "0.28.2",
         "name": "development",
         "pyodide_version": "dev",
         "pyodide_date": "dev",

@@ -24,6 +24,7 @@ import {
 } from 'pyodide-internal:util';
 import { default as MetadataReader } from 'pyodide-internal:runtime-generated/metadata';
 import type { PyodideEntrypointHelper } from 'pyodide:python-entrypoint-helper';
+import { entropyAfterSnapshot } from 'pyodide-internal:topLevelEntropy/lib';
 
 // A handle is the pointer into the linear memory returned by dlopen. Multiple dlopens will return
 // multiple pointers.
@@ -484,6 +485,14 @@ function describeValue(val: any): string {
     const isObject = type === 'object';
     out.push(`Value: ${val}`);
     out.push(`Type: ${type}`);
+    try {
+      const constructorName = val?.constructor?.name; // eslint-disable-line
+      if (constructorName) {
+        out.push(`Constructor name: ${constructorName}`);
+      }
+    } catch {
+      // Ignore errors when getting keys
+    }
 
     if (val && isObject) {
       try {
@@ -506,7 +515,7 @@ function describeValue(val: any): string {
     }
 
     try {
-      out.push(`Prototype: ${Object.prototype.toString.call(val)}`);
+      out.push(`toStringTag: ${Object.prototype.toString.call(val)}`);
     } catch {
       // Ignore errors when getting object type
     }
@@ -745,30 +754,28 @@ function collectSnapshot(
   pyodide_entrypoint_helper: PyodideEntrypointHelper | null,
   snapshotType: ArtifactBundler.SnapshotType
 ): void {
-  if (IS_EW_VALIDATING) {
-    const snapshot = makeLinearMemorySnapshot(
-      Module,
-      importedModulesList,
-      pyodide_entrypoint_helper,
-      snapshotType
+  if (!IS_EW_VALIDATING && !SHOULD_SNAPSHOT_TO_DISK) {
+    throw new PythonWorkersInternalError(
+      "Attempted to collect snapshot outside of context where it's supported."
     );
+  }
+  const snapshot = makeLinearMemorySnapshot(
+    Module,
+    importedModulesList,
+    pyodide_entrypoint_helper,
+    snapshotType
+  );
+  entropyAfterSnapshot(Module);
+  if (IS_EW_VALIDATING) {
     ArtifactBundler.storeMemorySnapshot({
       snapshot,
       importedModulesList,
       snapshotType,
     });
   } else if (SHOULD_SNAPSHOT_TO_DISK) {
-    const snapshot = makeLinearMemorySnapshot(
-      Module,
-      importedModulesList,
-      pyodide_entrypoint_helper,
-      snapshotType
-    );
     DiskCache.put('snapshot.bin', snapshot);
   } else {
-    throw new PythonWorkersInternalError(
-      "Attempted to collect snapshot outside of context where it's supported."
-    );
+    throw new PythonWorkersInternalError('Unreachable');
   }
 }
 

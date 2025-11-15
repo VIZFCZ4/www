@@ -169,7 +169,7 @@ void WorkerTracer::addLog(const tracing::InvocationSpanContext& context,
 
   // TODO(streaming-tail): Here we add the log to the trace object and the tail stream writer, if
   // available. If the given worker stage is only tailed by a streaming tail worker, adding the log
-  // to the legacy trace object is not needed; this will be addressed in a future refactor.
+  // to the buffered trace object is not needed; this will be addressed in a future refactor.
   KJ_IF_SOME(writer, maybeTailStreamWriter) {
     // If message is too big on its own, truncate it.
     writer->report(context,
@@ -200,7 +200,7 @@ void WorkerTracer::addSpan(tracing::CompleteSpan&& span) {
     return;
   }
 
-  // Note: spans are not available in the legacy tail worker, so we don't need an exceededSpanLimit
+  // Note: spans are not available in the buffered tail worker, so we don't need an exceededSpanLimit
   // variable for it and it can't cause truncation.
   auto& tailStreamWriter = KJ_UNWRAP_OR_RETURN(maybeTailStreamWriter);
 
@@ -421,10 +421,6 @@ void WorkerTracer::setOutcome(EventOutcome outcome, kj::Duration cpuTime, kj::Du
   trace->cpuTime = cpuTime;
   trace->wallTime = wallTime;
 
-  // Free the userRequestSpan – no more traces should come after this point (and thus the observer
-  // and the reference to WorkerTracer it holds, unless there are more open spans)
-  userRequestSpan = nullptr;
-
   // Defer reporting the actual outcome event to the WorkerTracer destructor: The outcome is
   // reported when the metrics request is deallocated, but with ctx.waitUntil() there might be spans
   // continuing to exist beyond that point. By the time the WorkerTracer is deallocated, the
@@ -530,7 +526,7 @@ void WorkerTracer::setReturn(
         timestamp.orDefault([&]() { return getTime(); }));
   }
 
-  // Add fetch response info for legacy tail worker
+  // Add fetch response info for buffered tail worker
   KJ_IF_SOME(info, fetchResponseInfo) {
     KJ_REQUIRE(KJ_REQUIRE_NONNULL(trace->eventInfo).is<tracing::FetchEventInfo>());
     KJ_ASSERT(trace->fetchResponseInfo == kj::none, "setFetchResponseInfo can only be called once");
@@ -538,18 +534,22 @@ void WorkerTracer::setReturn(
   }
 }
 
-void BaseTracer::setUserRequestSpan(SpanParent&& span) {
-  KJ_ASSERT(span.isObserved(), "span argument must be observed");
-  KJ_ASSERT(!userRequestSpan.isObserved(), "setUserRequestSpan can only be called once");
-  userRequestSpan = kj::mv(span);
+void BaseTracer::setMakeUserRequestSpanFunc(MakeUserRequestSpanFunc func) {
+  KJ_ASSERT(
+      makeUserRequestSpanFunc == kj::none, "setMakeUserRequestSpanFunc can only be called once");
+  makeUserRequestSpanFunc = kj::mv(func);
 }
 
 void WorkerTracer::setWorkerAttribute(kj::ConstString key, Span::TagValue value) {
   attributes.add(tracing::Attribute{kj::mv(key), kj::mv(value)});
 }
 
-SpanParent BaseTracer::getUserRequestSpan() {
-  return userRequestSpan.addRef();
+SpanParent BaseTracer::makeUserRequestSpan() {
+  KJ_IF_SOME(func, makeUserRequestSpanFunc) {
+    return func();
+  } else {
+    return SpanParent(nullptr);
+  }
 }
 
 void WorkerTracer::setJsRpcInfo(const tracing::InvocationSpanContext& context,
