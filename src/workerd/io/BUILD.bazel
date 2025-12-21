@@ -26,22 +26,6 @@ wd_cc_library(
 )
 
 wd_cc_library(
-    name = "trace-stream",
-    srcs = ["trace-stream.c++"],
-    hdrs = ["trace-stream.h"],
-    implementation_deps = [
-        "//src/workerd/util:completion-membrane",
-        "//src/workerd/util:strings",
-        "//src/workerd/util:uuid",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":io",
-        "//src/workerd/util:checked-queue",
-    ],
-)
-
-wd_cc_library(
     name = "io",
     # HACK: Currently, the `io` and `api` packages are interdependent. We fold all the sources
     #   from `api` into `io`. In principle, it should be possible to pull them apart so `api`
@@ -56,18 +40,19 @@ wd_cc_library(
         "io-context.c++",
         "io-own.c++",
         "io-util.c++",
+        "trace-stream.c++",
         "tracer.c++",
         "worker.c++",
         "worker-fs.c++",
     ] + ["//src/workerd/api:srcs"],
     hdrs = [
         "compatibility-date.h",
-        "features.h",
         "hibernation-manager.h",
         "io-channels.h",
         "io-context.h",
         "io-own.h",
         "io-util.h",
+        "trace-stream.h",
         "tracer.h",
         "worker.h",
         "worker-fs.h",
@@ -90,6 +75,7 @@ wd_cc_library(
         "//src/workerd/util:entropy",
         "//src/workerd/util:perfetto",
         "//src/workerd/util:string-buffer",
+        "//src/workerd/util:strings",
         "//src/workerd/util:uuid",
         "@capnp-cpp//src/kj/compat:kj-brotli",
         "@capnp-cpp//src/kj/compat:kj-gzip",
@@ -103,6 +89,7 @@ wd_cc_library(
         ":actor-storage_capnp",
         ":cdp_capnp",
         ":container_capnp",
+        ":features",
         ":frankenvalue",
         ":io-gate",
         ":io-helpers",
@@ -124,6 +111,8 @@ wd_cc_library(
         "//src/workerd/jsg:script",
         "//src/workerd/util:checked-queue",
         "//src/workerd/util:exception",
+        "//src/workerd/util:header-validation",
+        "//src/workerd/util:immediate-crash",
         "//src/workerd/util:ring-buffer",
         "//src/workerd/util:small-set",
         "//src/workerd/util:sqlite",
@@ -133,6 +122,19 @@ wd_cc_library(
         "@capnp-cpp//src/kj:kj-async",
         "@ncrypto",
         "@ssl",
+    ],
+)
+
+# Headers only target to avoid having circular dependencies.
+wd_cc_library(
+    name = "features",
+    hdrs = ["features.h"],
+    implementation_deps = [
+        "//src/workerd/jsg",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":compatibility-date_capnp",
     ],
 )
 
@@ -278,7 +280,7 @@ wd_cc_library(
     hdrs = ["limit-enforcer.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":observer",
+        ":outcome_capnp",
         "//src/workerd/jsg",
     ],
 )
@@ -351,6 +353,7 @@ wd_capnp_library(src = "cdp.capnp")
 wd_capnp_library(
     src = "worker-interface.capnp",
     deps = [
+        ":frankenvalue_capnp",
         ":outcome_capnp",
         ":script-version_capnp",
         ":trace_capnp",

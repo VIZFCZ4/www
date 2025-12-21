@@ -13,6 +13,7 @@
 #include <pyodide/generated/pyodide_extra.capnp.h>
 
 #include <capnp/dynamic.h>
+#include <capnp/schema.h>
 #include <kj/array.h>
 #include <kj/common.h>
 #include <kj/compat/gzip.h>
@@ -20,10 +21,7 @@
 #include <kj/debug.h>
 #include <kj/string.h>
 
-// for std::sort
-#include <capnp/schema.h>
-
-#include <algorithm>
+#include <algorithm>  // for std::sort
 
 namespace workerd::api::pyodide {
 
@@ -89,6 +87,19 @@ kj::Array<kj::StringPtr> PyodideMetadataReader::getNames(
     builder.add(state->moduleInfo.names[i]);
   }
   return builder.releaseAsArray();
+}
+
+void PyodideMetadataReader::setCpuLimitNearlyExceededCallback(
+    jsg::Lock& js, kj::Array<kj::byte> wasm_memory, int sig_clock, int sig_flag) {
+  // This callback has to be implemented in C++ because we don't hold the isolate lock when we call
+  // it. It also has to be signal safe since we call it from the cpu time limiter.
+  Worker::Isolate::from(js).setCpuLimitNearlyExceededCallback(
+      [wasm_memory = kj::mv(wasm_memory), sig_clock, sig_flag]() mutable {
+    // Set signal handling clock to fire on the next check.
+    wasm_memory[sig_clock] = 0;
+    // Set signal handling to on
+    wasm_memory[sig_flag] = 1;
+  });
 }
 
 kj::Array<kj::String> PythonModuleInfo::getPythonFileContents() {

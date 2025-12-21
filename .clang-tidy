@@ -9,8 +9,13 @@ Checks: >
   -*,
   bugprone-argument-comment,
   bugprone-capturing-this-in-member-variable,
+  bugprone-dynamic-static-initializers,
   bugprone-forward-declaration-namespace,
+  bugprone-invalid-enum-default-initialization,
   bugprone-move-forwarding-reference,
+  bugprone-return-const-ref-from-parameter,
+  bugprone-suspicious-*,
+  -bugprone-suspicious-semicolon,
   bugprone-undefined-memory-manipulation,
   bugprone-unhandled-self-assignment,
   bugprone-unused-raii,
@@ -18,12 +23,14 @@ Checks: >
   cppcoreguidelines-c-copy-assignment-signature,
   cppcoreguidelines-misleading-capture-default-by-value,
   cppcoreguidelines-noexcept-destructor,
+  cppcoreguidelines-prefer-member-initializer,
   google-readability-casting,
   misc-confusable-identifiers,
   misc-header-include-cycle,
   misc-redundant-expression,
   misc-throw-by-value-catch-by-reference,
   misc-unused-alias-decls,
+  misc-unused-using-decls,
   modernize-avoid-variadic-functions,
   modernize-macro-to-enum,
   modernize-redundant-void-arg,
@@ -34,6 +41,7 @@ Checks: >
   modernize-use-emplace,
   modernize-use-equals-delete,
   modernize-use-nullptr,
+  modernize-use-transparent-functors,
   modernize-use-using,
   performance-*,
   -performance-enum-size,
@@ -41,11 +49,12 @@ Checks: >
   -performance-noexcept-move-constructor,
   -performance-noexcept-swap,
   -performance-unnecessary-value-param,
-  performance-for-range-copy,
-  performance-move-constructor-init,
+  readability-avoid-const-params-in-decls,
   readability-container-contains,
+  readability-container-size-empty,
   readability-delete-null-pointer,
   readability-duplicate-include,
+  readability-enum-initial-value,
   readability-redundant-*,
   -readability-redundant-inline-specifier,
   -readability-redundant-smartptr-get,
@@ -56,12 +65,13 @@ Checks: >
 # TODO: Fix and enable
 # bugprone-parent-virtual-call
 # bugprone-return-const-ref-from-parameter
+# cppcoreguidelines-interfaces-global-init
 # cppcoreguidelines-missing-std-forward
+# cppcoreguidelines-pro-type-member-init
+# modernize-use-equals-default
 # modernize-use-override
 # modernize-use-ranges
-# readability-avoid-const-params-in-decls
 # readability-avoid-return-with-void-value
-# readability-container-size-empty
 # readability-redundant-smartptr-get
 # readability-use-anyofallof
 

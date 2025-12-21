@@ -52,7 +52,8 @@ class ActorSqlite final: public ActorCacheInterface, private kj::TaskSet::ErrorH
   explicit ActorSqlite(kj::Own<SqliteDatabase> dbParam,
       OutputGate& outputGate,
       kj::Function<kj::Promise<void>()> commitCallback,
-      Hooks& hooks = Hooks::getDefaultHooks());
+      Hooks& hooks = Hooks::getDefaultHooks(),
+      bool debugAlarmSync = false);
 
   bool isCommitScheduled() {
     return !currentTxn.is<NoTxn>() || deleteAllCommitScheduled;
@@ -94,7 +95,7 @@ class ActorSqlite final: public ActorCacheInterface, private kj::TaskSet::ErrorH
   void cancelDeferredAlarmDeletion() override;
   kj::Maybe<kj::Promise<void>> onNoPendingFlush() override;
   kj::Promise<kj::String> getCurrentBookmark(SpanParent parentSpan) override;
-  kj::Promise<void> waitForBookmark(kj::StringPtr bookmark) override;
+  kj::Promise<void> waitForBookmark(kj::StringPtr bookmark, SpanParent parentSpan) override;
   // See ActorCacheInterface
 
  private:
@@ -237,6 +238,14 @@ class ActorSqlite final: public ActorCacheInterface, private kj::TaskSet::ErrorH
   // Promise chain for serializing "move alarm later" operations to prevent races
   // at the alarm manager. Each update waits for the previous one to complete.
   kj::ForkedPromise<void> alarmLaterChain = kj::Promise<void>(kj::READY_NOW).fork();
+
+  // Version counter that increments on every alarm change. Used to detect if another commit
+  // modified the alarm while we were async, allowing us to skip redundant post-commit alarm
+  // syncs. This provides automatic coalescing of rapid alarm changes.
+  uint64_t alarmVersion = 0;
+
+  // Debug flag for tracing alarm synchronization issues for specific namespaces
+  bool debugAlarmSync = false;
 
   void startImplicitTxn();
 

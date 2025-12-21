@@ -296,9 +296,26 @@ class AsyncGenerator final {
   kj::Maybe<kj::Rc<WeakRef<AsyncGenerator>>> maybeSelfRef;
 };
 
+template <typename T>
+class AsyncGeneratorIgnoringStrings final {
+ public:
+  template <typename TypeWrapper>
+  AsyncGeneratorIgnoringStrings(Lock& js, JsObject object, TypeWrapper* ptr)
+      : inner(AsyncGenerator<T>(js, object, ptr)) {}
+
+  AsyncGenerator<T> release() {
+    return kj::mv(inner);
+  }
+
+ private:
+  AsyncGenerator<T> inner;
+};
+
 template <typename TypeWrapper>
 class GeneratorWrapper {
  public:
+  GeneratorWrapper(const auto& config): config(getConfig(config)) {}
+
   template <typename T>
   static constexpr const char* getName(Generator<T>*) {
     return "Generator";
@@ -310,25 +327,42 @@ class GeneratorWrapper {
   }
 
   template <typename T>
+  static constexpr const char* getName(AsyncGeneratorIgnoringStrings<T>*) {
+    return "AsyncGenerator";
+  }
+
+  template <typename T>
   static constexpr const char* getName(GeneratorNext<T>*) {
     return "GeneratorNext";
   }
 
   template <typename T>
   v8::Local<v8::Object> wrap(
-      Lock& js, v8::Local<v8::Context>, kj::Maybe<v8::Local<v8::Object>>, Generator<T>&&) = delete;
+      Lock& js, v8::Local<v8::Context>, kj::Maybe<v8::Local<v8::Object>>, Generator<T>&&) {
+    KJ_FAIL_ASSERT("Generator instances do not support wrap");
+  }
+
+  template <typename T>
+  v8::Local<v8::Object> wrap(
+      Lock& js, v8::Local<v8::Context>, kj::Maybe<v8::Local<v8::Object>>, AsyncGenerator<T>&&) {
+    KJ_FAIL_ASSERT("AsyncGenerator instances do not support wrap");
+  }
 
   template <typename T>
   v8::Local<v8::Object> wrap(Lock& js,
       v8::Local<v8::Context>,
       kj::Maybe<v8::Local<v8::Object>>,
-      AsyncGenerator<T>&&) = delete;
+      AsyncGeneratorIgnoringStrings<T>&&) {
+    KJ_FAIL_ASSERT("AsyncGenerator instances do not support wrap");
+  }
 
   template <typename T>
   v8::Local<v8::Object> wrap(Lock& js,
       v8::Local<v8::Context> context,
       kj::Maybe<v8::Local<v8::Object>>,
-      GeneratorNext<T>&& next) = delete;
+      GeneratorNext<T>&& next) {
+    KJ_FAIL_ASSERT("GeneratorNext instances do not support wrap");
+  }
   // Generator, AsyncGenerator, and GeneratorNext instances should never be
   // passed back out into JavaScript. Use Iterators for that.
 
@@ -446,6 +480,77 @@ class GeneratorWrapper {
     }
     return kj::none;
   }
+
+  template <typename T>
+  kj::Maybe<AsyncGeneratorIgnoringStrings<T>> tryUnwrap(Lock& js,
+      v8::Local<v8::Context> context,
+      v8::Local<v8::Value> handle,
+      AsyncGeneratorIgnoringStrings<T>*,
+      kj::Maybe<v8::Local<v8::Object>> parentObject) {
+    // This variation of the wrapper is used in cases where Strings should not be treated
+    // as iterators. Specifically, for cases like `kj::OneOf<kj::String,AsyncGenerator<T>>`
+    // where we want to allow strings to be passed through as strings but also want to allow
+    // sync and async generators to be handled as well. Without this, the strings would be
+    // treated as sync iterables.
+    if (config.fetchIterableTypeSupport && handle->IsObject() && !handle->IsStringObject()) {
+      auto isolate = js.v8Isolate;
+      auto object = handle.As<v8::Object>();
+
+      auto iter = check(object->Get(context, v8::Symbol::GetAsyncIterator(isolate)));
+      // If there is no async iterator, let's try a sync iterator.
+      if (iter->IsNullOrUndefined()) {
+        // Before checking for the sync iterator, let's also check to see if the object
+        // implements a custom toString to Symbol.toPrimitive method that is not the default
+        // Object.prototype.toString. If it does, then we won't treat it as
+        // an iterator either. If the object is an Array, then we skip this check since
+        // it's exceedingly uncommon for arrays to be subclassed with a custom toString method,
+        // so much that it's not worth handling the extreme edge case.
+        // This is to deal with edge cases around objects with customized stringify methods,
+        // which are likely more common than those with customized iterator methods. While
+        // these are both rare cases, it's better to err on the side of custom stringification
+        // rather than custom iteration.
+        if (config.fetchIterableTypeSupportOverrideAdjustment && !object->IsArray()) {
+          if (protoToString == kj::none) {
+            // TODO(cleanup): In several places in the codebase we have this pattern of
+            // lazily grabbing the object prototype. We should probably centralize this
+            // an cache it in the IsolateBase or something.
+            auto obj = js.obj();
+            auto proto = obj.getPrototype(js);
+            protoToString = jsg::JsRef(
+                js, KJ_ASSERT_NONNULL(proto.tryCast<jsg::JsObject>()).get(js, "toString"_kj));
+            toPrimitiveString = jsg::JsRef(js,
+                KJ_ASSERT_NONNULL(proto.tryCast<jsg::JsObject>()).get(js, js.symbolToPrimitive()));
+          }
+
+          // We only check that the toString/Symbol.toPrimitive is the same value as
+          // Object.prototype.toString/Symbol.toPrimitive. This does not guarantee every
+          // possible edge case but should be sufficient for our purposes.
+          auto jsobj = JsObject(object);
+          if (jsobj.get(js, "toString"_kj) != KJ_ASSERT_NONNULL(protoToString).getHandle(js) ||
+              jsobj.get(js, js.symbolToPrimitive()) !=
+                  KJ_ASSERT_NONNULL(toPrimitiveString).getHandle(js)) {
+            return kj::none;
+          }
+        }
+
+        iter = check(object->Get(context, v8::Symbol::GetIterator(isolate)));
+      }
+      if (iter->IsFunction()) {
+        auto func = iter.As<v8::Function>();
+        auto iterObj = check(func->Call(context, object, 0, nullptr));
+        if (iterObj->IsObject()) {
+          return AsyncGeneratorIgnoringStrings<T>(
+              js, JsObject(iterObj.As<v8::Object>()), static_cast<TypeWrapper*>(nullptr));
+        }
+      }
+    }
+    return kj::none;
+  }
+
+ private:
+  const JsgConfig config;
+  kj::Maybe<jsg::JsRef<jsg::JsValue>> protoToString;
+  kj::Maybe<jsg::JsRef<jsg::JsValue>> toPrimitiveString;
 };
 
 // -----------------------------------------------------------------------------
@@ -463,8 +568,6 @@ class SequenceWrapper {
   // TypeWrapper mixin for Sequences.
 
  public:
-  static auto constexpr MAX_STACK = 64;
-
   template <typename U>
   static constexpr const char* getName(Sequence<U>*) {
     // TODO(later): It would be nicer if the name included the demangled name of U

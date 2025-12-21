@@ -6,6 +6,7 @@
 
 #include <workerd/api/encoding.h>
 #include <workerd/api/streams/standard.h>
+#include <workerd/io/features.h>
 #include <workerd/jsg/jsg.h>
 
 namespace workerd::api {
@@ -15,10 +16,16 @@ jsg::Ref<TextEncoderStream> TextEncoderStream::constructor(jsg::Lock& js) {
       Transformer{.transform = jsg::Function<Transformer::TransformAlgorithm>(
                       [](jsg::Lock& js, auto chunk, auto controller) {
     auto str = jsg::check(chunk->ToString(js.v8Context()));
+    auto utf8Length = str->Utf8LengthV2(js.v8Isolate);
+
+    // Don't emit empty chunks
+    if (utf8Length == 0) {
+      return js.resolvedPromise();
+    }
+
     v8::Local<v8::ArrayBuffer> buffer;
-    JSG_REQUIRE(
-        v8::ArrayBuffer::MaybeNew(js.v8Isolate, str->Utf8LengthV2(js.v8Isolate)).ToLocal(&buffer),
-        RangeError, "Cannot allocate space for TextEncoder.encode");
+    JSG_REQUIRE(v8::ArrayBuffer::MaybeNew(js.v8Isolate, utf8Length).ToLocal(&buffer), RangeError,
+        "Cannot allocate space for TextEncoder.encode");
 
     auto bytes = jsg::asBytes(buffer).releaseAsChars();
     [[maybe_unused]] auto written = str->WriteUtf8V2(
@@ -42,9 +49,12 @@ TextDecoderStream::TextDecoderStream(jsg::Ref<TextDecoder> decoder,
 jsg::Ref<TextDecoderStream> TextDecoderStream::constructor(
     jsg::Lock& js, jsg::Optional<kj::String> label, jsg::Optional<TextDecoderStreamInit> options) {
 
-  auto decoder = TextDecoder::constructor(js, kj::mv(label), options.map([](auto& opts) {
+  auto decoder = TextDecoder::constructor(js, kj::mv(label), options.map([&js](auto& opts) {
     return TextDecoder::ConstructorOptions{
-      .fatal = opts.fatal.orDefault(true),
+      // Previously this would default to true. The spec requires a default
+      // of false, however. When the pedanticWpt flag is not set, we continue
+      // to default as true.
+      .fatal = opts.fatal.orDefault(!FeatureFlags::get(js).getPedanticWpt()),
       .ignoreBOM = opts.ignoreBOM.orDefault(false),
     };
   }));
@@ -55,18 +65,30 @@ jsg::Ref<TextDecoderStream> TextDecoderStream::constructor(
       Transformer{.transform = jsg::Function<Transformer::TransformAlgorithm>( JSG_VISITABLE_LAMBDA(
                       (decoder = decoder.addRef()), (decoder),
                       (jsg::Lock& js, auto chunk, auto controller) {
+                        JSG_REQUIRE(chunk->IsArrayBuffer() || chunk->IsArrayBufferView(), TypeError,
+                            "This TransformStream is being used as a byte stream, "
+                            "but received a value that is not a BufferSource.");
                         jsg::BufferSource source(js, chunk);
-                        controller->enqueue(js,
+                        auto decoded =
                             JSG_REQUIRE_NONNULL(decoder->decodePtr(js, source.asArrayPtr(), false),
-                                TypeError, "Failed to decode input."));
+                                TypeError, "Failed to decode input.");
+                        // Only enqueue if there's actual output - don't emit empty chunks
+                        // for incomplete multi-byte sequences
+                        if (decoded.length(js) > 0) {
+                        controller->enqueue(js, decoded);
+                        }
                         return js.resolvedPromise();
                       })),
         .flush = jsg::Function<Transformer::FlushAlgorithm>(
             JSG_VISITABLE_LAMBDA((decoder = decoder.addRef()), (decoder),
                 (jsg::Lock& js, auto controller) {
-                  controller->enqueue(js,
+                  auto decoded =
                       JSG_REQUIRE_NONNULL(decoder->decodePtr(js, kj::ArrayPtr<kj::byte>(), true),
-                          TypeError, "Failed to decode input."));
+                          TypeError, "Failed to decode input.");
+                  // Only enqueue if there's actual output
+                  if (decoded.length(js) > 0) {
+                  controller->enqueue(js, decoded);
+                  }
                   return js.resolvedPromise();
                 }))},
       StreamQueuingStrategy{}, StreamQueuingStrategy{});

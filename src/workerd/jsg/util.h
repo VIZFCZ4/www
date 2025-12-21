@@ -223,6 +223,9 @@ kj::Array<kj::byte> asBytes(v8::Local<v8::ArrayBuffer> arrayBuffer);
 // View the contents of the given v8::ArrayBuffer/ArrayBufferView as an ArrayPtr<byte>.
 kj::Array<kj::byte> asBytes(v8::Local<v8::ArrayBufferView> arrayBufferView);
 
+// View the contents of the given v8::SharedArrayBuffer as an ArrayPtr<byte>.
+kj::Array<kj::byte> asBytes(v8::Local<v8::SharedArrayBuffer> sharedArrayBuffer);
+
 // Freeze the given object and all its members, making it recursively immutable.
 //
 // WARNING: This function is unsafe to call on user-provided content since if the value is cyclic
@@ -481,6 +484,9 @@ concept HasConfiguration = requires(GetConfiguration<T> arg) { T::jsgConfigurati
 inline bool isFinite(double value) {
   return !(kj::isNaN(value) || value == kj::inf() || value == -kj::inf());
 }
+
+template <typename T>
+concept StrictlyBool = kj::isSameType<T, bool>();
 
 // ======================================================================================
 

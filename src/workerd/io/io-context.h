@@ -13,6 +13,7 @@
 #include <workerd/io/io-gate.h>
 #include <workerd/io/io-thread-context.h>
 #include <workerd/io/io-timers.h>
+#include <workerd/io/limit-enforcer.h>
 #include <workerd/io/trace.h>
 #include <workerd/io/worker-fs.h>
 #include <workerd/jsg/async-context.h>
@@ -397,6 +398,9 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   // Returns the current IoContext for the thread.
   // Throws an exception if there is no current context (see hasCurrent() below).
   static IoContext& current();
+
+  // Like current(), but returns kj::none if there is no current context.
+  static kj::Maybe<IoContext&> tryCurrent();
 
   // True if there is a current IoContext for the thread (current() will not throw).
   static bool hasCurrent();
@@ -854,12 +858,6 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   kj::Own<WorkerInterface> getSubrequestChannel(
       uint channel, bool isInHouse, kj::Maybe<kj::String> cfBlobJson, TraceContext& traceContext);
 
-  kj::Own<WorkerInterface> getSubrequestChannelWithSpans(uint channel,
-      bool isInHouse,
-      kj::Maybe<kj::String> cfBlobJson,
-      kj::ConstString operationName,
-      kj::Vector<Span::Tag> tags);
-
   // Like getSubrequestChannel() but doesn't enforce limits. Use for trusted paths only.
   kj::Own<WorkerInterface> getSubrequestChannelNoChecks(uint channel,
       bool isInHouse,
@@ -875,13 +873,6 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
 
   kj::Own<kj::HttpClient> getHttpClient(
       uint channel, bool isInHouse, kj::Maybe<kj::String> cfBlobJson, TraceContext& traceContext);
-
-  // As above, but with list of span tags to add, analogous to getSubrequestChannelWithSpans().
-  kj::Own<kj::HttpClient> getHttpClientWithSpans(uint channel,
-      bool isInHouse,
-      kj::Maybe<kj::String> cfBlobJson,
-      kj::ConstString operationName,
-      kj::Vector<Span::Tag> tags);
 
   // Convenience methods that call getSubrequest*() and adapt the returned WorkerInterface objects
   // to HttpClient.
@@ -901,9 +892,10 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
       kj::Maybe<kj::String> locationHint,
       ActorGetMode mode,
       bool enableReplicaRouting,
+      ActorRoutingMode routingMode,
       SpanParent parentSpan) {
-    return getIoChannelFactory().getGlobalActor(
-        channel, id, kj::mv(locationHint), mode, enableReplicaRouting, kj::mv(parentSpan));
+    return getIoChannelFactory().getGlobalActor(channel, id, kj::mv(locationHint), mode,
+        enableReplicaRouting, routingMode, kj::mv(parentSpan));
   }
   kj::Own<IoChannelFactory::ActorChannel> getColoLocalActorChannel(
       uint channel, kj::StringPtr id, SpanParent parentSpan) {
@@ -911,7 +903,7 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   }
 
   void abortAllActors(kj::Maybe<kj::Exception&> reason) {
-    return getIoChannelFactory().abortAllActors(reason);
+    getIoChannelFactory().abortAllActors(reason);
   }
 
   // Get an HttpClient to use for Cache API subrequests.
@@ -1532,8 +1524,10 @@ auto IoContext::makeReentryCallback(Func func) {
     fulfiller->fulfill();
   });
 
+  auto ioFunc = addObjectReverse(kj::heap(kj::fwd<Func>(func)));
+
   return [self = getWeakRef(), cs = getCriticalSection(), releaseNotifier = kj::mv(releaseNotifier),
-             func = kj::fwd<Func>(func)](auto&&... params) mutable {
+             ioFunc = kj::mv(ioFunc)](auto&&... params) mutable {
     auto& ctx = JSG_REQUIRE_NONNULL(self->tryGet(), Error,
         "The execution context which hosts this callback is no longer running.");
 
@@ -1542,8 +1536,11 @@ auto IoContext::makeReentryCallback(Func func) {
     }
 
     return ctx.canceler.wrap(ctx.run(
-        [&ctx, &func, ... params = kj::fwd<decltype(params)>(params)](Worker::Lock& lock) mutable {
+        [&ctx, &ioFunc, ... params = kj::fwd<decltype(params)>(params)](
+            Worker::Lock& lock) mutable {
       using ResultType = kj::Decay<decltype(func(lock, kj::fwd<decltype(params)>(params)...))>;
+
+      auto& func = *ioFunc;
 
       if constexpr (kj::isSameType<ResultType, void>()) {
         (void)ctx;
@@ -1554,7 +1551,8 @@ auto IoContext::makeReentryCallback(Func func) {
         (void)ctx;
         return func(lock, kj::fwd<decltype(params)>(params)...);
       }
-    }, kj::mv(cs)));
+    },
+        kj::mv(cs)));
   };
 }
 
@@ -1595,7 +1593,7 @@ jsg::PromiseForResult<Func, void, true> IoContext::blockConcurrencyWhile(
   auto cs = lock.startCriticalSection();
   auto cs2 = kj::addRef(*cs);
 
-  using T = jsg::RemovePromise<jsg::PromiseForResult<Func, void, true>>;
+  using T = jsg::RemovePromise<jsg::ReturnType<Func, void, true>>;
   auto [result, resolver] = js.newPromiseAndResolver<T>();
 
   addTask(

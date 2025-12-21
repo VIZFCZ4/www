@@ -24,7 +24,6 @@ namespace workerd::jsg {
 
 // =======================================================================================
 // Primitives (numbers, booleans)
-
 // TypeWrapper mixin for numbers and booleans.
 //
 // This wrapper has extra wrap() overloads that take an isolate instead of a
@@ -375,7 +374,7 @@ class PrimitiveWrapper {
     return "boolean";
   }
 
-  template <typename T, typename = kj::EnableIf<kj::isSameType<T, bool>()>>
+  template <StrictlyBool T>
   v8::Local<v8::Boolean> wrap(
       Lock& js, v8::Local<v8::Context> context, kj::Maybe<v8::Local<v8::Object>> creator, T value) {
     // The template is needed to prevent this overload from being chosen for arbitrary types that
@@ -383,7 +382,7 @@ class PrimitiveWrapper {
     return wrap(js.v8Isolate, creator, value);
   }
 
-  template <typename T, typename = kj::EnableIf<kj::isSameType<T, bool>()>>
+  template <StrictlyBool T>
   v8::Local<v8::Boolean> wrap(
       v8::Isolate* isolate, kj::Maybe<v8::Local<v8::Object>> creator, T value) {
     // The template is needed to prevent this overload from being chosen for arbitrary types that
@@ -402,7 +401,6 @@ class PrimitiveWrapper {
 
 // =======================================================================================
 // Name
-template <typename TypeWrapper>
 class NameWrapper {
  public:
   static constexpr const char* getName(Name*) {
@@ -415,8 +413,7 @@ class NameWrapper {
       Name value) {
     KJ_SWITCH_ONEOF(value.getUnwrapped(js.v8Isolate)) {
       KJ_CASE_ONEOF(string, kj::StringPtr) {
-        auto& wrapper = static_cast<TypeWrapper&>(*this);
-        return wrapper.wrap(js.v8Isolate, creator, kj::str(string));
+        return js.str(string);
       }
       KJ_CASE_ONEOF(symbol, v8::Local<v8::Symbol>) {
         return symbol;
@@ -436,12 +433,7 @@ class NameWrapper {
 
     // Since most things are coercible to a string, this ought to catch pretty much
     // any value other than symbol
-    auto& wrapper = static_cast<TypeWrapper&>(*this);
-    KJ_IF_SOME(string, wrapper.tryUnwrap(js, context, handle, (kj::String*)nullptr, parentObject)) {
-      return Name(kj::mv(string));
-    }
-
-    return kj::none;
+    return Name(js.toString(handle));
   }
 };
 
@@ -466,17 +458,14 @@ class StringWrapper {
   }
 
   template <typename T>
-    requires(kj::isSameType<T, ByteString>() || kj::isSameType<T, USVString>() ||
-        kj::isSameType<T, DOMString>())
+    requires(kj::isSameType<T, USVString>() || kj::isSameType<T, DOMString>())
   static constexpr const char* getName(T*) {
-    if constexpr (kj::isSameType<T, ByteString>()) {
-      return "ByteString";
-    } else if constexpr (kj::isSameType<T, USVString>()) {
+    if constexpr (kj::isSameType<T, USVString>()) {
       return "USVString";
-    } else if constexpr (kj::isSameType<T, DOMString>()) {
+    } else {
+      static_assert(kj::isSameType<T, DOMString>());
       return "DOMString";
     }
-    KJ_UNREACHABLE;
   }
 
   v8::Local<v8::String> wrap(
@@ -499,8 +488,7 @@ class StringWrapper {
   }
 
   template <typename T>
-    requires(kj::isSameType<T, const ByteString&>() || kj::isSameType<T, const USVString&>() ||
-        kj::isSameType<T, const DOMString&>())
+    requires(kj::isSameType<T, const USVString&>() || kj::isSameType<T, const DOMString&>())
   v8::Local<v8::String> wrap(
       Lock& js, v8::Local<v8::Context> context, kj::Maybe<v8::Local<v8::Object>> creator, T value) {
     // TODO(cleanup): Move to a HeaderStringWrapper in the api directory.
@@ -508,8 +496,8 @@ class StringWrapper {
   }
 
   template <typename T>
-    requires(kj::isSameType<T, kj::String>() || kj::isSameType<T, ByteString>() ||
-        kj::isSameType<T, USVString>() || kj::isSameType<T, DOMString>())
+    requires(kj::isSameType<T, kj::String>() || kj::isSameType<T, USVString>() ||
+        kj::isSameType<T, DOMString>())
   kj::Maybe<T> tryUnwrap(Lock& js,
       v8::Local<v8::Context> context,
       v8::Local<v8::Value> handle,
@@ -523,8 +511,6 @@ class StringWrapper {
     JsString str(check(handle->ToString(context)));
     if constexpr (kj::isSameType<T, kj::String>()) {
       return str.toString(js);
-    } else if constexpr (kj::isSameType<T, ByteString>()) {
-      return str.toByteString(js);
     } else if constexpr (kj::isSameType<T, USVString>()) {
       return str.toUSVString(js);
     } else if constexpr (kj::isSameType<T, DOMString>()) {
@@ -537,16 +523,6 @@ class StringWrapper {
 
 // =======================================================================================
 // Optional (value or undefined) and Maybe (value or null)
-
-template <typename... T>
-constexpr bool isUnionType(kj::OneOf<T...>*) {
-  return true;
-}
-
-template <typename T>
-constexpr bool isUnionType(T*) {
-  return false;
-}
 
 // TypeWrapper mixin for optionals.
 template <typename TypeWrapper>
@@ -617,7 +593,7 @@ class LenientOptionalWrapper {
     } else {
       KJ_IF_SOME(unwrapped,
           static_cast<TypeWrapper*>(this)->tryUnwrap(
-              js, context, handle, (kj::Decay<U>*)nullptr, parentObject)) {
+              js, context, handle, static_cast<kj::Decay<U>*>(nullptr), parentObject)) {
         return LenientOptional<U>(kj::mv(unwrapped));
       } else {
         return LenientOptional<U>(kj::none);
@@ -745,7 +721,8 @@ class OneOfWrapper {
       }
     } else if constexpr (Predicate<kj::Decay<U>>::value) {
       KJ_IF_SOME(val,
-          static_cast<TypeWrapper*>(this)->tryUnwrap(js, context, in, (U*)nullptr, kj::none)) {
+          static_cast<TypeWrapper*>(this)->tryUnwrap(
+              js, context, in, static_cast<U*>(nullptr), kj::none)) {
         out.template init<U>(kj::mv(val));
         return true;
       }
@@ -842,7 +819,6 @@ class OneOfWrapper {
 template <typename TypeWrapper>
 class ArrayWrapper {
  public:
-  static auto constexpr MAX_STACK = 64;
   template <typename U>
   static constexpr const char* getName(kj::Array<U>*) {
     return "Array";
@@ -917,7 +893,6 @@ class ArrayWrapper {
 template <typename TypeWrapper>
 class SetWrapper {
  public:
-  static auto constexpr MAX_STACK = 64;
   template <typename U>
   static constexpr const char* getName(kj::HashSet<U>*) {
     return "Set";
@@ -1013,7 +988,6 @@ class SetWrapper {
 //   - use `jsg::asBytes()` as a quick way to get a `kj::ArrayPtr<kj::byte>` view onto it.
 //
 // 3. If a method returns an ArrayBuffer, create and return a `kj::Array<kj::byte>`.
-template <typename TypeWrapper>
 class ArrayBufferWrapper {
  public:
   static constexpr const char* getName(kj::ArrayPtr<byte>*) {
@@ -1085,6 +1059,8 @@ class ArrayBufferWrapper {
       return asBytes(handle.As<v8::ArrayBufferView>());
     } else if (handle->IsArrayBuffer()) {
       return asBytes(handle.As<v8::ArrayBuffer>());
+    } else if (handle->IsSharedArrayBuffer()) {
+      return asBytes(handle.As<v8::SharedArrayBuffer>());
     }
     return kj::none;
   }
@@ -1140,16 +1116,6 @@ class DictWrapper {
 
     auto& wrapper = static_cast<TypeWrapper&>(*this);
 
-    // Currently the same as wrapper.unwrap<kj::String>(), but this allows us not to bother with the
-    // TypeErrorContext, or worrying about whether the tryUnwrap(kj::String*) version will ever be
-    // modified to return nullptr in the future.
-    const auto convertToUtf8 = [isolate = js.v8Isolate](v8::Local<v8::String> v8String) {
-      auto buf = kj::heapArray<char>(v8String->Utf8LengthV2(isolate) + 1);
-      v8String->WriteUtf8V2(
-          isolate, buf.begin(), buf.size(), v8::String::WriteFlags::kNullTerminate);
-      return kj::String(kj::mv(buf));
-    };
-
     if (!handle->IsObject() || handle->IsArray()) {
       return kj::none;
     }
@@ -1163,7 +1129,7 @@ class DictWrapper {
       v8::Local<v8::Value> value = check(object->Get(context, name));
 
       if constexpr (kj::isSameType<K, kj::String>()) {
-        auto strName = convertToUtf8(name);
+        auto strName = JsString(name).toString(js);
         const char* cstrName = strName.cStr();
         builder.add(typename Dict<V, K>::Field{kj::mv(strName),
           wrapper.template unwrap<V>(
@@ -1174,14 +1140,14 @@ class DictWrapper {
         // Thus, we do the unwrapping manually and UTF-8-convert the name only if it's needed.
         auto unwrappedName = wrapper.tryUnwrap(js, context, name, static_cast<K*>(nullptr), object);
         if (unwrappedName == kj::none) {
-          auto strName = convertToUtf8(name);
+          auto strName = JsString(name).toString(js);
           throwTypeError(js.v8Isolate, TypeErrorContext::dictKey(strName.cStr()),
               TypeWrapper::getName(static_cast<K*>(nullptr)));
         }
         auto unwrappedValue =
             wrapper.tryUnwrap(js, context, value, static_cast<V*>(nullptr), object);
         if (unwrappedValue == kj::none) {
-          auto strName = convertToUtf8(name);
+          auto strName = JsString(name).toString(js);
           throwTypeError(js.v8Isolate, TypeErrorContext::dictField(strName.cStr()),
               TypeWrapper::getName(static_cast<V*>(nullptr)));
         }
@@ -1196,7 +1162,6 @@ class DictWrapper {
 // =======================================================================================
 // Dates
 
-template <typename TypeWrapper>
 class DateWrapper {
  public:
   static constexpr const char* getName(kj::Date*) {
@@ -1345,7 +1310,7 @@ class MemoizedIdentityWrapper {
         return handle.getHandle(js.v8Isolate);
       }
     }
-    __builtin_unreachable();
+    KJ_UNREACHABLE;
   }
 
   template <typename T>
@@ -1396,7 +1361,6 @@ class IdentifiedWrapper {
 // =======================================================================================
 // SelfRef
 
-template <typename TypeWrapper>
 class SelfRefWrapper {
  public:
   static auto getName(SelfRef*) {
@@ -1415,8 +1379,7 @@ class SelfRefWrapper {
       kj::Maybe<v8::Local<v8::Object>> parentObject) {
     // I'm sticking this here because it's related and I'm lazy.
     return SelfRef(js.v8Isolate,
-        KJ_ASSERT_NONNULL(
-            parentObject, "SelfRef cannot only be used as a member of a JSG_STRUCT."));
+        KJ_ASSERT_NONNULL(parentObject, "SelfRef can only be used as a member of a JSG_STRUCT."));
   }
 };
 
@@ -1480,7 +1443,8 @@ class ExceptionWrapper {
       }();
 
       KJ_IF_SOME(domException,
-          wrapper.tryUnwrap(js, context, handle, (DOMException*)nullptr, parentObject)) {
+          wrapper.tryUnwrap(
+              js, context, handle, static_cast<DOMException*>(nullptr), parentObject)) {
         return KJ_EXCEPTION(FAILED,
             kj::str("jsg.DOMException(", domException.getName(), "): ", domException.getMessage()));
       } else {

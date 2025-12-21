@@ -6,7 +6,14 @@ import functools
 import inspect
 import json
 from asyncio import create_task, gather
-from collections.abc import Awaitable, Generator, Iterable, MutableMapping
+from collections.abc import (
+    Awaitable,
+    Generator,
+    Iterable,
+    Iterator,
+    MutableMapping,
+    Sequence,
+)
 from contextlib import ExitStack, contextmanager
 from enum import StrEnum
 from http import HTTPMethod, HTTPStatus
@@ -94,6 +101,15 @@ def import_from_javascript(module_name: str) -> Any:
                 f"Failed to import '{module_name}': Only 'cloudflare:workers' and 'cloudflare:sockets' are available until the next python runtime version."
             ) from e
         raise
+
+
+@contextmanager
+def patch_env(
+    d: dict[str, Any] | Sequence[tuple[str, Any]] | None = None, **kwds: dict[str, Any]
+) -> Iterator[None]:
+    if d:
+        kwds = dict(d) | kwds
+    yield from _pyodide_entrypoint_helper.patch_env_helper(to_js(kwds))
 
 
 type JSBody = (
@@ -314,6 +330,49 @@ def _to_js_headers(headers: Headers):
         raise TypeError("Received unexpected type for headers argument")
 
 
+@contextmanager
+def _get_js_body(body):
+    if isinstance(body, bytes):
+        proxy_bytes = create_proxy(body)
+        proxy_buffer = proxy_bytes.getBuffer()
+        try:
+            yield proxy_buffer.data
+            return
+        finally:
+            proxy_buffer.release()
+            proxy_bytes.destroy()
+    if isinstance(body, FormData):
+        yield body.js_object
+        return
+    yield body
+
+
+RESPONSE_ACCEPTED_TYPES = {
+    # BufferSource types
+    "Blob",
+    "ArrayBuffer",
+    "TypedArray",
+    "DataView",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int8Array",
+    "Uint16Array",
+    "Int16Array",
+    "Uint32Array",
+    "Int32Array",
+    "Float16Array",
+    "Float32Array",
+    "Float64Array",
+    "BigInt64Array",
+    "BigUint64Array",
+    # Other types
+    "FormData",
+    "ReadableStream",
+    "URLSearchParams",
+    "Response",
+}
+
+
 class Response(FetchResponse):
     """
     This class represents the response to an HTTP request, with a similar API to that of the web
@@ -336,20 +395,11 @@ class Response(FetchResponse):
         """
         # Verify passed in types.
         if hasattr(body, "constructor"):
-            if body.constructor.name not in (
-                "Blob",
-                "ArrayBuffer",
-                "TypedArray",
-                "DataView",
-                "FormData",
-                "ReadableStream",
-                "URLSearchParams",
-                "Response",
-            ):
+            if body.constructor.name not in RESPONSE_ACCEPTED_TYPES:
                 raise TypeError(
                     f"Unsupported type in Response: {body.constructor.name}"
                 )
-        elif not isinstance(body, str | FormData) and body is not None:
+        elif not isinstance(body, str | FormData | bytes) and body is not None:
             raise TypeError(f"Unsupported type in Response: {type(body).__name__}")
 
         # Handle constructing a Response from a JS Response.
@@ -363,11 +413,11 @@ class Response(FetchResponse):
 
         options = self._create_options(status, status_text, headers, web_socket)
 
-        # Initialize via the FetchResponse super-class which gives us access to
-        # methods that we would ordinarily have to redeclare.
-        js_resp = js.Response.new(
-            body.js_object if isinstance(body, FormData) else body, **options
-        )
+        # To avoid unnecessary copies we use this context manager.
+        with _get_js_body(body) as js_body:
+            # Initialize via the FetchResponse super-class which gives us access to
+            # methods that we would ordinarily have to redeclare.
+            js_resp = js.Response.new(js_body, **options)
         super().__init__(js_resp.url, js_resp)
 
     def __repr__(self):

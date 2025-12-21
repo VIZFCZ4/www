@@ -21,6 +21,7 @@
 #include <workerd/io/container.capnp.h>
 #include <workerd/io/hibernation-manager.h>
 #include <workerd/io/io-context.h>
+#include <workerd/io/limit-enforcer.h>
 #include <workerd/io/request-tracker.h>
 #include <workerd/io/trace-stream.h>
 #include <workerd/io/worker-entrypoint.h>
@@ -189,6 +190,7 @@ Server::Server(kj::Filesystem& fs,
       reportConfigError(kj::mv(reportConfigError)),
       loggingOptions(loggingOptions),
       memoryCacheProvider(kj::heap<api::MemoryCacheProvider>(timer)),
+      channelTokenHandler(*this),
       tasks(*this) {}
 
 struct Server::GlobalContext {
@@ -1583,8 +1585,8 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
   ~RequestObserverWithTracer() noexcept(false) {
     KJ_IF_SOME(t, tracer) {
       // for a more precise end time, set the end timestamp now, if available
-      if (IoContext::hasCurrent()) {
-        auto time = IoContext::current().now();
+      KJ_IF_SOME(ioContext, IoContext::tryCurrent()) {
+        auto time = ioContext.now();
         t->recordTimestamp(time);
       }
       t->setOutcome(
@@ -1699,9 +1701,7 @@ class RequestObserverWithTracer final: public RequestObserver, public WorkerInte
 
 class SpanSubmitter final: public kj::Refcounted {
  public:
-  SpanSubmitter(kj::Own<WorkerTracer> workerTracer)
-      : predictableSpanId(0),
-        workerTracer(kj::mv(workerTracer)) {}
+  SpanSubmitter(kj::Own<WorkerTracer> workerTracer): workerTracer(kj::mv(workerTracer)) {}
   void submitSpan(tracing::SpanId spanId, tracing::SpanId parentSpanId, const Span& span) {
     // We largely recreate the span here which feels inefficient, but is hard to avoid given the
     // mismatch between the Span type and the full span information required for OTel.
@@ -1724,7 +1724,7 @@ class SpanSubmitter final: public kj::Refcounted {
   KJ_DISALLOW_COPY_AND_MOVE(SpanSubmitter);
 
  private:
-  uint64_t predictableSpanId;
+  uint64_t predictableSpanId = 0;
   kj::Own<WorkerTracer> workerTracer;
 };
 
@@ -1910,12 +1910,15 @@ class Server::WorkerService final: public Service,
     kj::Array<kj::Own<IoChannelFactory::SubrequestChannel>> tails;
     kj::Array<kj::Own<IoChannelFactory::SubrequestChannel>> streamingTails;
     kj::Array<kj::Rc<WorkerLoaderNamespace>> workerLoaders;
+    kj::Maybe<kj::Network&> workerdDebugPortNetwork;
   };
   using LinkCallback =
       kj::Function<LinkedIoChannels(WorkerService&, Worker::ValidationErrorReporter&)>;
   using AbortActorsCallback = kj::Function<void(kj::Maybe<const kj::Exception&> reason)>;
 
-  WorkerService(ThreadContext& threadContext,
+  WorkerService(ChannelTokenHandler& channelTokenHandler,
+      kj::Maybe<kj::StringPtr> serviceName,
+      ThreadContext& threadContext,
       kj::Own<const Worker> worker,
       kj::Maybe<kj::HashSet<kj::String>> defaultEntrypointHandlers,
       kj::HashMap<kj::String, kj::HashSet<kj::String>> namedEntrypoints,
@@ -1924,7 +1927,9 @@ class Server::WorkerService final: public Service,
       AbortActorsCallback abortActorsCallback,
       kj::Maybe<kj::String> dockerPathParam,
       bool isDynamic)
-      : threadContext(threadContext),
+      : channelTokenHandler(channelTokenHandler),
+        serviceName(serviceName),
+        threadContext(threadContext),
         ioChannels(kj::mv(linkCallback)),
         worker(kj::mv(worker)),
         defaultEntrypointHandlers(kj::mv(defaultEntrypointHandlers)),
@@ -2109,7 +2114,7 @@ class Server::WorkerService final: public Service,
 
     auto& channels = KJ_ASSERT_NONNULL(ioChannels.tryGet<LinkedIoChannels>());
 
-    kj::Vector<kj::Own<WorkerInterface>> legacyTailWorkers(channels.tails.size());
+    kj::Vector<kj::Own<WorkerInterface>> bufferedTailWorkers(channels.tails.size());
     kj::Vector<kj::Own<WorkerInterface>> streamingTailWorkers(channels.streamingTails.size());
     auto addWorkerIfNotRecursiveTracer = [this, isTracer](
                                              kj::Vector<kj::Own<WorkerInterface>>& workers,
@@ -2152,56 +2157,46 @@ class Server::WorkerService final: public Service,
     // here.
     if (entrypointName.orDefault("") != "test"_kj) {
       for (auto& service: channels.tails) {
-        addWorkerIfNotRecursiveTracer(legacyTailWorkers, *service);
+        addWorkerIfNotRecursiveTracer(bufferedTailWorkers, *service);
       }
-
-      if (worker->getIsolate().getApi().getFeatureFlags().getStreamingTailWorker()) {
-        for (auto& service: channels.streamingTails) {
-          addWorkerIfNotRecursiveTracer(streamingTailWorkers, *service);
-        }
+      for (auto& service: channels.streamingTails) {
+        addWorkerIfNotRecursiveTracer(streamingTailWorkers, *service);
       }
     }
 
     kj::Maybe<kj::Own<WorkerTracer>> workerTracer = kj::none;
 
-    if (legacyTailWorkers.size() > 0 || streamingTailWorkers.size() > 0) {
+    if (!bufferedTailWorkers.empty() || !streamingTailWorkers.empty()) {
       // Setting up buffered tail workers support, but only if we actually have tail workers
       // configured.
-      auto tracer = kj::rc<PipelineTracer>();
       auto executionModel =
           actor == kj::none ? ExecutionModel::STATELESS : ExecutionModel::DURABLE_OBJECT;
       auto tailStreamWriter = tracing::initializeTailStreamWriter(
           streamingTailWorkers.releaseAsArray(), waitUntilTasks);
-      KJ_IF_SOME(t, tailStreamWriter) {
-        tracer->addTailStreamWriter(kj::addRef(*t));
-      }
-      workerTracer = tracer->makeWorkerTracer(PipelineLogLevel::FULL, executionModel,
-          kj::none /* scriptId */, kj::none /* stableId */, kj::none /* scriptName */,
-          kj::none /* scriptVersion */, kj::none /* dispatchNamespace */, nullptr /* scriptTags */,
-          mapCopyString(entrypointName) /* entrypoint */, kj::none /* durableObjectId */,
-          kj::mv(tailStreamWriter));
+      auto trace = kj::refcounted<Trace>(kj::none /* stableId */, kj::none /* scriptName */,
+          kj::none /* scriptVersion */, kj::none /* dispatchNamespace */, kj::none /* scriptId */,
+          nullptr /* scriptTags */, mapCopyString(entrypointName), executionModel,
+          kj::none /* durableObjectId */);
+      kj::Own<WorkerTracer> tracer = kj::refcounted<WorkerTracer>(
+          kj::none, kj::mv(trace), PipelineLogLevel::FULL, kj::mv(tailStreamWriter));
 
-      // When the tracer is complete, deliver the traces to both the parent
-      // and the buffered tail workers. We do NOT want to attach the tracer to the
-      // tracer->onComplete() promise here because it is the destructor of
-      // the PipelineTracer that resolves the onComplete promise. If we attach
-      // the tracer to the promise the tracer won't be destroyed while the
-      // promise is still pending! Fortunately, the WorkerTracer we created
-      // will hold a strong reference to the worker tracer for as long as it
-      // is needed. As long as the WorkerTracer is still alive, the PipelineTracer
-      // will be. See below, we end up creating two references to the WorkerTracer,
-      // one held by the observer and one that will be passed to the IoContext.
-      // The PipelineTracer will be destroyed once both of those are freed.
-      waitUntilTasks.add(tracer->onComplete().then(
-          kj::coCapture([tailWorkers = legacyTailWorkers.releaseAsArray()](
-                            kj::Array<kj::Own<Trace>> traces) mutable -> kj::Promise<void> {
-        for (auto& worker: tailWorkers) {
-          auto event = kj::heap<workerd::api::TraceCustomEvent>(
-              workerd::api::TraceCustomEvent::TYPE, mapAddRef(traces));
-          co_await worker->customEvent(kj::mv(event)).ignoreResult();
-        }
-        co_return;
-      })));
+      // When the tracer is complete, deliver traces to any buffered tail workers. We end up
+      // creating two references to the WorkerTracer, one held by the observer and one that will be
+      // passed to the IoContext. This ensures that the tracer lives long enough to receive all
+      // events.
+      if (!bufferedTailWorkers.empty()) {
+        waitUntilTasks.add(tracer->onComplete().then(
+            kj::coCapture([tailWorkers = bufferedTailWorkers.releaseAsArray()](
+                              kj::Own<Trace> trace) mutable -> kj::Promise<void> {
+          for (auto& worker: tailWorkers) {
+            auto event = kj::heap<workerd::api::TraceCustomEvent>(
+                workerd::api::TraceCustomEvent::TYPE, kj::arr(kj::addRef(*trace)));
+            co_await worker->customEvent(kj::mv(event)).ignoreResult();
+          }
+          co_return;
+        })));
+      }
+      workerTracer = kj::mv(tracer);
     }
 
     KJ_IF_SOME(w, workerTracer) {
@@ -3025,6 +3020,16 @@ class Server::WorkerService final: public Service,
       worker->requireAllowsTransfer();
     }
 
+    kj::Array<byte> getToken(ChannelTokenUsage usage) override {
+      worker->requireAllowsTransfer();
+
+      // If requireAllowsTransfer() passed, then we are not dynamic so should have a service name.
+      // Unspecialized loopback entrypoints are not serializable, so if we get here we must have
+      // props.
+      return worker->channelTokenHandler.encodeSubrequestChannelToken(
+          usage, KJ_ASSERT_NONNULL(worker->serviceName), entrypoint, KJ_ASSERT_NONNULL(props));
+    }
+
    private:
     kj::Own<WorkerService> worker;
     kj::Maybe<kj::StringPtr> entrypoint;
@@ -3087,11 +3092,27 @@ class Server::WorkerService final: public Service,
       return kj::refcounted<ActorClassImpl>(*service, className, kj::mv(props));
     }
 
+    kj::Array<byte> getToken(ChannelTokenUsage usage) override {
+      service->requireAllowsTransfer();
+
+      // If requireAllowsTransfer() passed, then we are not dynamic so should have a service name.
+      // Unspecialized loopback entrypoints are not serializable, so if we get here we must have
+      // props.
+      return service->channelTokenHandler.encodeActorClassChannelToken(
+          usage, KJ_ASSERT_NONNULL(service->serviceName), className, KJ_ASSERT_NONNULL(props));
+    }
+
    private:
     kj::Own<WorkerService> service;
     kj::StringPtr className;
     kj::Maybe<Frankenvalue> props;
   };
+
+  ChannelTokenHandler& channelTokenHandler;
+
+  // This service's name as defined in the original config, or null if it's a dynamic isolate.
+  // Used only for serialization.
+  kj::Maybe<kj::StringPtr> serviceName;
 
   ThreadContext& threadContext;
 
@@ -3235,13 +3256,7 @@ class Server::WorkerService final: public Service,
     co_await context.waitForOutputLocks();
 
     auto innerReq = client->request(kj::HttpMethod::POST, urlStr, headers, requestJson.size());
-
-    struct RefcountedWrapper: public kj::Refcounted {
-      explicit RefcountedWrapper(kj::Own<kj::HttpClient> client): client(kj::mv(client)) {}
-      kj::Own<kj::HttpClient> client;
-    };
-    auto rcClient = kj::refcounted<RefcountedWrapper>(kj::mv(client));
-    auto request = attachToRequest(kj::mv(innerReq), kj::mv(rcClient));
+    auto request = attachToRequest(kj::mv(innerReq), kj::refcountedWrapper(kj::mv(client)));
 
     co_await request.body->write(requestJson.asBytes())
         .attach(kj::mv(requestJson), kj::mv(request.body));
@@ -3277,10 +3292,13 @@ class Server::WorkerService final: public Service,
       kj::Maybe<kj::String> locationHint,
       ActorGetMode mode,
       bool enableReplicaRouting,
+      ActorRoutingMode routingMode,
       SpanParent parentSpan) override {
     JSG_REQUIRE(mode == ActorGetMode::GET_OR_CREATE, Error,
         "workerd only supports GET_OR_CREATE mode for getting actor stubs");
     JSG_REQUIRE(!enableReplicaRouting, Error, "workerd does not support replica routing.");
+    JSG_REQUIRE(routingMode == ActorRoutingMode::DEFAULT, Error,
+        "workerd does not support replica routing.");
     auto& channels =
         KJ_REQUIRE_NONNULL(ioChannels.tryGet<LinkedIoChannels>(), "link() has not been called");
 
@@ -3323,8 +3341,25 @@ class Server::WorkerService final: public Service,
   }
 
   kj::Own<WorkerStubChannel> loadIsolate(uint loaderChannel,
-      kj::String name,
+      kj::Maybe<kj::String> name,
       kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource) override;
+
+  kj::Network& getWorkerdDebugPortNetwork() override {
+    auto& channels =
+        KJ_REQUIRE_NONNULL(ioChannels.tryGet<LinkedIoChannels>(), "link() has not been called");
+    return KJ_REQUIRE_NONNULL(channels.workerdDebugPortNetwork,
+        "workerdDebugPort binding is not enabled for this worker");
+  }
+
+  kj::Own<SubrequestChannel> subrequestChannelFromToken(
+      ChannelTokenUsage usage, kj::ArrayPtr<const byte> token) override {
+    return channelTokenHandler.decodeSubrequestChannelToken(usage, token);
+  }
+
+  kj::Own<ActorClassChannel> actorClassFromToken(
+      ChannelTokenUsage usage, kj::ArrayPtr<const byte> token) override {
+    return channelTokenHandler.decodeActorClassChannelToken(usage, token);
+  }
 
   // ---------------------------------------------------------------------------
   // implements TimerChannel
@@ -3375,6 +3410,7 @@ class Server::WorkerService final: public Service,
   kj::Promise<void> onLimitsExceeded() override {
     return kj::NEVER_DONE;
   }
+  void setCpuLimitNearlyExceededCallback(kj::Function<void(void)> cb) override {}
   void requireLimitsNotExceeded() override {}
   void reportMetrics(RequestObserver& requestMetrics) override {}
   kj::Duration consumeTimeElapsedForPeriodicLogging() override {
@@ -3435,6 +3471,7 @@ static kj::Maybe<WorkerdApi::Global> createBinding(kj::StringPtr workerName,
     kj::Vector<FutureActorChannel>& actorChannels,
     kj::Vector<FutureActorClassChannel>& actorClassChannels,
     kj::Vector<FutureWorkerLoaderChannel>& workerLoaderChannels,
+    bool& hasWorkerdDebugPortBinding,
     kj::HashMap<kj::String, kj::HashMap<kj::String, Server::ActorConfig>>& actorConfigs,
     bool experimental) {
   // creates binding object or returns null and reports an error
@@ -3659,8 +3696,8 @@ static kj::Maybe<WorkerdApi::Global> createBinding(kj::StringPtr workerName,
       for (const auto& innerBinding: wrapped.getInnerBindings()) {
         KJ_IF_SOME(global,
             createBinding(workerName, conf, innerBinding, errorReporter, subrequestChannels,
-                actorChannels, actorClassChannels, workerLoaderChannels, actorConfigs,
-                experimental)) {
+                actorChannels, actorClassChannels, workerLoaderChannels, hasWorkerdDebugPortBinding,
+                actorConfigs, experimental)) {
           innerGlobals.add(kj::mv(global));
         } else {
           // we've already communicated the error
@@ -3788,6 +3825,18 @@ static kj::Maybe<WorkerdApi::Global> createBinding(kj::StringPtr workerName,
       workerLoaderChannels.add(kj::mv(channel));
       return makeGlobal(Global::WorkerLoader{.channel = channelNumber});
     }
+
+    case config::Worker::Binding::WORKERD_DEBUG_PORT: {
+      if (!experimental) {
+        errorReporter.addError(kj::str(
+            "workerdDebugPort bindings are an experimental feature which may change or go away "
+            "in the future. You must run workerd with `--experimental` to use this feature."));
+        return kj::none;
+      }
+
+      hasWorkerdDebugPortBinding = true;
+      return makeGlobal(Global::WorkerdDebugPort{});
+    }
   }
   errorReporter.addError(kj::str(errorContext,
       "has unrecognized type. Was the config compiled with a newer version of "
@@ -3833,6 +3882,7 @@ struct Server::WorkerDef {
   kj::Vector<FutureActorChannel> actorChannels;
   kj::Vector<FutureActorClassChannel> actorClassChannels;
   kj::Vector<FutureWorkerLoaderChannel> workerLoaderChannels;
+  bool hasWorkerdDebugPortBinding = false;
   kj::Array<FutureSubrequestChannel> tails;
   kj::Array<FutureSubrequestChannel> streamingTails;
 
@@ -3866,19 +3916,24 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
   }
 
   kj::Own<WorkerStubChannel> loadIsolate(
-      kj::String name, kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource) {
-    return isolates
-        .findOrCreate(name,
-            [&]() -> decltype(isolates)::Entry {
-      // This name isn't actually used in any maps nor is it ever revealed back to the app, but it
-      // may be used in error logs.
-      auto isolateName = kj::str(namespaceName, ':', name);
+      kj::Maybe<kj::String> name, kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource) {
+    KJ_IF_SOME(n, name) {
+      return isolates
+          .findOrCreate(n,
+              [&]() -> decltype(isolates)::Entry {
+        // This name isn't actually used in any maps nor is it ever revealed back to the app, but it
+        // may be used in error logs.
+        auto isolateName = kj::str(namespaceName, ':', n);
 
-      return {.key = kj::mv(name),
-        .value = kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource))};
-    })
-        .addRef()
-        .toOwn();
+        return {.key = kj::mv(n),
+          .value = kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource))};
+      })
+          .addRef()
+          .toOwn();
+    } else {
+      auto isolateName = kj::str(namespaceName, ":dynamic:", randomUUID(server.entropySource));
+      return kj::rc<WorkerStubImpl>(server, kj::mv(isolateName), kj::mv(fetchSource)).toOwn();
+    }
   }
 
  private:
@@ -3916,6 +3971,10 @@ class Server::WorkerLoaderNamespace: public kj::Refcounted {
         kj::String isolateName,
         kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource)
         : startupTask(start(server, kj::mv(isolateName), kj::mv(fetchSource)).fork()) {}
+
+    ~WorkerStubImpl() {
+      unlink();
+    }
 
     void unlink() {
       KJ_IF_SOME(s, service) {
@@ -4148,7 +4207,7 @@ void Server::unlinkWorkerLoaders() {
 }
 
 kj::Own<WorkerStubChannel> Server::WorkerService::loadIsolate(uint loaderChannel,
-    kj::String name,
+    kj::Maybe<kj::String> name,
     kj::Function<kj::Promise<DynamicWorkerSource>()> fetchSource) {
   auto& channels =
       KJ_REQUIRE_NONNULL(ioChannels.tryGet<LinkedIoChannels>(), "link() has not been called");
@@ -4180,13 +4239,15 @@ kj::Promise<kj::Own<Server::Service>> Server::makeWorker(kj::StringPtr name,
   kj::Vector<FutureActorChannel> actorChannels;
   kj::Vector<FutureActorClassChannel> actorClassChannels;
   kj::Vector<FutureWorkerLoaderChannel> workerLoaderChannels;
+  bool hasWorkerdDebugPortBinding = false;
 
   auto confBindings = conf.getBindings();
   kj::Vector<WorkerdApi::Global> globals(confBindings.size());
   for (auto binding: confBindings) {
     KJ_IF_SOME(global,
         createBinding(name, conf, binding, errorReporter, subrequestChannels, actorChannels,
-            actorClassChannels, workerLoaderChannels, actorConfigs, experimental)) {
+            actorClassChannels, workerLoaderChannels, hasWorkerdDebugPortBinding, actorConfigs,
+            experimental)) {
       globals.add(kj::mv(global));
     }
   }
@@ -4215,6 +4276,7 @@ kj::Promise<kj::Own<Server::Service>> Server::makeWorker(kj::StringPtr name,
     .actorChannels = kj::mv(actorChannels),
     .actorClassChannels = kj::mv(actorClassChannels),
     .workerLoaderChannels = kj::mv(workerLoaderChannels),
+    .hasWorkerdDebugPortBinding = hasWorkerdDebugPortBinding,
 
     // clang-format off
     .tails = KJ_MAP(tail, conf.getTails()) -> FutureSubrequestChannel {
@@ -4619,6 +4681,10 @@ kj::Promise<kj::Own<Server::WorkerService>> Server::makeWorkerImpl(kj::StringPtr
       }
     };
 
+    if (def.hasWorkerdDebugPortBinding) {
+      result.workerdDebugPortNetwork = network;
+    }
+
     return result;
   };
 
@@ -4632,10 +4698,14 @@ kj::Promise<kj::Own<Server::WorkerService>> Server::makeWorkerImpl(kj::StringPtr
       break;
   }
 
-  auto result = kj::refcounted<WorkerService>(globalContext->threadContext, kj::mv(worker),
-      kj::mv(errorReporter.defaultEntrypoint), kj::mv(errorReporter.namedEntrypoints),
-      kj::mv(errorReporter.actorClasses), kj::mv(linkCallback),
-      KJ_BIND_METHOD(*this, abortAllActors), kj::mv(dockerPath), def.isDynamic);
+  kj::Maybe<kj::StringPtr> serviceName;
+  if (!def.isDynamic) serviceName = name;
+
+  auto result = kj::refcounted<WorkerService>(channelTokenHandler, serviceName,
+      globalContext->threadContext, kj::mv(worker), kj::mv(errorReporter.defaultEntrypoint),
+      kj::mv(errorReporter.namedEntrypoints), kj::mv(errorReporter.actorClasses),
+      kj::mv(linkCallback), KJ_BIND_METHOD(*this, abortAllActors), kj::mv(dockerPath),
+      def.isDynamic);
   result->initActorNamespaces(def.localActorConfigs, network);
   co_return result;
 }
@@ -4791,7 +4861,140 @@ kj::Own<Server::ActorClass> Server::lookupActorClass(
   }
 }
 
+kj::Own<IoChannelFactory::SubrequestChannel> Server::resolveEntrypoint(
+    kj::StringPtr serviceName, kj::Maybe<kj::StringPtr> entrypoint, Frankenvalue props) {
+  auto& service = *JSG_REQUIRE_NONNULL(services.find(serviceName), Error,
+      "Stub refers to a service that doesn't exist: ", serviceName);
+
+  auto& worker = JSG_REQUIRE_NONNULL(kj::tryDowncast<WorkerService>(service), Error,
+      "Stub refers to a service that is not a Worker: ", serviceName);
+
+  return JSG_REQUIRE_NONNULL(worker.getEntrypoint(entrypoint, kj::mv(props)), Error,
+      "Stub refers to a an entrypoint of the target service that doesn't exist: ",
+      entrypoint.orDefault("default"));
+}
+
+kj::Own<IoChannelFactory::ActorClassChannel> Server::resolveActorClass(
+    kj::StringPtr serviceName, kj::Maybe<kj::StringPtr> entrypoint, Frankenvalue props) {
+  auto& service = *JSG_REQUIRE_NONNULL(services.find(serviceName), Error,
+      "Stub refers to a service that doesn't exist: ", serviceName);
+
+  auto& worker = JSG_REQUIRE_NONNULL(kj::tryDowncast<WorkerService>(service), Error,
+      "Stub refers to a service that is not a Worker: ", serviceName);
+
+  return JSG_REQUIRE_NONNULL(worker.getActorClass(entrypoint, kj::mv(props)), Error,
+      "Stub refers to a an entrypoint of the target service that doesn't exist: ",
+      entrypoint.orDefault("default"));
+}
+
 // =======================================================================================
+
+class Server::WorkerdBootstrapImpl final: public rpc::WorkerdBootstrap::Server {
+ public:
+  WorkerdBootstrapImpl(kj::Own<IoChannelFactory::SubrequestChannel> service,
+      capnp::HttpOverCapnpFactory& httpOverCapnpFactory)
+      : service(kj::mv(service)),
+        httpOverCapnpFactory(httpOverCapnpFactory) {}
+
+  kj::Promise<void> startEvent(StartEventContext context) override {
+    // TODO(someday): Use cfBlobJson from the connection if there is one, or from RPC params
+    //   if we add that? (Note that if a connection-level cf blob exists, it should take
+    //   priority; we should only accept a cf blob from the client if we have a cfBlobHeader
+    //   configured, which hints that this service trusts the client to provide the cf blob.)
+
+    context.initResults(capnp::MessageSize{4, 1})
+        .setDispatcher(
+            kj::heap<EventDispatcherImpl>(httpOverCapnpFactory, service->startRequest({})));
+    return kj::READY_NOW;
+  }
+
+ private:
+  kj::Own<IoChannelFactory::SubrequestChannel> service;
+  capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
+
+  class EventDispatcherImpl final: public rpc::EventDispatcher::Server {
+   public:
+    EventDispatcherImpl(
+        capnp::HttpOverCapnpFactory& httpOverCapnpFactory, kj::Own<WorkerInterface> worker)
+        : httpOverCapnpFactory(httpOverCapnpFactory),
+          worker(kj::mv(worker)) {}
+
+    kj::Promise<void> getHttpService(GetHttpServiceContext context) override {
+      context.initResults(capnp::MessageSize{4, 1})
+          .setHttp(httpOverCapnpFactory.kjToCapnp(getWorker()));
+      return kj::READY_NOW;
+    }
+
+    kj::Promise<void> sendTraces(SendTracesContext context) override {
+      auto traces =
+          KJ_MAP(trace, context.getParams().getTraces()){ return kj::refcounted<Trace>(trace); };
+      auto event = kj::heap<api::TraceCustomEvent>(api::TraceCustomEvent::TYPE, kj::mv(traces));
+      auto worker = getWorker();
+      auto result = co_await worker->customEvent(kj::mv(event));
+      auto resp = context.getResults().getResult();
+      resp.setOutcome(result.outcome);
+    }
+
+    kj::Promise<void> prewarm(PrewarmContext context) override {
+      throwUnsupported();
+    }
+
+    kj::Promise<void> runScheduled(RunScheduledContext context) override {
+      throwUnsupported();
+    }
+
+    kj::Promise<void> runAlarm(RunAlarmContext context) override {
+      throwUnsupported();
+    }
+
+    kj::Promise<void> queue(QueueContext context) override {
+      throwUnsupported();
+    }
+
+    kj::Promise<void> jsRpcSession(JsRpcSessionContext context) override {
+      auto customEvent = kj::heap<api::JsRpcSessionCustomEvent>(
+          api::JsRpcSessionCustomEvent::WORKER_RPC_EVENT_TYPE);
+
+      auto cap = customEvent->getCap();
+      capnp::PipelineBuilder<JsRpcSessionResults> pipelineBuilder;
+      pipelineBuilder.setTopLevel(cap);
+      context.setPipeline(pipelineBuilder.build());
+      context.getResults().setTopLevel(kj::mv(cap));
+
+      auto worker = getWorker();
+      return worker->customEvent(kj::mv(customEvent)).ignoreResult().attach(kj::mv(worker));
+    }
+
+    kj::Promise<void> tailStreamSession(TailStreamSessionContext context) override {
+      auto customEvent = kj::heap<tracing::TailStreamCustomEvent>();
+      auto cap = customEvent->getCap();
+      capnp::PipelineBuilder<TailStreamSessionResults> pipelineBuilder;
+      pipelineBuilder.setTopLevel(cap);
+      context.setPipeline(pipelineBuilder.build());
+      context.getResults().setTopLevel(kj::mv(cap));
+
+      auto worker = getWorker();
+      auto result = co_await worker->customEvent(kj::mv(customEvent)).attach(kj::mv(worker));
+      auto response = context.getResults();
+      response.setResult(result.outcome);
+    }
+
+   private:
+    capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
+    kj::Maybe<kj::Own<WorkerInterface>> worker;
+
+    kj::Own<WorkerInterface> getWorker() {
+      auto result =
+          kj::mv(KJ_ASSERT_NONNULL(worker, "EventDispatcher can only be used for one request"));
+      worker = kj::none;
+      return result;
+    }
+
+    [[noreturn]] void throwUnsupported() {
+      JSG_FAIL_REQUIRE(Error, "RPC connections don't yet support this event type.");
+    }
+  };
+};
 
 class Server::HttpListener final: public kj::Refcounted {
  public:
@@ -4887,111 +5090,11 @@ class Server::HttpListener final: public kj::Refcounted {
       return s.accept(conn);
     }
 
-    // Capnp server not initialized. Create in now.
-    auto& s = capnpServer.emplace(kj::heap<WorkerdBootstrapImpl>(*this));
+    // Capnp server not initialized. Create it now.
+    auto& s = capnpServer.emplace(
+        kj::heap<WorkerdBootstrapImpl>(kj::addRef(*service), httpOverCapnpFactory));
     return s.accept(conn);
   }
-
-  class WorkerdBootstrapImpl final: public rpc::WorkerdBootstrap::Server {
-   public:
-    WorkerdBootstrapImpl(HttpListener& parent): parent(parent) {}
-
-    kj::Promise<void> startEvent(StartEventContext context) override {
-      // TODO(someday): Use cfBlobJson from the connection if there is one, or from RPC params
-      //   if we add that? (Note that if a connection-level cf blob exists, it should take
-      //   priority; we should only accept a cf blob from the client if we have a cfBlobHeader
-      //   configured, which hints that this service trusts the client to provide the cf blob.)
-
-      context.initResults(capnp::MessageSize{4, 1})
-          .setDispatcher(kj::heap<EventDispatcherImpl>(parent, parent.service->startRequest({})));
-      return kj::READY_NOW;
-    }
-
-   private:
-    HttpListener& parent;
-  };
-
-  class EventDispatcherImpl final: public rpc::EventDispatcher::Server {
-   public:
-    EventDispatcherImpl(HttpListener& parent, kj::Own<WorkerInterface> worker)
-        : parent(parent),
-          worker(kj::mv(worker)) {}
-
-    kj::Promise<void> getHttpService(GetHttpServiceContext context) override {
-      context.initResults(capnp::MessageSize{4, 1})
-          .setHttp(parent.httpOverCapnpFactory.kjToCapnp(getWorker()));
-      return kj::READY_NOW;
-    }
-
-    kj::Promise<void> sendTraces(SendTracesContext context) override {
-      auto traces =
-          KJ_MAP(trace, context.getParams().getTraces()){ return kj::refcounted<Trace>(trace); };
-      auto event = kj::heap<api::TraceCustomEvent>(api::TraceCustomEvent::TYPE, kj::mv(traces));
-      auto worker = getWorker();
-      auto result = co_await worker->customEvent(kj::mv(event));
-      auto resp = context.getResults().getResult();
-      resp.setOutcome(result.outcome);
-    }
-
-    kj::Promise<void> prewarm(PrewarmContext context) override {
-      throwUnsupported();
-    }
-
-    kj::Promise<void> runScheduled(RunScheduledContext context) override {
-      throwUnsupported();
-    }
-
-    kj::Promise<void> runAlarm(RunAlarmContext context) override {
-      throwUnsupported();
-    }
-
-    kj::Promise<void> queue(QueueContext context) override {
-      throwUnsupported();
-    }
-
-    kj::Promise<void> jsRpcSession(JsRpcSessionContext context) override {
-      auto customEvent = kj::heap<api::JsRpcSessionCustomEvent>(
-          api::JsRpcSessionCustomEvent::WORKER_RPC_EVENT_TYPE);
-
-      auto cap = customEvent->getCap();
-      capnp::PipelineBuilder<JsRpcSessionResults> pipelineBuilder;
-      pipelineBuilder.setTopLevel(cap);
-      context.setPipeline(pipelineBuilder.build());
-      context.getResults().setTopLevel(kj::mv(cap));
-
-      auto worker = getWorker();
-      return worker->customEvent(kj::mv(customEvent)).ignoreResult().attach(kj::mv(worker));
-    }
-
-    kj::Promise<void> tailStreamSession(TailStreamSessionContext context) override {
-      auto customEvent = kj::heap<tracing::TailStreamCustomEvent>();
-      auto cap = customEvent->getCap();
-      capnp::PipelineBuilder<TailStreamSessionResults> pipelineBuilder;
-      pipelineBuilder.setTopLevel(cap);
-      context.setPipeline(pipelineBuilder.build());
-      context.getResults().setTopLevel(kj::mv(cap));
-
-      auto worker = getWorker();
-      auto result = co_await worker->customEvent(kj::mv(customEvent)).attach(kj::mv(worker));
-      auto response = context.getResults();
-      response.setResult(result.outcome);
-    }
-
-   private:
-    HttpListener& parent;
-    kj::Maybe<kj::Own<WorkerInterface>> worker;
-
-    kj::Own<WorkerInterface> getWorker() {
-      auto result =
-          kj::mv(KJ_ASSERT_NONNULL(worker, "EventDispatcher can only be used for one request"));
-      worker = kj::none;
-      return result;
-    }
-
-    [[noreturn]] void throwUnsupported() {
-      JSG_FAIL_REQUIRE(Error, "RPC connections don't yet support this event type.");
-    }
-  };
 
   struct Connection final: public kj::HttpService, public kj::HttpServerErrorHandler {
     Connection(HttpListener& parent, kj::Maybe<kj::String> cfBlobJson)
@@ -5049,7 +5152,7 @@ class Server::HttpListener final: public kj::Refcounted {
         kj::HttpService::Response& response) override {
       TRACE_EVENT("workerd", "Connection:request()");
       IoChannelFactory::SubrequestMetadata metadata;
-      metadata.cfBlobJson = cfBlobJson.map([](kj::StringPtr s) { return kj::str(s); });
+      metadata.cfBlobJson = mapCopyString(cfBlobJson);
 
       Response* wrappedResponse = &response;
       kj::Own<ResponseWrapper> ownResponse;
@@ -5113,6 +5216,141 @@ kj::Promise<void> Server::listenHttp(kj::Own<kj::ConnectionReceiver> listener,
       kj::refcounted<HttpListener>(*this, kj::mv(listener), kj::mv(service), physicalProtocol,
           kj::mv(rewriter), globalContext->headerTable, timer, globalContext->httpOverCapnpFactory);
   co_return co_await obj->run();
+}
+
+// =======================================================================================
+// Debug port for exposing all services via RPC
+
+class Server::DebugPortListener {
+ public:
+  DebugPortListener(Server& owner,
+      kj::Own<kj::ConnectionReceiver> listener,
+      capnp::HttpOverCapnpFactory& httpOverCapnpFactory)
+      : owner(owner),
+        listener(kj::mv(listener)),
+        httpOverCapnpFactory(httpOverCapnpFactory) {}
+
+  kj::Promise<void> run() {
+    capnp::TwoPartyServer server(kj::heap<WorkerdDebugPortImpl>(&owner, httpOverCapnpFactory));
+    co_return co_await server.listen(*listener);
+  }
+
+ private:
+  Server& owner;
+  kj::Own<kj::ConnectionReceiver> listener;
+  capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
+
+  class WorkerdDebugPortImpl final: public rpc::WorkerdDebugPort::Server {
+   public:
+    WorkerdDebugPortImpl(
+        workerd::server::Server* srvPtr, capnp::HttpOverCapnpFactory& httpOverCapnpFactory)
+        : srv(*srvPtr),
+          httpOverCapnpFactory(httpOverCapnpFactory) {}
+
+    kj::Promise<void> getEntrypoint(GetEntrypointContext context) override {
+      auto params = context.getParams();
+      auto serviceName = params.getService();
+      auto propsReader = params.getProps();
+
+      // Look up the service
+      auto& serviceEntry =
+          KJ_ASSERT_NONNULL(srv.services.find(serviceName), "Service not found", serviceName);
+      auto service = serviceEntry->service();
+
+      // Convert props from Frankenvalue if provided
+      Frankenvalue props;
+      if (params.hasProps()) {
+        props = Frankenvalue::fromCapnp(propsReader);
+      }
+
+      kj::Own<Service> targetService;
+
+      // Try to cast to WorkerService to support entrypoints and props
+      auto* workerService = dynamic_cast<WorkerService*>(service);
+      if (workerService != nullptr) {
+        // This is a WorkerService, use getEntrypoint which supports both entrypoints and props
+        kj::Maybe<kj::StringPtr> maybeEntrypoint;
+        if (params.hasEntrypoint()) {
+          maybeEntrypoint = params.getEntrypoint();
+        }
+
+        targetService =
+            KJ_ASSERT_NONNULL(workerService->getEntrypoint(maybeEntrypoint, kj::mv(props)),
+                "Entrypoint not found", maybeEntrypoint.orDefault("(default)"));
+      } else {
+        // Not a WorkerService
+        KJ_ASSERT(
+            !params.hasEntrypoint(), "Service does not support named entrypoints", serviceName);
+
+        // Try to apply props if the service supports it
+        if (params.hasProps()) {
+          targetService = service->forProps(kj::mv(props));
+        } else {
+          // No props, just use the service as-is
+          targetService = kj::addRef(*service);
+        }
+      }
+
+      // Return a WorkerdBootstrap that wraps this service using the generic implementation.
+      context.initResults(capnp::MessageSize{4, 1})
+          .setEntrypoint(
+              kj::heap<WorkerdBootstrapImpl>(kj::mv(targetService), httpOverCapnpFactory));
+      return kj::READY_NOW;
+    }
+
+    kj::Promise<void> getActor(GetActorContext context) override {
+      auto params = context.getParams();
+      auto serviceName = params.getService();
+      auto entrypointName = params.getEntrypoint();
+      auto actorIdStr = params.getActorId();
+
+      // Look up the service
+      auto& serviceEntry =
+          KJ_ASSERT_NONNULL(srv.services.find(serviceName), "Service not found", serviceName);
+      auto service = serviceEntry->service();
+
+      // Try to cast to WorkerService
+      auto* workerService = dynamic_cast<WorkerService*>(service);
+      KJ_REQUIRE(workerService != nullptr, "Service does not support actors", serviceName);
+
+      // Look up the actor namespace
+      auto& actorNamespace = KJ_ASSERT_NONNULL(workerService->getActorNamespace(entrypointName),
+          "Actor namespace not found", entrypointName);
+
+      // Create an actor ID - use the namespace config to determine if it's durable or ephemeral
+      Worker::Actor::Id actorId;
+      KJ_SWITCH_ONEOF(actorNamespace.getConfig()) {
+        KJ_CASE_ONEOF(c, Durable) {
+          // Durable Object ID (hex-encoded SHA256 hash)
+          auto decoded = kj::decodeHex(actorIdStr);
+          KJ_REQUIRE(decoded.size() == SHA256_DIGEST_LENGTH,
+              "Invalid Durable Object ID: expected 64 hex characters (32 bytes)", decoded.size());
+          kj::Own<ActorIdFactory::ActorId> id =
+              kj::heap<ActorIdFactoryImpl::ActorIdImpl>(decoded.begin(), kj::none);
+          actorId = kj::mv(id);
+        }
+        KJ_CASE_ONEOF(c, Ephemeral) {
+          // Ephemeral actor ID (plain string)
+          actorId = kj::str(actorIdStr);
+        }
+      }
+
+      // Wrap the actor channel using the generic WorkerdBootstrap implementation.
+      context.initResults(capnp::MessageSize{4, 1})
+          .setActor(kj::heap<WorkerdBootstrapImpl>(
+              actorNamespace.getActorChannel(kj::mv(actorId)), httpOverCapnpFactory));
+      return kj::READY_NOW;
+    }
+
+   private:
+    workerd::server::Server& srv;
+    capnp::HttpOverCapnpFactory& httpOverCapnpFactory;
+  };
+};
+
+kj::Promise<void> Server::listenDebugPort(kj::Own<kj::ConnectionReceiver> listener) {
+  DebugPortListener obj(*this, kj::mv(listener), globalContext->httpOverCapnpFactory);
+  co_return co_await obj.run();
 }
 
 // =======================================================================================
@@ -5376,9 +5614,10 @@ kj::Promise<void> Server::startServices(jsg::V8System& v8System,
     kj::Own<kj::TlsContext> tls = kj::heap<kj::TlsContext>(kj::mv(options));
     auto tlsNetwork = tls->wrapNetwork(*publicNetwork);
 
+    // Attaching to refcounted NetworkService is safe since services map is long-lived
     auto service = kj::refcounted<NetworkService>(globalContext->headerTable, timer, entropySource,
         kj::mv(publicNetwork), kj::mv(tlsNetwork), *tls)
-                       .attach(kj::mv(tls));
+                       .attachToThisReference(kj::mv(tls));
 
     return decltype(services)::Entry{kj::str("internet"_kj), kj::mv(service)};
   });
@@ -5494,6 +5733,29 @@ kj::Promise<void> Server::listenOnSockets(config::Config::Reader config,
       co_await listenHttp(kj::mv(listener), kj::mv(service), physicalProtocol, kj::mv(rewriter));
     });
     tasks.add(handle(kj::mv(listener)).exclusiveJoin(forkedDrainWhen.addBranch()));
+  }
+
+  // Start debug port if configured
+  KJ_IF_SOME(addr, debugPortOverride) {
+    auto handle = kj::coCapture(
+        [this, addr = kj::str(addr)](kj::ForkedPromise<void>& drain) mutable -> kj::Promise<void> {
+      auto parsed = co_await network.parseAddress(addr, 0);
+      auto listener = parsed->listen();
+
+      KJ_IF_SOME(stream, controlOverride) {
+        auto message = kj::str("{\"event\":\"listen\",\"socket\":\"debug-port"
+                               "\",\"port\":",
+            listener->getPort(), "}\n");
+        try {
+          stream->write(message.asBytes());
+        } catch (kj::Exception& e) {
+          KJ_LOG(ERROR, e);
+        }
+      }
+
+      co_await listenDebugPort(kj::mv(listener));
+    });
+    tasks.add(handle(forkedDrainWhen).exclusiveJoin(forkedDrainWhen.addBranch()));
   }
 
   for (auto& unmatched: socketOverrides) {

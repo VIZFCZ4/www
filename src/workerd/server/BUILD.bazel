@@ -106,8 +106,9 @@ wd_cc_library(
         "//src/workerd/io:actor-id",
         "//src/workerd/jsg:exception",
         "//src/workerd/util:entropy",
+        "//src/workerd/util:own-util",
         "//src/workerd/util:thread-scopes",
-        "@capnp-cpp//src/kj:kj",
+        "@capnp-cpp//src/kj",
         "@ssl",
     ],
 )
@@ -129,6 +130,20 @@ wd_cc_library(
         "@capnp-cpp//src/kj:kj-async",
         "@capnp-cpp//src/kj/compat:kj-gzip",
         "@capnp-cpp//src/kj/compat:kj-tls",
+    ],
+)
+
+wd_cc_library(
+    name = "workerd-debug-port-client",
+    srcs = [
+        "workerd-debug-port-client.c++",
+    ],
+    hdrs = [
+        "workerd-debug-port-client.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/workerd/io",
     ],
 )
 
@@ -155,6 +170,7 @@ wd_cc_library(
         ":actor-id-impl",
         ":fallback-service",
         ":pyodide",
+        ":workerd-debug-port-client",
         ":workerd_capnp",
         "//src/cloudflare",
         "//src/node",
@@ -180,14 +196,17 @@ wd_cc_library(
 wd_cc_library(
     name = "server",
     srcs = [
+        "channel-token.c++",
         "server.c++",
     ],
     hdrs = [
+        "channel-token.h",
         "server.h",
     ],
     deps = [
         ":actor-id-impl",
         ":alarm-scheduler",
+        ":channel-token_capnp",
         ":container-client",
         ":facet-tree-index",
         ":fallback-service",
@@ -200,7 +219,6 @@ wd_cc_library(
         "//src/workerd/api:pyodide",
         "//src/workerd/io",
         "//src/workerd/io:bundle-fs",
-        "//src/workerd/io:trace-stream",
         "//src/workerd/io:worker-entrypoint",
         "//src/workerd/jsg",
         "//src/workerd/util:perfetto",
@@ -213,6 +231,13 @@ wd_cc_library(
 wd_capnp_library(src = "docker-api.capnp")
 
 wd_capnp_library(src = "log-schema.capnp")
+
+wd_capnp_library(
+    src = "channel-token.capnp",
+    deps = [
+        "//src/workerd/io:frankenvalue_capnp",
+    ],
+)
 
 wd_cc_library(
     name = "json-logger",
@@ -304,6 +329,13 @@ kj_test(
     deps = [
         ":server",
         "//src/workerd/util:test-util",
+    ],
+)
+
+kj_test(
+    src = "channel-token-test.c++",
+    deps = [
+        ":server",
     ],
 )
 

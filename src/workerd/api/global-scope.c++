@@ -146,8 +146,6 @@ kj::Promise<DeferredProxy<void>> ServiceWorkerGlobalScope::request(kj::HttpMetho
 
   CfProperty cf(cfBlobJson);
 
-  auto jsHeaders = js.alloc<Headers>(js, headers, Headers::Guard::REQUEST);
-
   // We only create the body stream if there is a body to read.
   kj::Maybe<jsg::Ref<ReadableStream>> maybeJsStream = kj::none;
 
@@ -183,19 +181,17 @@ kj::Promise<DeferredProxy<void>> ServiceWorkerGlobalScope::request(kj::HttpMetho
     maybeJsStream = kj::mv(jsStream);
   }
 
+  auto jsHeaders = js.alloc<Headers>(js, headers, Headers::Guard::REQUEST);
+
   // If the request doesn't specify "Content-Length" or "Transfer-Encoding", set "Content-Length"
   // to the body length if it's known. This ensures handlers for worker-to-worker requests can
   // access known body lengths if they're set, without buffering bodies.
-  if (body != kj::none && headers.get(kj::HttpHeaderId::CONTENT_LENGTH) == kj::none &&
-      headers.get(kj::HttpHeaderId::TRANSFER_ENCODING) == kj::none) {
-    // We can't use headers.set() here as headers is marked const. Instead, we call set() on the
-    // JavaScript headers object, ignoring the REQUEST guard that usually makes them immutable.
+  if (body != kj::none && !jsHeaders->hasCommon(capnp::CommonHeaderName::CONTENT_LENGTH) &&
+      !jsHeaders->hasCommon(capnp::CommonHeaderName::TRANSFER_ENCODING)) {
     KJ_IF_SOME(l, requestBody.tryGetLength()) {
-      jsHeaders->setUnguarded(
-          js, jsg::ByteString(kj::str("Content-Length")), jsg::ByteString(kj::str(l)));
+      jsHeaders->setCommon(capnp::CommonHeaderName::CONTENT_LENGTH, kj::str(l));
     } else {
-      jsHeaders->setUnguarded(
-          js, jsg::ByteString(kj::str("Transfer-Encoding")), jsg::ByteString(kj::str("chunked")));
+      jsHeaders->setCommon(capnp::CommonHeaderName::TRANSFER_ENCODING, kj::str("chunked"));
     }
   }
 
@@ -273,8 +269,8 @@ kj::Promise<DeferredProxy<void>> ServiceWorkerGlobalScope::request(kj::HttpMetho
       maybeJsStream = kj::none;  // Release our reference; we don't need it anymore.
     }
 
-    auto client = ioContext.getHttpClient(IoContext::NEXT_CLIENT_CHANNEL, false,
-        cfBlobJson.map([](kj::StringPtr s) { return kj::str(s); }), "fetch_default"_kjc);
+    auto client = ioContext.getHttpClient(
+        IoContext::NEXT_CLIENT_CHANNEL, false, mapCopyString(cfBlobJson), "fetch_default"_kjc);
     auto adapter = kj::newHttpService(*client);
     auto promise = adapter->request(method, url, headers, requestBody, response);
     // Default handling doesn't rely on the IoContext at all so we can return it as a
@@ -355,11 +351,11 @@ void ServiceWorkerGlobalScope::sendTraces(kj::ArrayPtr<kj::Own<Trace>> traces,
 
   KJ_IF_SOME(h, exportedHandler) {
     KJ_IF_SOME(f, h.tail) {
-      auto tailEvent = js.alloc<TailEvent>(lock, "tail"_kj, traces);
+      auto tailEvent = js.alloc<TailEvent>(lock, "tail"_kjc, traces);
       auto promise = f(lock, tailEvent->getEvents(), h.env.addRef(isolate), h.getCtx());
       tailEvent->waitUntil(kj::mv(promise));
     } else KJ_IF_SOME(f, h.trace) {
-      auto traceEvent = js.alloc<TailEvent>(lock, "trace"_kj, traces);
+      auto traceEvent = js.alloc<TailEvent>(lock, "trace"_kjc, traces);
       auto promise = f(lock, traceEvent->getEvents(), h.env.addRef(isolate), h.getCtx());
       traceEvent->waitUntil(kj::mv(promise));
     } else {
@@ -370,8 +366,8 @@ void ServiceWorkerGlobalScope::sendTraces(kj::ArrayPtr<kj::Own<Trace>> traces,
   } else {
     // Fire off the handlers.
     // We only create both events here.
-    auto tailEvent = js.alloc<TailEvent>(lock, "tail"_kj, traces);
-    auto traceEvent = js.alloc<TailEvent>(lock, "trace"_kj, traces);
+    auto tailEvent = js.alloc<TailEvent>(lock, "tail"_kjc, traces);
+    auto traceEvent = js.alloc<TailEvent>(lock, "trace"_kjc, traces);
     dispatchEventImpl(lock, tailEvent.addRef());
     dispatchEventImpl(lock, traceEvent.addRef());
 
@@ -501,7 +497,7 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
 
         context.getMetrics().reportFailure(e);
 
-        auto description = kj::str(e.getDescription());
+        auto description = e.getDescription();
         auto log = !jsg::isTunneledException(description) && !jsg::isDoNotLogException(description);
         auto isUserError = e.getDetail(jsg::EXCEPTION_IS_USER_ERROR) != kj::none;
 
@@ -731,8 +727,11 @@ void ServiceWorkerGlobalScope::emitPromiseRejection(jsg::Lock& js,
   };
 
   const auto hasInspector = [] {
-    if (!IoContext::hasCurrent()) return false;
-    return IoContext::current().isInspectorEnabled();
+    KJ_IF_SOME(ioContext, IoContext::tryCurrent()) {
+      return ioContext.isInspectorEnabled();
+    } else {
+      return false;
+    }
   };
 
   if (hasHandlers() || hasInspector()) {
@@ -988,7 +987,7 @@ jsg::Ref<StorageManager> Navigator::getStorage(jsg::Lock& js) {
 }
 
 bool Navigator::sendBeacon(jsg::Lock& js, kj::String url, jsg::Optional<Body::Initializer> body) {
-  if (IoContext::hasCurrent()) {
+  KJ_IF_SOME(context, IoContext::tryCurrent()) {
     auto v8Context = js.v8Context();
     auto& global =
         jsg::extractInternalPointer<ServiceWorkerGlobalScope, true>(v8Context, v8Context->Global());
@@ -997,8 +996,6 @@ bool Navigator::sendBeacon(jsg::Lock& js, kj::String url, jsg::Optional<Body::In
           .method = kj::str("POST"),
           .body = kj::mv(body),
         });
-
-    auto& context = IoContext::current();
 
     context.addWaitUntil(context.awaitJs(js, kj::mv(promise)).ignoreResult());
     return true;

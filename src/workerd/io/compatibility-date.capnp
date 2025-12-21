@@ -709,8 +709,9 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   disableImportableEnv @78 :Bool
       $compatEnableFlag("disallow_importable_env")
       $compatDisableFlag("allow_importable_env");
-  # When allowed, `import { env } from 'cloudflare:workers'` will provide access
-  # to the per-request environment/bindings.
+  # When allowed, `import { env, exports } from 'cloudflare:workers'` will provide access
+  # to the per-request environment/bindings. This flag also disables importable exports
+  # (the exports proxy) since both features are conceptually related.
 
   assetsSecFetchModeNavigateHeaderPrefersAssetServing @79 :Bool
       $compatEnableFlag("assets_navigation_prefers_asset_serving")
@@ -732,10 +733,10 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
       $experimental;
   # when enabled, enables Durable Object support for Python Workers.
 
-  streamingTailWorker @82 :Bool
+  obsolete82 @82 :Bool
       $compatEnableFlag("streaming_tail_worker")
       $experimental;
-  # Experimental support for streaming tail worker.
+  # Obsolete flag. Has no effect.
 
   specCompliantUrlpattern @83 :Bool
     $compatEnableFlag("urlpattern_standard")
@@ -1018,8 +1019,7 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
 
   emailSendingQueuing @116 :Bool
       $compatEnableFlag("enable_email_sending_queuing")
-      $compatDisableFlag("disable_email_sending_queuing")
-      $experimental;
+      $compatDisableFlag("disable_email_sending_queuing");
   # Enables Queuing on the `.send(message: EmailMessage)` function on send_email binding if there's
   # a temporary error on email delivery.
   # Note that by enabling this, user-provided Message-IDs are stripped and
@@ -1079,8 +1079,7 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   enableNodeJsDomainModule @124 :Bool
     $compatEnableFlag("enable_nodejs_domain_module")
     $compatDisableFlag("disable_nodejs_domain_module")
-    $experimental;
-    # $impliedByAfterDate(name = "nodeJsCompat", date = "2025-10-15");
+    $impliedByAfterDate(name = "nodeJsCompat", date = "2025-12-04");
   # Enables the Node.js non-functional stub domain module. It is required to use this flag with
   # nodejs_compat (or nodejs_compat_v2).
 
@@ -1103,14 +1102,14 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   enableNodeJsPunycodeModule @127 :Bool
     $compatEnableFlag("enable_nodejs_punycode_module")
     $compatDisableFlag("disable_nodejs_punycode_module")
-    $experimental;
+    $impliedByAfterDate(name = "nodeJsCompat", date = "2025-12-04");
   # Enables the Node.js deprecated punycode module. It is required to use this flag with
   # nodejs_compat (or nodejs_compat_v2).
 
   enableNodeJsClusterModule @128 :Bool
     $compatEnableFlag("enable_nodejs_cluster_module")
     $compatDisableFlag("disable_nodejs_cluster_module")
-    $experimental;
+    $impliedByAfterDate(name = "nodeJsCompat", date = "2025-12-04");
   # Enables the Node.js non-functional stub cluster module. It is required to use this flag with
   # nodejs_compat (or nodejs_compat_v2).
 
@@ -1138,7 +1137,7 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   enableNodeJsWasiModule @132 :Bool
     $compatEnableFlag("enable_nodejs_wasi_module")
     $compatDisableFlag("disable_nodejs_wasi_module")
-    $experimental;
+    $impliedByAfterDate(name = "nodeJsCompat", date = "2025-12-04");
   # Enables the Node.js non-functional stub wasi module. It is required to use this
   # flag with nodejs_compat (or nodejs_compat_v2).
 
@@ -1159,7 +1158,7 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   enableNodeJsTraceEventsModule @135 :Bool
     $compatEnableFlag("enable_nodejs_trace_events_module")
     $compatDisableFlag("disable_nodejs_trace_events_module")
-    $experimental;
+    $impliedByAfterDate(name = "nodeJsCompat", date = "2025-12-04");
   # Enables the Node.js non-functional stub trace_events module. It is required to use this
   # flag with nodejs_compat (or nodejs_compat_v2).
 
@@ -1219,7 +1218,7 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   pythonCheckRngState @144 : Bool
     $compatEnableFlag("python_check_rng_state")
     $compatDisableFlag("disable_python_check_rng_state")
-    $experimental;
+    $impliedByAfterDate(name = "pythonWorkers", date = "2025-12-16");
 
   shouldSetImmutablePrototype @145 :Bool
     $compatEnableFlag("immutable_api_prototypes")
@@ -1227,4 +1226,84 @@ struct CompatibilityFlags @0x8f8c1b68151b6cef {
   # When set, tells JSG to make the prototype of all jsg::Objects immutable.
   # TODO(soon): Add the default on date once the flag is verified to be
   # generally safe.
+
+  fetchIterableTypeSupport @146 :Bool
+    $compatEnableFlag("fetch_iterable_type_support")
+    $compatDisableFlag("no_fetch_iterable_type_support");
+  # Enables passing sync and async iterables as the body of fetch Request or Response.
+  # Previously, sync iterables like Arrays would be accepted but stringified, and async
+  # iterables would be treated as regular objects and not iterated over at all. With this
+  # flag enabled, sync and async iterables will be properly iterated over and their values
+  # used as the body of the request or response.
+  # The actual compat flag enables the specific AsyncGeneratorIgnoringStrings type wrapper
+  # that allows this behavior and allows sync Generator and AsyncGenerator objects to be
+  # included in kj::OneOf declarations safely with strings and other types. When enabled,
+  # strings are ignored but Arrays will be treated as iterables and not stringified as before.
+
+  envModuleNullableSupport @147 :Bool
+    $compatEnableFlag("env_module_nullable_support")
+    $compatDisableFlag("no_env_module_nullable_support");
+  # Enables support for null and undefined values in EnvModule's getCurrentEnv() and
+  # getCurrentExports() methods. When enabled, if the async context contains null or
+  # undefined values, they will be returned instead of falling through to the worker
+  # env/exports. This allows more explicit control over env and exports values in async
+  # contexts.
+
+  preciseTimers @148 :Bool
+    $compatEnableFlag("precise_timers")
+    $compatDisableFlag("no_precise_timers")
+    $experimental;
+  # Enables precise timers with 3ms granularity. This provides more accurate timing for performance
+  # measurements and time-sensitive operations.
+
+  fetchIterableTypeSupportOverrideAdjustment @149 :Bool
+    $compatEnableFlag("fetch_iterable_type_support_override_adjustment")
+    $compatDisableFlag("no_fetch_iterable_type_support_override_adjustment")
+    $impliedByAfterDate(name = "fetchIterableTypeSupport", date = "2026-01-15");
+  # Further adapts the fetch iterable type support to adjust for toString/toPrimitive
+  # overrides on sync iterable objects. Specifically, if an object passed as the body
+  # of a fetch Request or Response is sync iterable but has a custom toString or
+  # toPrimitive method, we will skip treating it as a sync iterable and instead allow
+  # it to fall through to being handled as a stringified object.
+
+  stripBomInReadAllText @150 :Bool
+    $compatEnableFlag("strip_bom_in_read_all_text")
+    $compatDisableFlag("do_not_strip_bom_in_read_all_text")
+    $compatEnableDate("2026-01-13")
+    $impliedByAfterDate(name = "pedanticWpt", date = "2026-01-13");
+  # Instructs the readAllText method in streams to strip the leading UTF8 BOM if present.
+
+  allowIrrevocableStubStorage @151 :Bool
+    $compatEnableFlag("allow_irrevocable_stub_storage")
+    $experimental;
+  # Permits various stub types (e.g. ServiceStub aka Fetcher, DurableObjectClass) to be stored in
+  # long-term Durable Object storage without any mechanism for the stub target to audit or revoke
+  # incoming connections.
+  #
+  # This feature exists for experimental use only, and will be removed once we have a properly
+  # auditable and revocable storage mechanism.
+
+  rpcParamsDupStubs @152 :Bool
+    $compatEnableFlag("rpc_params_dup_stubs")
+    $compatDisableFlag("rpc_params_transfer_stubs")
+    $compatEnableDate("2026-01-20");
+  # Changes the ownership semantics of RPC stubs embedded in the parameters of an RPC call.
+  #
+  # When the RPC system was first introduced, RPC stubs that were embedded in the params or return
+  # value of some other call had their ownership transferred. That is, the original stub was
+  # implicitly disposed, with a duplicate stub being delivered to the destination.
+  #
+  # This turns out to compose poorly with another rule: in the callee, any stubs received in the
+  # params of a call are automatically disposed when the call returns. These two rules combine to
+  # mean that if you proxy a call -- i.e. the implementation of an RPC just makes another RPC call
+  # passing along the same params -- then any stubs in the params get disposed twice. Worse, if
+  # the eventual recipient of the stub wants to keep a duplicate past the end of the call, this
+  # may not work because the copy of the stub in the proxy layer gets disposed anyway, breaking the
+  # connection.
+  #
+  # For this reason, the pure-JS implementation of Cap'n Web switched to saying that stubs in params
+  # do NOT transfer ownership -- they are simply duplicated. This compat flag fixes the Workers
+  # Runtime built-in RPC to match Cap'n Web behavior.
+  #
+  # In particular, this fixes: https://github.com/cloudflare/capnweb/issues/110
 }

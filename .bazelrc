@@ -1,8 +1,8 @@
 common --enable_platform_specific_config
 build --verbose_failures
-build --build_tag_filters=-off-by-default
-test --test_tag_filters=-off-by-default,-requires-fuzzilli
-test:asan --test_tag_filters=-off-by-default,-no-asan,-requires-fuzzilli
+build --build_tag_filters=-off-by-default,-requires-container-engine
+test --test_tag_filters=-off-by-default,-requires-fuzzilli,-requires-container-engine
+test:asan --test_tag_filters=-off-by-default,-no-asan,-requires-fuzzilli,-requires-container-engine
 # exclude enormous tests by default
 build --test_size_filters=-enormous
 
@@ -15,11 +15,13 @@ common --enable_workspace
 
 # As part of starlarkification, Bazel 8 removes a number of rules which now need to be imported from
 # other repositories. In the long term, load() statements will be needed to import these rules. For
-# now, we can still autoload the affected repositories when needed. Do this only for a few
-# handpicked rules_python rules_shell, and protobuf components instead of the larger default
-# autoload set – some dependencies aren't importing the required shell rules yet, but we don't want
-# to accidentally rely on autoloading more dependencies.
-build --incompatible_autoload_externally="+py_binary,+py_library,+ProtoInfo,+sh_binary,+proto_library,+cc_proto_library"
+# now, we can still autoload the affected repositories when needed. Do this only for a remaining
+# protobuf components instead of the larger default autoload set – perfetto isn't importing all
+# required rules yet, but we don't want to accidentally rely on autoloading more dependencies.
+common --incompatible_autoload_externally="+ProtoInfo"
+
+# Bazel 9 forward compatibility: Disable native repo rules.
+build --incompatible_disable_native_repo_rules
 
 # bazel7 enables Build without the Bytes (BwoB) by default. This significantly speeds up builds
 # using the remote cache since less data needs to be fetched.
@@ -48,6 +50,9 @@ build --per_file_copt='external/zlib@-Wno-deprecated-non-prototype'
 build --host_per_file_copt='external/zlib@-Wno-deprecated-non-prototype'
 build --per_file_copt=external/protobuf@-Wno-deprecated-declarations
 build --host_per_file_copt=external/protobuf@-Wno-deprecated-declarations
+
+# opt in to capnp deprecation warnings about trying to attach to a refcounted object
+build --cxxopt=-DKJ_WARN_REFCOUNTED_ATTACH=1
 
 # TODO(cleanup): Causes warnings with LLVM20, fix and enable again
 build --copt=-Wno-nontrivial-memaccess

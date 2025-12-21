@@ -52,7 +52,7 @@ test-asan *args="//...":
 
 # e.g. just stream-test //src/cloudflare:cloudflare.capnp@eslint
 stream-test *args:
-  bazel test {{args}} --test_output=streamed --nocache_test_results --config=debug --test_tag_filters= --test_size_filters=
+  bazel test {{args}} --test_output=streamed --nocache_test_results --test_tag_filters= --test_size_filters=
 
 # e.g. just node-test zlib
 node-test test_name *args:
@@ -79,6 +79,11 @@ new-wpt-test test_name:
   ./tools/cross/format.py
   bazel test //src/wpt:{{test_name}} --test_env=GEN_TEST_CONFIG=1 --test_output=streamed
 
+# Specify the full Bazel target name for the test to be created.
+# e.g. just new-test //src/workerd/api/tests:v8-temporal-test
+new-test test_name:
+  ./tools/unix/new-test.sh {{test_name}}
+
 format: rustfmt
   python3 tools/cross/format.py
 
@@ -104,6 +109,10 @@ bench path:
 clippy package="...":
   bazel build //src/rust/{{package}} --config=lint
 
+# example: just clang-tidy //src/rust/jsg:ffi
+clang-tidy target="//...":
+  bazel build {{target}} --config=clang-tidy
+
 generate-types:
   bazel build //types
   cp -r bazel-bin/types/definitions/latest types/generated-snapshot/
@@ -122,7 +131,7 @@ create-external:
   tools/unix/create-external.sh
 
 bench-all:
-  bazel query 'attr(tags, "benchmark-binary", //...)' --output=label | xargs -I {} bazel run --config=benchmark {}
+  bazel query 'attr(tags, "[\[ ]google_benchmark[,\]]", //... + @capnp-cpp//...)' --output=label | xargs -I {} bazel run --config=benchmark {}
 
 eslint:
   just stream-test \

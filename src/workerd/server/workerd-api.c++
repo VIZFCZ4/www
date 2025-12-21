@@ -58,6 +58,8 @@
 #include <workerd/rust/transpiler/lib.rs.h>
 #include <workerd/server/actor-id-impl.h>
 #include <workerd/server/fallback-service.h>
+#include <workerd/server/workerd-debug-port-client.h>
+#include <workerd/util/autogate.h>
 #include <workerd/util/thread-scopes.h>
 #include <workerd/util/use-perfetto-categories.h>
 
@@ -140,7 +142,9 @@ JSG_DECLARE_ISOLATE_TYPE(JsgWorkerdIsolate,
     EW_EXPORT_LOOPBACK_ISOLATE_TYPES,
     EW_PERFORMANCE_ISOLATE_TYPES,
     EW_TRACING_MODULE_ISOLATE_TYPES,
+    EW_WORKERD_DEBUG_PORT_CLIENT_ISOLATE_TYPES,
     workerd::api::EnvModule,
+    workerd::api::PythonPatchedEnv,
 
     jsg::TypeWrapperExtension<PromiseWrapper>,
     jsg::InjectConfiguration<CompatibilityFlags::Reader>,
@@ -267,6 +271,10 @@ struct WorkerdApi::Impl final {
           jsgConfig(jsg::JsgConfig{
             .noSubstituteNull = features.getNoSubstituteNull(),
             .unwrapCustomThenables = features.getUnwrapCustomThenables(),
+            .fetchIterableTypeSupport = features.getFetchIterableTypeSupport(),
+            .fetchIterableTypeSupportOverrideAdjustment =
+                features.getFetchIterableTypeSupportOverrideAdjustment(),
+            .fastApiEnabled = util::Autogate::isEnabled(util::AutogateKey::V8_FAST_API),
           }) {}
     operator const CompatibilityFlags::Reader() const {
       return features;
@@ -822,6 +830,10 @@ static v8::Local<v8::Value> createBindingValue(JsgWorkerdIsolate::Lock& lock,
           lock.alloc<api::WorkerLoader>(
               workerLoader.channel, CompatibilityDateValidation::CODE_VERSION));
     }
+
+    KJ_CASE_ONEOF(_, Global::WorkerdDebugPort) {
+      value = lock.wrap(context, lock.alloc<WorkerdDebugPortConnector>());
+    }
   }
 
   return value;
@@ -926,6 +938,9 @@ WorkerdApi::Global WorkerdApi::Global::clone() const {
     }
     KJ_CASE_ONEOF(workerLoader, Global::WorkerLoader) {
       result.value = workerLoader.clone();
+    }
+    KJ_CASE_ONEOF(workerdDebugPort, Global::WorkerdDebugPort) {
+      result.value = workerdDebugPort.clone();
     }
   }
 

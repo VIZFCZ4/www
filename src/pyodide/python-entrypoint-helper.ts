@@ -2,7 +2,11 @@
 // This file is a BUILTIN module that provides the actual implementation for the
 // python-entrypoint.js USER module.
 
-import { beforeRequest, loadPyodide } from 'pyodide-internal:python';
+import {
+  beforeRequest,
+  loadPyodide,
+  clearSignals,
+} from 'pyodide-internal:python';
 import { enterJaegerSpan } from 'pyodide-internal:jaeger';
 import { patchLoadPackage } from 'pyodide-internal:setupPackages';
 import {
@@ -23,6 +27,7 @@ import {
   reportError,
 } from 'pyodide-internal:util';
 import { LOADED_SNAPSHOT_TYPE } from 'pyodide-internal:snapshot';
+import { patch_env_helper } from 'pyodide-internal:envHelpers';
 
 type PyFuture<T> = Promise<T> & { copy(): PyFuture<T>; destroy(): void };
 
@@ -61,10 +66,11 @@ function patchWaitUntil(ctx: {
 
 export type PyodideEntrypointHelper = {
   doAnImport: (mod: string) => Promise<any>;
-  cloudflareWorkersModule: any;
+  cloudflareWorkersModule: { env: any };
   cloudflareSocketsModule: any;
   workerEntrypoint: any;
   patchWaitUntil: typeof patchWaitUntil;
+  patch_env_helper: (patch: unknown) => Generator<void>;
 };
 import { maybeCollectDedicatedSnapshot } from 'pyodide-internal:snapshot';
 
@@ -92,6 +98,7 @@ export function setDoAnImport(
     cloudflareSocketsModule,
     workerEntrypoint,
     patchWaitUntil,
+    patch_env_helper,
   };
 }
 
@@ -292,6 +299,8 @@ async function doPyCallHelper(
   pyfunc: PyCallable,
   args: any[]
 ): Promise<any> {
+  const pyodide = await getPyodide();
+  clearSignals(pyodide._module);
   try {
     if (pyfunc.callWithOptions) {
       return await pyfunc.callWithOptions(

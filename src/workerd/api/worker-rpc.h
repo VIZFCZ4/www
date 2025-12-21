@@ -38,10 +38,17 @@ class RpcSerializerExternalHandler final: public jsg::Serializer::ExternalHandle
  public:
   using GetStreamSinkFunc = kj::Function<rpc::JsValue::StreamSink::Client()>;
 
+  enum StubOwnership { TRANSFER, DUPLICATE };
+
   // `getStreamSinkFunc` will be called at most once, the first time a stream is encountered in
   // serialization, to get the StreamSink that should be used.
-  RpcSerializerExternalHandler(GetStreamSinkFunc getStreamSinkFunc)
-      : getStreamSinkFunc(kj::mv(getStreamSinkFunc)) {}
+  RpcSerializerExternalHandler(StubOwnership stubOwnership, GetStreamSinkFunc getStreamSinkFunc)
+      : stubOwnership(stubOwnership),
+        getStreamSinkFunc(kj::mv(getStreamSinkFunc)) {}
+
+  inline StubOwnership getStubOwnership() {
+    return stubOwnership;
+  }
 
   using BuilderCallback = kj::Function<void(rpc::JsValue::External::Builder)>;
 
@@ -90,6 +97,7 @@ class RpcSerializerExternalHandler final: public jsg::Serializer::ExternalHandle
       jsg::Lock& js, jsg::Serializer& serializer, v8::Local<v8::Proxy> proxy) override;
 
  private:
+  StubOwnership stubOwnership;
   GetStreamSinkFunc getStreamSinkFunc;
 
   kj::Vector<BuilderCallback> externals;
@@ -440,6 +448,13 @@ class JsRpcSessionCustomEvent final: public WorkerInterface::CustomEvent {
         typeId(typeId),
         wrapperModule(kj::mv(wrapperModule)) {}
 
+  ~JsRpcSessionCustomEvent() noexcept(false) {
+    if (capFulfiller->isWaiting()) {
+      capFulfiller->reject(
+          KJ_EXCEPTION(DISCONNECTED, "JsRpcSessionCustomEvent was destroyed before completion"));
+    }
+  }
+
   kj::Promise<Result> run(kj::Own<IoContext::IncomingRequest> incomingRequest,
       kj::Maybe<kj::StringPtr> entrypointName,
       Frankenvalue props,
@@ -454,7 +469,7 @@ class JsRpcSessionCustomEvent final: public WorkerInterface::CustomEvent {
   }
 
   kj::Maybe<tracing::EventInfo> getEventInfo() const override {
-    return tracing::EventInfo(tracing::JsRpcEventInfo(kj::str("")));
+    return tracing::EventInfo(tracing::JsRpcEventInfo(nullptr));
   }
 
   rpc::JsRpcTarget::Client getCap() {

@@ -34,93 +34,65 @@ GITHUB_RELEASE_FILE_URL_TEMPLATE = (
     "https://github.com/{owner}/{repo}/releases/download/v{version}/{file}"
 )
 
-HTTP_ARCHIVE_TEMPLATE = (
+EXT_DEP_TEMPLATE = (
     TOP
     + """
-load("@//:build/http.bzl", "http_archive")
-
-URL = "{url}"
-STRIP_PREFIX = "{prefix}"
-SHA256 = "{sha256}"
-TYPE = "{type}"{extra_exports}
-
-def {macro_name}():
-    http_archive(
-        name = "{name}",
-        url = URL,
-        strip_prefix = STRIP_PREFIX,
-        type = TYPE,
-        sha256 = SHA256,{extra_attrs}
-    )
+{ext_name} = use_extension("{ext_file}", "{ext_name}")
+{ext_name}.{rule_name}({attrs}
+)
+use_repo({ext_name}, "{name}")
 """
 )
 
-GITHUB_RELEASE_ARCHIVE_TEMPLATE = (
+
+REPO_RULE_DEP_TEMPLATE = (
     TOP
     + """
-load("@//:build/http.bzl", "http_archive")
+{rule_name} = use_repo_rule("{rule_file}", "{rule_name}")
 
-TAG_NAME = "{tag_name}"
-URL = "{url}"
-STRIP_PREFIX = "{prefix}"
-SHA256 = "{sha256}"
-TYPE = "{type}"
-
-def {macro_name}():
-    http_archive(
-        name = "{name}",
-        url = URL,
-        strip_prefix = STRIP_PREFIX,
-        type = TYPE,
-        sha256 = SHA256,{extras}
-    )
+{rule_name}({attrs}
+)
 """
 )
 
-GITHUB_RELEASE_FILE_TEMPLATE = (
-    TOP
-    + """
-load("@//:build/http.bzl", "http_file")
-
-TAG_NAME = "{tag_name}"
-URL = "{url}"
-SHA256 = "{sha256}"
-
-def {macro_name}():
-    http_file(
-        name = "{name}",
-        url = URL,
-        executable = True,
-        sha256 = SHA256,{extras}
-    )
-"""
-)
-
-NEW_GIT_REPOSITORY_TEMPLATE = (
-    TOP
-    + """
-load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
-
-URL = "{url}"
-COMMIT = "{commit}"
-
-def {macro_name}():
-    git_repository(
-        name = "{name}",
-        remote = URL,
-        commit = COMMIT,{extras}
-    )
-"""
-)
-
-V8_REVISION_TEMPLATE = (
-    TOP
-    + """
-V8_COMMIT="{v8_commit}"
-"""
-)
 
 GITHUB_ACCESS_TOKEN = ""
+
+
+def format_attr_list(attrs):
+    if not attrs:
+        return ""
+
+    # buildifier (Bazel build file formatter) requires keys to be sorted, except name goes first
+    attr_list = sorted(attrs.items(), key=lambda kv: kv[0] if kv[0] != "name" else "")
+
+    return "\n" + "\n".join(f"    {k} = {format_attr(v)}," for k, v in attr_list)
+
+
+def format_attr(v):
+    if isinstance(v, (bool, int)):
+        return str(v)
+    else:
+        return json.dumps(v)
+
+
+def format_repo_rule_dep(repo, rule_file, rule_name, attrs):
+    return REPO_RULE_DEP_TEMPLATE.format(
+        rule_file=rule_file,
+        rule_name=rule_name,
+        name=repo["name"],
+        attrs=format_attr_list(repo_attributes(repo) | attrs),
+    )
+
+
+def format_ext_dep(repo, ext_file, ext_name, rule_name, attrs):
+    return EXT_DEP_TEMPLATE.format(
+        ext_file=ext_file,
+        ext_name=ext_name,
+        rule_name=rule_name,
+        name=repo["name"],
+        attrs=format_attr_list(repo_attributes(repo) | attrs),
+    )
 
 
 def macro_name(repo):
@@ -183,23 +155,24 @@ def get_url_content_sha256(url):
     return hashlib.sha256(urllib.request.urlopen(url).read()).hexdigest()
 
 
-def extra_attributes(repo):
-    extras = ""
-    if "build_file" in repo:
-        extras += f'\n        build_file = "{repo["build_file"]}",'
-    if "build_file_content" in repo:
-        extras += f'\n        build_file_content = "{repo["build_file_content"]}",'
-    if "repo_mapping" in repo:
-        extras += f"\n        repo_mapping = {json.dumps(repo['repo_mapping'])},"
-    if "patches" in repo:
-        patches = str(repo["patches"]).replace("'", '"')
-        extras += f"\n        patches = {patches},"
-        extras += '\n        patch_args = ["-p1"],'
-    if "downloaded_file_path" in repo:
-        p = repo["downloaded_file_path"]
-        extras += f'\n        downloaded_file_path = "{p}",'
+def repo_attributes(repo):
+    repo_attrs = {}
 
-    return extras
+    for option in (
+        "name",
+        "build_file",
+        "repo_mapping",
+        "downloaded_file_path",
+        "build_file_content",
+        "patches",
+    ):
+        if option in repo:
+            repo_attrs[option] = repo[option]
+
+    if "patches" in repo_attrs:
+        repo_attrs["patch_args"] = ["-p1"]
+
+    return repo_attrs
 
 
 def gen_github_tarball(repo):
@@ -235,19 +208,17 @@ def gen_github_tarball(repo):
     else:
         sha256 = get_url_content_sha256(url)
 
-    extra_exports = f'\nCOMMIT = "{commit}"'
-    if "patches" in repo:
-        extra_exports += f"\nPATCHES = {repo['patches']}".replace("'", '"')
-
-    return HTTP_ARCHIVE_TEMPLATE.format(
-        name=repo["name"],
-        url=url,
-        prefix=prefix,
-        sha256=sha256,
-        macro_name=macro_name(repo),
-        extra_attrs=extra_attributes(repo),
-        extra_exports=extra_exports,
-        type="tgz",
+    return format_ext_dep(
+        repo,
+        ext_file="@//:build/exts/http.bzl",
+        ext_name="http",
+        rule_name="archive",
+        attrs=dict(
+            url=url,
+            strip_prefix=prefix,
+            sha256=sha256,
+            type="tgz",
+        ),
     )
 
 
@@ -323,24 +294,25 @@ def gen_github_release(repo):
             with tarfile.open(fileobj=io.BytesIO(content)) as tgz:
                 prefix = os.path.commonprefix(tgz.getnames())
 
-        return GITHUB_RELEASE_ARCHIVE_TEMPLATE.format(
-            name=repo["name"],
-            url=url,
-            prefix=prefix,
-            sha256=sha256,
-            macro_name=macro_name(repo),
-            type=type,
-            extras=extra_attributes(repo),
-            tag_name=release["tag_name"],
+        return format_ext_dep(
+            repo,
+            ext_file="@//:build/exts/http.bzl",
+            ext_name="http",
+            rule_name="archive",
+            attrs=dict(
+                url=url,
+                strip_prefix=prefix,
+                sha256=sha256,
+                type=type,
+            ),
         )
     elif file_type == "executable":
-        return GITHUB_RELEASE_FILE_TEMPLATE.format(
-            name=repo["name"],
-            url=url,
-            sha256=sha256,
-            macro_name=macro_name(repo),
-            extras=extra_attributes(repo),
-            tag_name=release["tag_name"],
+        return format_ext_dep(
+            repo,
+            ext_file="@//:build/exts/http.bzl",
+            ext_name="http",
+            rule_name="file",
+            attrs=dict(url=url, sha256=sha256, executable=True),
         )
     else:
         raise UnsupportedException("Unsupported file_type: " + file_type)
@@ -388,52 +360,14 @@ def gen_git_clone(repo):
         else:
             print(commit[:7], end="")
 
-    return NEW_GIT_REPOSITORY_TEMPLATE.format(
-        name=repo["name"],
-        macro_name=macro_name(repo),
-        url=url,
-        commit=commit,
-        extras=extra_attributes(repo),
-    )
-
-
-def gen_crate(repo):
-    name = repo["name"]
-
-    # find crate's latest version
-    crates_json_url = f"https://crates.io/api/v1/crates/{name}"
-    crate = json.loads(urllib.request.urlopen(crates_json_url).read())
-    version = crate["versions"][0]
-
-    if "freeze_version" in repo:
-        last_version = version
-        version = next(
-            v for v in crate["versions"] if v["num"] == repo["freeze_version"]
-        )
-        if last_version["num"] != version["num"]:
-            print(
-                "frozen, update available ",
-                version["num"],
-                " -> ",
-                last_version["num"],
-                end="",
-            )
-    else:
-        print(version["num"], end="")
-
-    prefix = f"{name}-{version['num']}"
-    url = f"https://crates.io{version['dl_path']}"
-    extra_exports = f'\nVERSION = "{version["num"]}"'
-
-    return HTTP_ARCHIVE_TEMPLATE.format(
-        name=repo["name"],
-        url=url,
-        prefix=prefix,
-        sha256=version["checksum"],
-        macro_name=macro_name(repo),
-        extra_attrs=extra_attributes(repo),
-        extra_exports=extra_exports,
-        type="tgz",
+    return format_repo_rule_dep(
+        repo,
+        rule_file="@bazel_tools//tools/build_defs/repo:git.bzl",
+        rule_name="git_repository",
+        attrs=dict(
+            remote=url,
+            commit=commit,
+        ),
     )
 
 
@@ -444,43 +378,40 @@ def gen_repo_str(repo):
         return gen_github_release(repo)
     elif repo["type"] == "git_clone":
         return gen_git_clone(repo)
-    elif repo["type"] == "crate":
-        return gen_crate(repo)
     else:
         raise UnsupportedException(f"Unsupported repo type: {repo['type']}")
 
 
-def gen_repo_bzl(repo):
+def gen_repo_bzl(repo, output_dir):
     print("Checking", repo["name"], "... ", end="", flush=True)
     if TARGET_FILTER is not None and not repo["name"].startswith(TARGET_FILTER):
         print("skipped")
         return
-    with (GEN_DIR / f"{macro_name(repo)}.bzl").open("w") as bzl_file:
+    with (output_dir / f"{macro_name(repo)}.MODULE.bazel").open("w") as bzl_file:
         bzl_file.write(gen_repo_str(repo))
     print()
 
 
-def gen_deps_bzl(deps, deps_bzl, is_shared=False):
-    deps_bzl_content = TOP
+def gen_deps_bzl(deps, deps_bzl, output_dir):
+    deps_bzl_content = TOP + "\n"
     macro_names = [macro_name(repo) for repo in deps["repositories"]]
-    package = "@workerd" if is_shared else "@"
+    subdir_name = output_dir.name
 
     for name in sorted(macro_names):
         # Buildifier prefers load statements to be sorted alphabetically.
-        deps_bzl_content += f'\nload("{package}//build/deps:gen/{name}.bzl", "{name}")'
-    deps_bzl_content += "\n\ndef deps_gen():\n"
-    for name in macro_names:
-        deps_bzl_content += f"    {name}()\n"
+        deps_bzl_content += (
+            f'include("//build/deps:gen/{subdir_name}/{name}.MODULE.bazel")\n'
+        )
 
     with deps_bzl.open("w") as f:
         f.write(deps_bzl_content)
 
 
-def process_deps(deps, deps_bzl, is_shared=False):
+def process_deps(deps, deps_bzl, output_dir):
     for repo in deps["repositories"]:
-        gen_repo_bzl(repo)
+        gen_repo_bzl(repo, output_dir)
 
-    gen_deps_bzl(deps, deps_bzl, is_shared)
+    gen_deps_bzl(deps, deps_bzl, output_dir)
 
 
 def strip_comments(text):
@@ -530,13 +461,17 @@ Alternatively, install the gh CLI tool to save time <https://github.com/cli/cli#
 
 def process_config(deps_file):
     deps_path = SCRIPT_DIR / deps_file
-    bzl_path = (GEN_DIR / deps_file).with_suffix(".bzl")
-    is_shared = deps_file == "shared_deps.jsonc"
+    # Extract subdirectory name (e.g., "deps.jsonc" -> "deps")
+    output_dir = GEN_DIR / Path(deps_file).stem
+    bzl_path = output_dir / Path(deps_file).with_suffix(".MODULE.bazel").name
+
+    # Create output directory if it doesn't exist
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         with deps_path.open() as fp:
             json_text = strip_comments(fp.read())
-            process_deps(json.loads(json_text), bzl_path, is_shared)
+            process_deps(json.loads(json_text), bzl_path, output_dir)
     except FileNotFoundError:
         pass
 
@@ -546,7 +481,8 @@ def run():
         global GITHUB_ACCESS_TOKEN
         GITHUB_ACCESS_TOKEN = read_access_token()
 
-        for f in GEN_DIR.glob("*.bzl"):
+        # Clean all .bazel files in all subdirectories
+        for f in GEN_DIR.glob("**/*.bazel"):
             f.unlink()
 
     for deps in ALL_DEPS:

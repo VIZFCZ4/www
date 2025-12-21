@@ -97,9 +97,9 @@ class Navigator: public jsg::Object {
     return "en"_kj;
   }
 
-  kj::Array<kj::String> getLanguages() {
-    auto builder = kj::heapArrayBuilder<kj::String>(1);
-    builder.add(kj::str("en"));
+  kj::Array<kj::StringPtr> getLanguages() {
+    auto builder = kj::heapArrayBuilder<kj::StringPtr>(1);
+    builder.add("en"_kjc);
     return builder.finish();
   }
 
@@ -118,6 +118,10 @@ class Navigator: public jsg::Object {
     if (reader.getWebFileSystem()) {
       JSG_LAZY_READONLY_INSTANCE_PROPERTY(storage, getStorage);
     }
+
+    JSG_TS_OVERRIDE({
+      sendBeacon(url: string, body?: BodyInit): boolean;
+    });
   }
 };
 

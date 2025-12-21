@@ -59,7 +59,7 @@ on:
         type: boolean
         required: false
         default: false
-      disable_job_timeouts:
+      build_container_images:
         type: boolean
         required: false
         default: false
@@ -78,8 +78,6 @@ permissions:
 jobs:
   bazel:
     runs-on: ${{ inputs.image }}
-    # Cancel all builds taking longer than an hour, except on Windows
-    timeout-minutes: ${{ (inputs.disable_job_timeouts && 360) || (inputs.os_name == 'windows' && 90) || 60 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,6 +123,15 @@ jobs:
         # 'Show timestamps' on the web interface)
         run: |
           bazel build --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev  --config=ci ${{ inputs.extra_bazel_args }} //...
+      - name: Build and load container images
+        if: inputs.build_container_images
+        run: |
+          docker context use default
+          echo "Docker info:"
+          docker info
+          echo "Docker version:"
+          docker version
+          bazel run --remote_cache=https://bazel:${{ secrets.BAZEL_CACHE_KEY }}@bazel-remote-cache.devprod.cloudflare.dev --config=ci ${{ inputs.extra_bazel_args }} //images:load_all
       - name: Bazel test
         if: inputs.run_tests
         run: |

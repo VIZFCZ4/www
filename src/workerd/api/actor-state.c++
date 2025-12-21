@@ -215,8 +215,7 @@ kj::Promise<void> updateStorageDeletes(
 
 // Return the id of the current actor (or the empty string if there is no current actor).
 kj::Maybe<kj::String> getCurrentActorId() {
-  if (IoContext::hasCurrent()) {
-    IoContext& ioContext = IoContext::current();
+  KJ_IF_SOME(ioContext, IoContext::tryCurrent()) {
     KJ_IF_SOME(actor, ioContext.getActor()) {
       KJ_SWITCH_ONEOF(actor.getId()) {
         KJ_CASE_ONEOF(s, kj::String) {
@@ -854,7 +853,10 @@ kj::Promise<kj::String> DurableObjectStorage::onNextSessionRestoreBookmark(kj::S
 }
 
 kj::Promise<void> DurableObjectStorage::waitForBookmark(kj::String bookmark) {
-  return cache->waitForBookmark(bookmark);
+  auto& context = IoContext::current();
+  auto span = context.makeTraceSpan("durable_object_storage_waitForBookmark"_kjc);
+
+  return cache->waitForBookmark(bookmark, span).attach(kj::mv(span));
 }
 
 void DurableObjectStorage::ensureReplicas() {
@@ -929,7 +931,7 @@ class FacetOutgoingFactory final: public Fetcher::OutgoingFactory {
     return context.getMetrics().wrapActorSubrequestClient(context.getSubrequest(
         [&](TraceContext& tracing, IoChannelFactory& ioChannelFactory) {
       if (tracing.span.isObserved()) {
-        tracing.span.setTag("facet_name"_kjc, kj::str(name));
+        tracing.span.setTag("facet_name"_kjc, name.asPtr());
       }
 
       // Lazily initialize actorChannel

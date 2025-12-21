@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "channel-token.h"
+
 #include <workerd/api/memory-cache.h>
 #include <workerd/api/pyodide/pyodide.h>
 #include <workerd/io/worker.h>
@@ -32,7 +34,7 @@ using api::pyodide::PythonConfig;
 //
 // The purpose of this class is to implement the core logic independently of the CLI itself,
 // in such a way that it can be unit-tested. workerd.c++ implements the CLI wrapper around this.
-class Server final: private kj::TaskSet::ErrorHandler {
+class Server final: private kj::TaskSet::ErrorHandler, private ChannelTokenHandler::Resolver {
  public:
   Server(kj::Filesystem& fs,
       kj::Timer& timer,
@@ -65,6 +67,9 @@ class Server final: private kj::TaskSet::ErrorHandler {
   }
   void enableControl(uint fd) {
     controlOverride = kj::heap<kj::FdOutputStream>(fd);
+  }
+  void enableDebugPort(kj::String addr) {
+    debugPortOverride = kj::mv(addr);
   }
   void setPackageDiskCacheRoot(kj::Maybe<kj::Own<const kj::Directory>>&& dkr) {
     pythonConfig.packageDiskCacheRoot = kj::mv(dkr);
@@ -134,6 +139,8 @@ class Server final: private kj::TaskSet::ErrorHandler {
 
   kj::Own<api::MemoryCacheProvider> memoryCacheProvider;
 
+  ChannelTokenHandler channelTokenHandler;
+
   kj::HashMap<kj::String, kj::OneOf<kj::String, kj::Own<kj::ConnectionReceiver>>> socketOverrides;
   kj::HashMap<kj::String, kj::String> directoryOverrides;
 
@@ -146,6 +153,7 @@ class Server final: private kj::TaskSet::ErrorHandler {
   kj::Maybe<kj::String> inspectorOverride;
   kj::Maybe<kj::Own<InspectorServiceIsolateRegistrar>> inspectorIsolateRegistrar;
   kj::Maybe<kj::Own<kj::FdOutputStream>> controlOverride;
+  kj::Maybe<kj::String> debugPortOverride;
 
   struct GlobalContext;
   // General context needed to construct workers. Initialized early in run().
@@ -241,10 +249,30 @@ class Server final: private kj::TaskSet::ErrorHandler {
   kj::Own<ActorClass> lookupActorClass(
       config::ServiceDesignator::Reader designator, kj::String errorContext);
 
+  // Pretty similar to lookupService() and lookupActorClass(), but these callbacks are called by
+  // the `ChannelTokenHandler` when decoding tokens.
+  kj::Own<IoChannelFactory::SubrequestChannel> resolveEntrypoint(
+      kj::StringPtr serviceName, kj::Maybe<kj::StringPtr> entrypoint, Frankenvalue props) override;
+  kj::Own<IoChannelFactory::ActorClassChannel> resolveActorClass(
+      kj::StringPtr serviceName, kj::Maybe<kj::StringPtr> entrypoint, Frankenvalue props) override;
+
+  kj::Array<byte> encodeChannelToken(IoChannelFactory::ChannelTokenUsage usage,
+      kj::StringPtr serviceName,
+      kj::Maybe<kj::StringPtr> entrypoint,
+      Frankenvalue& props);
+
+  void decodeChannelToken(IoChannelFactory::ChannelTokenUsage usage,
+      kj::ArrayPtr<const byte> token,
+      kj::FunctionParam<void(
+          kj::StringPtr serviceName, kj::Maybe<kj::StringPtr> entrypoint, Frankenvalue props)>
+          callback);
+
   kj::Promise<void> listenHttp(kj::Own<kj::ConnectionReceiver> listener,
       kj::Own<Service> service,
       kj::StringPtr physicalProtocol,
       kj::Own<HttpRewriter> rewriter);
+
+  kj::Promise<void> listenDebugPort(kj::Own<kj::ConnectionReceiver> listener);
 
   class InvalidConfigService;
   class InvalidConfigActorClass;
@@ -254,7 +282,9 @@ class Server final: private kj::TaskSet::ErrorHandler {
   class DiskDirectoryService;
   class WorkerService;
   class WorkerEntrypointService;
+  class WorkerdBootstrapImpl;
   class HttpListener;
+  class DebugPortListener;
 
   struct ErrorReporter;
   struct ConfigErrorReporter;

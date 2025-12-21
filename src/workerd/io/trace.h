@@ -43,7 +43,7 @@ namespace tracing {
 class TraceId final {
  public:
   // A null trace ID. This is only acceptable for use in tests.
-  constexpr TraceId(decltype(nullptr)): low(0), high(0) {}
+  constexpr TraceId(decltype(nullptr)) {}
 
   // A trace ID with the given low and high values.
   constexpr TraceId(uint64_t low, uint64_t high): low(low), high(high) {}
@@ -580,9 +580,6 @@ struct Attribute final {
 
   explicit Attribute(kj::ConstString name, Value&& value);
   explicit Attribute(kj::ConstString name, Values&& values);
-
-  template <AttributeValue V>
-  explicit Attribute(kj::ConstString name, V v): Attribute(kj::mv(name), Value(kj::mv(v))) {}
 
   template <AttributeValue V>
   explicit Attribute(kj::ConstString name, kj::Array<V> vals)
@@ -1152,40 +1149,7 @@ struct TraceContext {
   KJ_DISALLOW_COPY(TraceContext);
 
   // Set a tag on both the internal span and user span.
-  void setTag(kj::ConstString key, SpanBuilder::TagInitValue value) {
-    // We need to duplicate the key and value since both are move-only types.
-    // Clone the value based on its type.
-    KJ_SWITCH_ONEOF(value) {
-      KJ_CASE_ONEOF(s, kj::StringPtr) {
-        span.setTag(key.clone(), s);
-        userSpan.setTag(kj::mv(key), s);
-      }
-      KJ_CASE_ONEOF(s, kj::String) {
-        span.setTag(key.clone(), kj::str(s));
-        userSpan.setTag(kj::mv(key), kj::mv(s));
-      }
-      KJ_CASE_ONEOF(s, kj::LiteralStringConst) {
-        span.setTag(key.clone(), s);
-        userSpan.setTag(kj::mv(key), s);
-      }
-      KJ_CASE_ONEOF(s, kj::ConstString) {
-        span.setTag(key.clone(), s.clone());
-        userSpan.setTag(kj::mv(key), kj::mv(s));
-      }
-      KJ_CASE_ONEOF(b, bool) {
-        span.setTag(key.clone(), b);
-        userSpan.setTag(kj::mv(key), b);
-      }
-      KJ_CASE_ONEOF(d, double) {
-        span.setTag(key.clone(), d);
-        userSpan.setTag(kj::mv(key), d);
-      }
-      KJ_CASE_ONEOF(i, int64_t) {
-        span.setTag(key.clone(), i);
-        userSpan.setTag(kj::mv(key), i);
-      }
-    }
-  }
+  void setTag(kj::ConstString key, SpanBuilder::TagInitValue value);
 
   SpanBuilder span;
   SpanBuilder userSpan;
